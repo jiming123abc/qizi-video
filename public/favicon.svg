@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a0d3e"/>
+      <stop offset="100%" style="stop-color:#4a3e8a"/>
+    </linearGradient>
+    <linearGradient id="text" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#ffeaff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <text
+    x="32" y="45"
+    text-anchor="middle"
+    font-family="'PingFang SC','Microsoft YaHei','Heiti SC','SimHei','Hiragino Sans GB',sans-serif"
+    font-size="42"
+    stroke="#d6c8ff"
+    stroke-width="1.5"
+    stroke-linejoin="round"
+    paint-order="stroke fill"
+    fill="url(#text)"
+  >柒</text>
+</svg>

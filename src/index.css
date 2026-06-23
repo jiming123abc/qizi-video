@@ -1,0 +1,148 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=Manrope:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-background: #0c0e14;
+  --color-surface-bright: #292c35;
+  --color-on-secondary-fixed: #003a45;
+  --color-on-primary-container: #2b006e;
+  --color-secondary-fixed: #65e1ff;
+  --color-error-container: #a70138;
+  --color-surface-container-high: #1d1f27;
+  --color-inverse-on-surface: #53555c;
+  --color-inverse-primary: #6e3bd7;
+  --color-tertiary-container: #de4bf4;
+  --color-on-surface: #e5e4ed;
+  --color-surface-variant: #23262e;
+  --color-tertiary-fixed-dim: #ef6eff;
+  --color-error-dim: #d73357;
+  --color-surface-tint: #ba9eff;
+  --color-primary-fixed-dim: #a27cff;
+  --color-on-primary: #39008c;
+  --color-on-tertiary-fixed: #300038;
+  --color-primary-fixed: #ae8dff;
+  --color-outline: #74757d;
+  --color-surface-container-low: #11131a;
+  --color-secondary-fixed-dim: #48d4f3;
+  --color-surface-container: #171921;
+  --color-on-secondary-fixed-variant: #005969;
+  --color-on-secondary: #004b58;
+  --color-on-surface-variant: #aaaab3;
+  --color-on-background: #e5e4ed;
+  --color-on-primary-fixed-variant: #370086;
+  --color-error: #ff6e84;
+  --color-secondary: #53ddfc;
+  --color-on-tertiary-container: #19001e;
+  --color-on-error-container: #ffb2b9;
+  --color-surface: #0c0e14;
+  --color-surface-dim: #0c0e14;
+  --color-on-secondary-container: #ecfaff;
+  --color-on-primary-fixed: #000000;
+  --color-surface-container-lowest: #000000;
+  --color-outline-variant: #46484f;
+  --color-surface-container-highest: #23262e;
+  --color-primary-dim: #8455ef;
+  --color-inverse-surface: #faf8ff;
+  --color-tertiary-dim: #ec63ff;
+  --color-tertiary: #ec63ff;
+  --color-secondary-dim: #40ceed;
+  --color-on-tertiary: #3d0047;
+  --color-secondary-container: #00687a;
+  --color-on-tertiary-fixed-variant: #660075;
+  --color-primary-container: #ae8dff;
+  --color-on-error: #490013;
+  --color-tertiary-fixed: #f487ff;
+  --color-primary: #ba9eff;
+
+  --font-headline: "Space Grotesk", "Noto Sans SC", sans-serif;
+  --font-body: "Inter", "Noto Sans SC", sans-serif;
+  --font-label: "Manrope", "Noto Sans SC", sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-on-surface);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    min-height: max(884px, 100dvh);
+    overflow-x: hidden;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: rgba(23, 25, 33, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid rgba(186, 158, 255, 0.15);
+  }
+  
+  .holographic-text {
+    text-shadow: 0 0 10px rgba(186, 158, 255, 0.4), 0 0 20px rgba(83, 221, 252, 0.2);
+  }
+  
+  .text-gradient-purple {
+    background: linear-gradient(to right, var(--color-primary), var(--color-tertiary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .video-no-controls::-webkit-media-controls {
+    display: none !important;
+  }
+  .video-no-controls::-webkit-media-controls-enclosure {
+    display: none !important;
+  }
+  .video-no-controls::-webkit-media-controls-panel {
+    display: none !important;
+  }
+  .video-no-controls::-webkit-media-controls-play-button {
+    display: none !important;
+  }
+  .video-no-controls::-webkit-media-controls-start-playback-button {
+    display: none !important;
+  }
+
+  .media-card-video-container {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    contain: layout paint size;
+    clip-path: inset(0);
+    z-index: 1;
+  }
+
+  .media-card-video-container video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    contain: layout paint size;
+    max-width: 100%;
+    max-height: 100%;
+    z-index: 0;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+}
