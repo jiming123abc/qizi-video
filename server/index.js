@@ -31,8 +31,8 @@ if (!fs.existsSync(path.join(uploadDir, 'videos'))) {
 }
 
 // OSS 配置（优先使用无前缀的环境变量，支持向后兼容旧的 REACT_APP_ 前缀）
-const OSS_ACCESS_KEY_ID = process.env.OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID_DEV;
-const OSS_ACCESS_KEY_SECRET = process.env.OSS_ACCESS_KEY_SECRET || process.env.OSS_ACCESS_KEY_SECRET_DEV;
+const OSS_ACCESS_KEY_ID = process.env.OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID_DEV || process.env.REACT_APP_OSS_ACCESS_KEY_ID;
+const OSS_ACCESS_KEY_SECRET = process.env.OSS_ACCESS_KEY_SECRET || process.env.OSS_ACCESS_KEY_SECRET_DEV || process.env.REACT_APP_OSS_ACCESS_KEY_SECRET;
 const OSS_BUCKET = process.env.OSS_BUCKET || process.env.REACT_APP_OSS_BUCKET;
 const OSS_REGION = process.env.OSS_REGION || process.env.REACT_APP_OSS_REGION || 'oss-cn-beijing';
 
