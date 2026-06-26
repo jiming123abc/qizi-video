@@ -54,6 +54,8 @@ coverage/
 # Trae IDE
 .trae/
 
-# Documentation (optional - uncomment if docs should be private)
-# md/
-# *.md
+# Documentation / Planning docs
+md/
+*.md
+!README.md
+!TECHNICAL_GUIDE.md
