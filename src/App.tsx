@@ -8,13 +8,24 @@ export default function Video2App() {
   const [route, setRoute] = useState<Video2Route>({ page: 'list' });
 
   useEffect(() => {
-    const path = window.location.pathname;
-    const projectMatch = path.match(/^\/project\/(\d+)$/);
-    if (projectMatch) {
-      setRoute({ page: 'project', projectId: parseInt(projectMatch[1]) });
-      return;
-    }
-    setRoute({ page: 'list' });
+    const parseRoute = () => {
+      const path = window.location.pathname;
+      const projectMatch = path.match(/^\/project\/(\d+)$/);
+      if (projectMatch) {
+        setRoute({ page: 'project', projectId: parseInt(projectMatch[1]) });
+        return;
+      }
+      setRoute({ page: 'list' });
+    };
+
+    parseRoute();
+
+    const handlePopState = () => {
+      parseRoute();
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   const navigateToProject = (projectId: number) => {

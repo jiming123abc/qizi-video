@@ -19,9 +19,22 @@ interface FFmpegWasmInstance {
 export type VideoBitrateInfo = {
   bitrateKbps: number | null;
   duration: number | null;
+  width?: number;
+  height?: number;
+  resolution?: '1080p' | '720p' | '480p' | 'other';
 };
 
-const TARGET_BITRATE_KBPS = 3000;
+// 动态目标码率配置
+const TARGET_BITRATE_CONFIG = {
+  '1080p': 3000,  // 1080p 及以上
+  '720p': 2000,    // 720p
+  '480p': 1000,    // 480p
+  'other': 1500    // 其他分辨率
+};
+
+// 默认码率（兼容旧配置）
+const DEFAULT_TARGET_BITRATE_KBPS = 3000;
+
 const FFMPEG_BASE = '/ffmpeg';
 const UMD_SCRIPT_URL = `${FFMPEG_BASE}/ffmpeg.umd.js`;
 const CORE_JS_URL = `${FFMPEG_BASE}/ffmpeg-core.js`;
@@ -29,6 +42,23 @@ const CORE_WASM_URL = `${FFMPEG_BASE}/ffmpeg-core.wasm`;
 
 let ffmpegWasmLoaded = false;
 let ffmpegWasmLoading: Promise<boolean> | null = null;
+
+/**
+ * 根据分辨率获取目标码率
+ */
+export function getTargetBitrate(resolution: string | undefined): number {
+  const res = resolution || 'other';
+  return TARGET_BITRATE_CONFIG[res as keyof typeof TARGET_BITRATE_CONFIG] || DEFAULT_TARGET_BITRATE_KBPS;
+}
+
+/**
+ * 根据分辨率判断是否需要压缩
+ * 注意：此函数不再提供"跳过"选项，高码率视频必须压缩
+ */
+export function needsCompression(bitrateKbps: number, resolution: string | undefined): boolean {
+  const targetBitrate = getTargetBitrate(resolution);
+  return bitrateKbps > targetBitrate;
+}
 
 export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo> {
   return new Promise((resolve) => {
@@ -38,24 +68,35 @@ export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo
     const url = URL.createObjectURL(file);
     let resolved = false;
 
-    const done = (bitrateKbps: number | null, duration: number | null) => {
+    const done = (bitrateKbps: number | null, duration: number | null, width?: number, height?: number) => {
       if (resolved) return;
       resolved = true;
       video.removeAttribute('src');
       video.load();
       document.body.removeChild(video);
       URL.revokeObjectURL(url);
-      resolve({ bitrateKbps, duration });
+      
+      // 根据高度判断分辨率
+      let resolution: '1080p' | '720p' | '480p' | 'other' = 'other';
+      if (height) {
+        if (height >= 1080) resolution = '1080p';
+        else if (height >= 720) resolution = '720p';
+        else if (height >= 480) resolution = '480p';
+      }
+      
+      resolve({ bitrateKbps, duration, width, height, resolution });
     };
 
     video.onloadedmetadata = () => {
       const duration = video.duration;
+      const width = video.videoWidth;
+      const height = video.videoHeight;
       if (duration && duration > 0 && isFinite(duration)) {
         const fileSizeBits = file.size * 8;
         const bitrateKbps = Math.round(fileSizeBits / duration / 1000);
-        done(bitrateKbps, duration);
+        done(bitrateKbps, duration, width, height);
       } else {
-        done(null, null);
+        done(null, null, width, height);
       }
     };
 
@@ -97,6 +138,7 @@ async function fetchAsBlobURL(url: string): Promise<string> {
 
 export async function compressVideoInBrowser(
   file: File,
+  targetResolution?: '1080p' | '720p' | '480p' | 'other',
   onProgress?: (stage: 'loading' | 'compressing', progress: number) => void
 ): Promise<{ success: true; file: File } | { success: false; message: string }> {
   try {
@@ -127,23 +169,28 @@ export async function compressVideoInBrowser(
     onProgress?.('loading', 100);
     onProgress?.('compressing', 0);
 
+    // 根据目标分辨率获取目标码率
+    const targetBitrate = getTargetBitrate(targetResolution);
     const inputFileName = 'input' + getFileExtension(file.name);
     const outputFileName = 'output.mp4';
 
     await ffmpeg.writeFile(inputFileName, new Uint8Array(await file.arrayBuffer()));
 
-    await ffmpeg.exec([
+    // 构建 ffmpeg 命令
+    const ffmpegArgs = [
       '-i', inputFileName,
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
-      '-b:v', `${TARGET_BITRATE_KBPS}k`,
-      '-maxrate', `${TARGET_BITRATE_KBPS}k`,
-      '-bufsize', `${TARGET_BITRATE_KBPS * 2}k`,
+      '-b:v', `${targetBitrate}k`,
+      '-maxrate', `${targetBitrate}k`,
+      '-bufsize', `${targetBitrate * 2}k`,
       '-crf', '28',
       '-movflags', '+faststart',
       '-y',
       outputFileName,
-    ]);
+    ];
+
+    await ffmpeg.exec(ffmpegArgs);
 
     const data = await ffmpeg.readFile(outputFileName);
     const newFileName = file.name.replace(/\.[^.]+$/, '.mp4');

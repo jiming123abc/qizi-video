@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, Link2, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, Link2, CheckCircle2, XCircle, Info } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
-import { uploadVideo2Image, uploadVideo2Video, detectFileType, uploadVideo2FromUrl } from '../lib/ossUtils';
+import { uploadVideo2Image, uploadVideo2Video, detectFileType, uploadVideo2FromUrl, checkVideoBitrate } from '../lib/ossUtils';
+import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from './WeChatShareHint';
+import { VideoCompressionDialog } from './VideoCompressionDialog';
+import { timeAgo, formatSize } from '../lib/utils';
 
 interface Project {
   id: number;
@@ -30,23 +33,6 @@ const DEFAULT_COVER =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 225"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#ec4899"/></linearGradient></defs><rect width="400" height="225" fill="url(#g)"/></svg>'
   );
 
-function formatSize(bytes: number): string {
-  if (!bytes) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function timeAgo(dateStr: string): string {
-  if (!dateStr) return '';
-  const date = new Date(dateStr);
-  const diff = (Date.now() - date.getTime()) / 1000;
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-  return `${Math.floor(diff / 86400)} 天前`;
-}
-
 // 从视频 URL 得到 OSS 截图 URL（仅用于参考素材是视频时的预览缩略图）
 function getVideoPoster(url: string): string {
   if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
@@ -68,7 +54,7 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
   const [createLoading, setCreateLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // 分享提示
   const [shareHintVisible, setShareHintVisible] = useState(false);
@@ -80,6 +66,21 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
   const [uploadDialogLoading, setUploadDialogLoading] = useState(false);
   const [uploadDialogUrl, setUploadDialogUrl] = useState('');
   const [uploadDialogMessage, setUploadDialogMessage] = useState('');
+
+  // 视频压缩选择对话框
+  const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
+  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
+  const pendingUploadRef = useRef<{ file: File; index: number; total: number; successCount: number; project: Project } | null>(null);
+
+  // 阿里云配置状态
+  const [aliyunConfigured, setAliyunConfigured] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/video2/aliyun/status')
+      .then(res => res.json())
+      .then(data => setAliyunConfigured(data.configured || false))
+      .catch(() => {});
+  }, []);
 
   // 每个项目的参考文件缓存（含封面作为第一个元素）
   const [referencesCache, setReferencesCache] = useState<Record<number, ReferenceItem[]>>({});
@@ -95,8 +96,8 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     }
   }, [fullscreenItem]);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
+  const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ message: msg, type });
     setTimeout(() => setToast(null), 2500);
   }, []);
 
@@ -184,9 +185,12 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
         setCreateDesc('');
         await loadProjects();
         showToast('项目创建成功');
+      } else {
+        showToast(data.message || '创建失败，请重试', 'error');
       }
     } catch (e) {
       console.error('创建项目失败:', e);
+      showToast('创建失败，请检查网络连接', 'error');
     } finally {
       setCreateLoading(false);
     }
@@ -224,6 +228,11 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     setShareHintVisible(true);
   };
 
+  const handleExport = (project: Project) => {
+    // 导出分镜脚本
+    window.open(`/api/video2/projects/${project.id}/export?format=docx&includeImages=true`, '_blank');
+  };
+
   const openUploadDialog = (project: Project) => {
     setUploadDialogProject(project);
     setUploadDialogTab('file');
@@ -258,6 +267,7 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     let firstUploadedUrl: string | null = null;
     let firstUploadedType: 'image' | 'video' | null = null;
     const project = uploadDialogProject;
+    let stopped = false;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -273,15 +283,25 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
             title: file.name
           });
           if (!firstUploadedUrl) {
-            firstUploadedUrl = ''; // 后端会返回 url，这里暂时无法拿到；下一行由 reference 查询补
+            firstUploadedUrl = '';
             firstUploadedType = 'image';
           }
         } else {
+          setUploadDialogMessage(`视频 ${i + 1}/${files.length}: 检测视频信息...`);
+          const decision = await checkVideoBitrate(file);
+          if (decision.decision === 'must_compress') {
+            pendingUploadRef.current = { file, index: i, total: files.length, successCount, project };
+            setPendingCompressionVideo(file);
+            setPendingCompressionDecision(decision);
+            setUploadDialogMessage(`视频 ${i + 1}/${files.length}: 需选择压缩方式`);
+            stopped = true;
+            break;
+          }
           await uploadVideo2Video(file, {
             projectId: project.id,
             reference: true,
             title: file.name,
-            compress: file.size > 50 * 1024 * 1024,
+            skipBitrateCheck: true,
             onProgress: p => {
               setUploadDialogMessage(`视频 ${i + 1}/${files.length}: ${p.message} (${p.progress}%)`);
             }
@@ -290,24 +310,119 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
         }
         successCount++;
         setUploadDialogMessage(`已上传 ${successCount} / ${files.length}`);
-      } catch (err) {
+      } catch (err: any) {
         console.error('上传失败:', err);
+        showToast('上传失败：' + (err.message || '请重试'), 'error');
       }
     }
 
-    // 刷新参考素材列表
-    await loadReferences(project.id);
-    const newRefs = referencesCache[project.id] || [];
-    // 将第一个上传的文件 url 设置为封面
-    if (newRefs.length > 0) {
-      const first = newRefs[0];
-      const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
-      await setProjectCover(project.id, coverUrl);
+    if (!stopped) {
+      await loadReferences(project.id);
+      const newRefs = referencesCache[project.id] || [];
+      if (newRefs.length > 0) {
+        const first = newRefs[0];
+        const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
+        await setProjectCover(project.id, coverUrl);
+      }
+      setUploadDialogMessage(`完成：成功 ${successCount}`);
+      setUploadDialogLoading(false);
+      setTimeout(() => setUploadDialogMessage(''), 3000);
+      e.target.value = '';
     }
-    setUploadDialogMessage(`完成：成功 ${successCount}`);
-    setUploadDialogLoading(false);
-    setTimeout(() => setUploadDialogMessage(''), 3000);
-    e.target.value = '';
+  };
+
+  const handleCompressionSelect = async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
+    const pending = pendingUploadRef.current;
+    const videoFile = pendingCompressionVideo;
+    const decision = pendingCompressionDecision;
+
+    setPendingCompressionVideo(null);
+    setPendingCompressionDecision(null);
+    pendingUploadRef.current = null;
+
+    if (method === 'cancel' || !pending || !videoFile || !decision) {
+      setUploadDialogLoading(false);
+      setUploadDialogMessage('已取消');
+      setTimeout(() => setUploadDialogMessage(''), 3000);
+      return;
+    }
+
+    const { file, index, total, successCount, project } = pending;
+    let currentSuccess = successCount;
+
+    try {
+      await uploadVideo2Video(file, {
+        projectId: project.id,
+        reference: true,
+        title: file.name,
+        compressionMethod: method,
+        skipBitrateCheck: true,
+        onProgress: p => {
+          setUploadDialogMessage(`视频 ${index + 1}/${total}: ${p.message} (${p.progress}%)`);
+        }
+      });
+      currentSuccess++;
+      setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
+
+      for (let i = index + 1; i < total; i++) {
+        const nextFile = (document.querySelector('input[type="file"]') as HTMLInputElement)?.files?.[i];
+        if (!nextFile) continue;
+        const detected = detectFileType(nextFile);
+        if (!detected.supported) continue;
+
+        try {
+          if (detected.type === 'image') {
+            await uploadVideo2Image(nextFile, {
+              projectId: project.id,
+              reference: true,
+              title: nextFile.name
+            });
+          } else {
+            setUploadDialogMessage(`视频 ${i + 1}/${total}: 检测视频信息...`);
+            const nextDecision = await checkVideoBitrate(nextFile);
+            if (nextDecision.decision === 'must_compress') {
+              pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project };
+              setPendingCompressionVideo(nextFile);
+              setPendingCompressionDecision(nextDecision);
+              setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
+              return;
+            }
+            await uploadVideo2Video(nextFile, {
+              projectId: project.id,
+              reference: true,
+              title: nextFile.name,
+              skipBitrateCheck: true,
+              onProgress: p => {
+                setUploadDialogMessage(`视频 ${i + 1}/${total}: ${p.message} (${p.progress}%)`);
+              }
+            });
+          }
+          currentSuccess++;
+          setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
+        } catch (err: any) {
+          console.error('上传失败:', err);
+          showToast('上传失败：' + (err.message || '请重试'), 'error');
+        }
+      }
+
+      await loadReferences(project.id);
+      const newRefs = referencesCache[project.id] || [];
+      if (newRefs.length > 0) {
+        const first = newRefs[0];
+        const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
+        await setProjectCover(project.id, coverUrl);
+      }
+      setUploadDialogMessage(`完成：成功 ${currentSuccess}`);
+      setUploadDialogLoading(false);
+      setTimeout(() => setUploadDialogMessage(''), 3000);
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      if (fileInput) fileInput.value = '';
+    } catch (err: any) {
+      console.error('压缩上传失败:', err);
+      setUploadDialogMessage('失败：' + (err.message || '压缩上传失败'));
+      setUploadDialogLoading(false);
+      showToast('上传失败：' + (err.message || '请重试'), 'error');
+    }
   };
 
   const handleUrlUploadToProject = async () => {
@@ -459,8 +574,17 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
                 key={project.id}
                 className="group relative rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-xl overflow-hidden hover:border-violet-400/30 hover:shadow-2xl hover:shadow-violet-500/20 transition-all"
               >
-                {/* 常驻右上角按钮：分享、删除 */}
+                {/* 常驻右上角按钮：分享、导出、删除 */}
                 <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleExport(project); }}
+                    title="导出分镜脚本"
+                    className="w-9 h-9 rounded-full border border-white/20 bg-white/5 backdrop-blur hover:bg-gradient-to-br hover:from-emerald-500 hover:to-teal-500 hover:border-transparent transition-all flex items-center justify-center"
+                  >
+                    <svg className="w-4 h-4 text-white/90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleShare(project); }}
                     title="分享项目"
@@ -866,11 +990,23 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
         mode={shareHintMode}
       />
 
+      {/* 视频压缩选择对话框 */}
+      <VideoCompressionDialog
+        isOpen={pendingCompressionVideo !== null}
+        onClose={() => { setPendingCompressionVideo(null); setPendingCompressionDecision(null); pendingUploadRef.current = null; }}
+        file={pendingCompressionVideo}
+        decision={pendingCompressionDecision}
+        aliyunConfigured={aliyunConfigured}
+        onSelect={handleCompressionSelect}
+      />
+
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[90] px-4 py-2.5 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl">
-          <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />
-          {toast}
+          {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />}
+          {toast.type === 'error' && <XCircle className="w-4 h-4 inline mr-2 text-red-400" />}
+          {toast.type === 'info' && <Info className="w-4 h-4 inline mr-2 text-blue-400" />}
+          {toast.message}
         </div>
       )}
     </div>

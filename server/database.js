@@ -1,6 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const dbPath = path.join(__dirname, 'data.db');
 const dbDir = path.dirname(dbPath);
@@ -20,297 +21,16 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initDatabase() {
   db.serialize(() => {
-    // Create tables
-    db.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        category TEXT NOT NULL,
-        tag TEXT,
-        shortDesc TEXT,
-        fullDesc TEXT,
-        img TEXT,
-        images TEXT,
-        videoUrl TEXT,
-        type TEXT DEFAULT 'image',
-        color TEXT,
-        bgGlow TEXT,
-        hidden INTEGER DEFAULT 0,
-        sortOrder INTEGER DEFAULT 0,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    // [DEPRECATED] 企业官网旧表，已废弃，不再创建
+    // 保留代码仅供参考，未来版本可删除
+    // portfolio_items, featured_works, home_content, team_members, categories_details
 
-    // Check if portfolio_items table has the images column, if not add it
-    db.all('PRAGMA table_info(portfolio_items)', (err, columns) => {
-      if (err) {
-        console.error('Error checking portfolio_items columns:', err);
-        return;
-      }
-
-      const columnNames = columns.map(col => col.name);
-      
-      if (!columnNames.includes('images')) {
-        db.run('ALTER TABLE portfolio_items ADD COLUMN images TEXT', (err) => {
-          if (err) {
-            console.error('Error adding images column to portfolio_items:', err);
-          } else {
-            console.log('Added images column to portfolio_items');
-          }
-        });
-      }
-
-      if (!columnNames.includes('hidden')) {
-        db.run('ALTER TABLE portfolio_items ADD COLUMN hidden INTEGER DEFAULT 0', (err) => {
-          if (err) {
-            console.error('Error adding hidden column to portfolio_items:', err);
-          } else {
-            console.log('Added hidden column to portfolio_items');
-          }
-        });
-      }
-    });
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS featured_works (
-        id TEXT PRIMARY KEY,
-        portfolioId INTEGER NOT NULL,
-        sortOrder INTEGER DEFAULT 0,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (portfolioId) REFERENCES portfolio_items(id) ON DELETE CASCADE
-      )
-    `);
-// Create home_content table with all required columns
-    db.run(`
-      CREATE TABLE IF NOT EXISTS home_content (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        heroTitle TEXT,
-        heroGradientTitle TEXT,
-        heroSubtitle TEXT,
-        heroSlides TEXT,
-        heroImage TEXT,
-        shareTitle TEXT,
-        shareDescription TEXT,
-        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, () => {
-      // Add missing columns if table already exists
-      db.all('PRAGMA table_info(home_content)', (err, columns) => {
-        if (err) {
-          console.error('Error checking home_content columns:', err);
-          return;
-        }
-        const columnNames = columns.map(col => col.name);
-        
-        const addColumnIfNotExists = (columnName, columnDef) => {
-          if (!columnNames.includes(columnName)) {
-            db.run(`ALTER TABLE home_content ADD COLUMN ${columnName} ${columnDef}`, (err) => {
-              if (err) {
-                console.error(`Error adding ${columnName} column:`, err);
-              } else {
-                console.log(`Added ${columnName} column to home_content`);
-              }
-            });
-          }
-        };
-        
-        addColumnIfNotExists('heroGradientTitle', 'TEXT');
-        addColumnIfNotExists('heroImage', 'TEXT');
-        addColumnIfNotExists('shareTitle', 'TEXT');
-        addColumnIfNotExists('shareDescription', 'TEXT');
-      });
-    });
-  
-    db.run(`
-      CREATE TABLE IF NOT EXISTS team_members (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        role TEXT,
-        avatar TEXT,
-        bio TEXT,
-        fullDesc TEXT,
-        sortOrder INTEGER DEFAULT 0,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS categories_details (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        coverImage TEXT,
-        icon TEXT,
-        sortOrder INTEGER DEFAULT 0,
-        tag TEXT,
-        color TEXT,
-        bgGlow TEXT,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Insert initial data with a small delay to ensure tables are ready
-    setTimeout(insertInitialData, 500);
+    // video2 相关表在下方 video2InitDatabase 中创建
   });
 }
 
 function insertInitialData() {
-  db.get('SELECT COUNT(*) as count FROM portfolio_items', (err, row) => {
-    if (err) {
-      console.error('Error checking portfolio_items:', err);
-      return;
-    }
-    if (row.count === 0) {
-      const initialPortfolio = [
-        {
-          title: "AI智能广告片",
-          category: "AI影像创作",
-          tag: "新品",
-          shortDesc: "用AI一键生成专业广告视频",
-          fullDesc: "探索AI驱动的创意影像生成",
-          img: "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?q=80&w=800&auto=format&fit=crop",
-          type: "image",
-          color: "from-blue-500 to-cyan-600",
-          bgGlow: "bg-blue-500/20",
-          sortOrder: 0
-        }
-      ];
-
-      const insertStmt = db.prepare('INSERT INTO portfolio_items (title, category, tag, shortDesc, fullDesc, img, type, color, bgGlow, sortOrder) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-      initialPortfolio.forEach((item) => {
-        insertStmt.run(item.title, item.category, item.tag, item.shortDesc, item.fullDesc, item.img, item.type, item.color, item.bgGlow, item.sortOrder);
-      });
-      insertStmt.finalize();
-      console.log('Initial portfolio items inserted');
-    }
-  });
-
-
-
-  db.get('SELECT COUNT(*) as count FROM home_content', (err, row) => {
-    if (err) {
-      console.error('Error checking home_content:', err);
-      return;
-    }
-    if (row.count === 0) {
-      const defaultSlides = [
-        { id: 1, img: '/images/hero-video.png', label: 'Neural Stream', title: 'Ethereal Segment 01' },
-        { id: 2, img: '/images/ai-digital-human.png', label: 'Digital Human', title: 'Avatar Segment 02' },
-        { id: 3, img: '/images/ai-film-production.png', label: 'Film Production', title: 'Cinematic Segment 03' }
-      ];
-
-      db.run(
-        'INSERT INTO home_content (id, heroTitle, heroGradientTitle, heroSubtitle, heroSlides, heroImage, shareTitle, shareDescription) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          1,
-          '开启未来的',
-          '视界 Matrix',
-          '通过 AIGC 重新定义数字影像。我们将人类的情感与神经计算相结合，打造跨越维度的奇迹。',
-          JSON.stringify(defaultSlides),
-          '/images/hero-home.png',
-          '大连柒子文化发展有限公司',
-          '诚信立足 创新致远'
-        ],
-        (err) => {
-          if (err) console.error('Error inserting home content:', err);
-          else console.log('Initial home content inserted');
-        }
-      );
-    } else {
-      console.log('Home content already exists, skipping initialization');
-    }
-  });
-
-  db.get('SELECT COUNT(*) as count FROM team_members', (err, row) => {
-    if (err) {
-      console.error('Error checking team_members:', err);
-      return;
-    }
-    if (row.count === 0) {
-      const initialTeam = [
-        {
-          name: "Aris Vane",
-          role: "Chief Architect",
-          avatar: "/images/neon-avatar.png",
-          bio: "Neural network optimization and ethereal render engine lead.",
-          fullDesc: "Aris Vane is the visionary behind the Septem Ethereal Engine.",
-          sortOrder: 0
-        }
-      ];
-
-      const insertStmt = db.prepare('INSERT INTO team_members (name, role, avatar, bio, fullDesc, sortOrder) VALUES (?, ?, ?, ?, ?, ?)');
-      initialTeam.forEach((member) => {
-        insertStmt.run(member.name, member.role, member.avatar, member.bio, member.fullDesc, member.sortOrder);
-      });
-      insertStmt.finalize();
-      console.log('Initial team members inserted');
-    }
-  });
-
-  db.get('SELECT COUNT(*) as count FROM categories_details', (err, row) => {
-    if (err) {
-      console.error('Error checking categories_details:', err);
-      return;
-    }
-    if (row.count === 0) {
-      const initialCategoriesDetails = [
-        {
-          id: "cb1",
-          name: "AI 数字人定制",
-          description: "基于最前沿的神经网络渲染技术",
-          coverImage: "/images/ai-digital-human.png",
-          icon: "&lt;svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'&gt;&lt;path d='M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z'&gt;&lt;/path&gt;&lt;circle cx='7' cy='13' r='1'&gt;&lt;/circle&gt;&lt;circle cx='17' cy='13' r='1'&gt;&lt;/circle&gt;&lt;/svg&gt;",
-          sortOrder: 0,
-          tag: "数字人",
-          color: "text-secondary",
-          bgGlow: "bg-secondary/20"
-        },
-        {
-          id: "cb2",
-          name: "电影级 AI 制作",
-          description: "重塑视频工业流程",
-          coverImage: "/images/ai-film-production.png",
-          icon: "&lt;svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'&gt;&lt;rect x='2' y='2' width='20' height='20' rx='2.18' ry='2.18'&gt;&lt;/rect&gt;&lt;line x1='7' y1='2' x2='7' y2='22'&gt;&lt;/line&gt;&lt;line x1='17' y1='2' x2='17' y2='22'&gt;&lt;/line&gt;&lt;line x1='2' y1='12' x2='22' y2='12'&gt;&lt;/line&gt;&lt;line x1='2' y1='7' x2='7' y2='7'&gt;&lt;/line&gt;&lt;line x1='2' y1='17' x2='7' y2='17'&gt;&lt;/line&gt;&lt;line x1='17' y1='17' x2='22' y2='17'&gt;&lt;/line&gt;&lt;line x1='17' y1='7' x2='22' y2='7'&gt;&lt;/line&gt;&lt;/svg&gt;",
-          sortOrder: 1,
-          tag: "影视制作",
-          color: "text-primary",
-          bgGlow: "bg-primary/20"
-        },
-        {
-          id: "cb3",
-          name: "社交平台短视频 AI",
-          description: "深度理解社交媒体流量密码",
-          coverImage: "/images/ai-short-video.png",
-          icon: "&lt;svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'&gt;&lt;rect x='5' y='2' width='14' height='20' rx='2' ry='2'&gt;&lt;/rect&gt;&lt;path d='M12 18h.01'&gt;&lt;/path&gt;&lt;line x1='7' y1='6' x2='17' y2='6'&gt;&lt;/line&gt;&lt;/svg&gt;",
-          sortOrder: 2,
-          tag: "短视频",
-          color: "text-tertiary",
-          bgGlow: "bg-tertiary/20"
-        },
-        {
-          id: "cb4",
-          name: "神经网络技术栈",
-          description: "自主研发的底层引擎",
-          coverImage: "/images/ai-tech-stack.png",
-          icon: "&lt;svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'&gt;&lt;circle cx='12' cy='12' r='10'&gt;&lt;/circle&gt;&lt;circle cx='12' cy='12' r='6'&gt;&lt;/circle&gt;&lt;circle cx='12' cy='12' r='2'&gt;&lt;/circle&gt;&lt;/svg&gt;",
-          sortOrder: 3,
-          tag: "技术栈",
-          color: "text-secondary-fixed-dim",
-          bgGlow: "bg-secondary/20"
-        }
-      ];
-
-      const insertStmt = db.prepare('INSERT INTO categories_details (id, name, description, coverImage, icon, sortOrder, tag, color, bgGlow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-      initialCategoriesDetails.forEach((cat) => {
-        insertStmt.run(cat.id, cat.name, cat.description, cat.coverImage, cat.icon, cat.sortOrder, cat.tag, cat.color, cat.bgGlow);
-      });
-      insertStmt.finalize();
-      console.log('Initial categories details inserted');
-    }
-  });
+  console.log('[legacy] 跳过企业官网旧表初始数据插入（video2 为独立数据库）');
 }
 
 const dbAsync = {
@@ -729,6 +449,115 @@ function initVideo2Database() {
       // 如果列已存在或表不存在，忽略错误
     });
 
+    // ========== 分镜升级：新增 videos 表专业字段 ==========
+    const shotColumns = [
+      'sceneContent TEXT DEFAULT \'\'',
+      'actors TEXT DEFAULT \'\'',
+      'props TEXT DEFAULT \'\'',
+      'location TEXT DEFAULT \'\'',
+      'focalLength TEXT DEFAULT \'\'',
+      'narration TEXT DEFAULT \'\'',
+      'cameraMovement TEXT DEFAULT \'\'',
+      'shotType TEXT DEFAULT \'\'',
+      'shotAngle TEXT DEFAULT \'\'',
+      'lighting TEXT DEFAULT \'\'',
+      'notes TEXT DEFAULT \'\'',
+      'estimatedDuration TEXT DEFAULT \'\'',
+      'aiImagePrompt TEXT DEFAULT \'\'',
+      'aiStylePrompt TEXT DEFAULT \'\'',
+      'mergedFrom TEXT DEFAULT \'\'',
+      'shotIndex INTEGER DEFAULT 0'
+    ];
+    shotColumns.forEach(function(colDef) {
+      video2Db.run(`ALTER TABLE videos ADD COLUMN ${colDef}`, function(err) {
+        if (err && String(err.message).indexOf(ignoredMsg) === -1) {
+          console.error('[video2] 新增分镜字段失败:', colDef, err.message);
+        }
+      });
+    });
+
+    // ========== shot_media 表（分镜参考画面） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS shot_media (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shotId INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'image',
+        filename TEXT DEFAULT '',
+        size INTEGER DEFAULT 0,
+        duration REAL,
+        sortOrder INTEGER DEFAULT 0,
+        source TEXT DEFAULT 'upload',
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (shotId) REFERENCES videos(id) ON DELETE CASCADE
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_shot_media_shot ON shot_media(shotId)');
+
+    // ========== settings 表（系统设置） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // ========== ai_tasks 表（AI 异步任务） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS ai_tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        projectId INTEGER,
+        input TEXT,
+        output TEXT,
+        error TEXT,
+        progress INTEGER DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // ========== ai_usage_logs 表（AI 费用统计） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS ai_usage_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        taskId TEXT,
+        type TEXT NOT NULL,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        promptTokens INTEGER DEFAULT 0,
+        completionTokens INTEGER DEFAULT 0,
+        totalTokens INTEGER DEFAULT 0,
+        imageCount INTEGER DEFAULT 0,
+        estimatedCost REAL DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_usage_created ON ai_usage_logs(createdAt)');
+
+    // ========== transcode_tasks 表（转码任务持久化） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS transcode_tasks (
+        id TEXT PRIMARY KEY,
+        jobId TEXT,
+        requestId TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        progress INTEGER DEFAULT 0,
+        videoUrl TEXT,
+        outputUrl TEXT,
+        outputObject TEXT,
+        error TEXT,
+        projectId INTEGER,
+        options TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_status ON transcode_tasks(status)');
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_project ON transcode_tasks(projectId)');
+
     // 2. 创建 projects 表
     video2Db.run(`
       CREATE TABLE IF NOT EXISTS projects (
@@ -786,7 +615,7 @@ function initVideo2Database() {
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_scene ON videos(sceneId)');
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_scenes_project ON scenes(projectId)');
 
-    // 6. 迁移：sortOrder 回填 + 默认项目创建
+    // 6. 迁移：sortOrder 回填 + 默认项目创建 + 分镜数据迁移
     //    用最后一条 run() 的回调确保所有上述 DDL 已完成
     video2Db.get('SELECT 1 as ok', function(_err, _row) {
       // 先确保 sortOrder 有值
@@ -796,7 +625,13 @@ function initVideo2Database() {
         }
         // 迁移默认项目
         migrateDefaultProject(function() {
-          video2DbSetReady();
+          // 分镜升级数据迁移
+          migrateShotData(function() {
+            // 初始化系统设置
+            initDefaultSettings(function() {
+              video2DbSetReady();
+            });
+          });
         });
       });
     });
@@ -813,6 +648,155 @@ function fillSortOrder() {
       video2Db.run('UPDATE videos SET sortOrder = ? WHERE id = ?', [i, r.id]);
     });
     console.log('[video2] sortOrder 填充完成，共 ' + (rows ? rows.length : 0) + ' 条');
+  });
+}
+
+// ========== 分镜数据迁移 ==========
+function migrateShotData(callback) {
+  // 1. 将 title 迁移到 sceneContent
+  video2Db.run(
+    'UPDATE videos SET sceneContent = title WHERE sceneContent IS NULL OR sceneContent = ?',
+    [''],
+    function(err) {
+      if (err) console.error('[video2] 迁移 sceneContent 失败:', err.message);
+      else if (this.changes > 0) console.log('[video2] 已迁移 sceneContent: ' + this.changes + ' 条');
+    }
+  );
+
+  // 2. 将有 url 的视频迁移到 shot_media 表
+  video2Db.all(
+    "SELECT id, url, type, filename, size, duration FROM videos WHERE url IS NOT NULL AND url != ''",
+    function(err, rows) {
+      if (err) {
+        console.error('[video2] 查询待迁移视频失败:', err.message);
+        callback && callback();
+        return;
+      }
+
+      // 检查是否已经迁移过
+      video2Db.get('SELECT COUNT(*) as cnt FROM shot_media', function(err2, r) {
+        if (!err2 && r && r.cnt === 0 && rows && rows.length > 0) {
+          let migrated = 0;
+          const stmt = video2Db.prepare(
+            'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, 0, \'upload\')'
+          );
+          rows.forEach(function(row) {
+            if (row.url) {
+              stmt.run(row.id, row.url, row.type || 'video', row.filename || '', row.size || 0, row.duration || null, function(err3) {
+                if (!err3) migrated++;
+              });
+            }
+          });
+          stmt.finalize(function() {
+            console.log('[video2] 已迁移 shot_media: ' + migrated + ' 条');
+            recalcShotIndex(callback);
+          });
+        } else {
+          recalcShotIndex(callback);
+        }
+      });
+    }
+  );
+}
+
+// 重新计算所有分镜的 shotIndex
+function recalcShotIndex(callback) {
+  video2Db.all(
+    'SELECT id, projectId, sceneId FROM videos WHERE deleted = 0 ORDER BY projectId ASC, sceneId ASC, sortOrder ASC, id ASC',
+    function(err, rows) {
+      if (err) {
+        console.error('[video2] 计算 shotIndex 失败:', err.message);
+        callback && callback();
+        return;
+      }
+
+      const stmt = video2Db.prepare('UPDATE videos SET shotIndex = ? WHERE id = ?');
+      let currentProj = null;
+      let currentScene = null;
+      let idx = 0;
+
+      (rows || []).forEach(function(row) {
+        if (row.projectId !== currentProj || row.sceneId !== currentScene) {
+          idx = 1;
+          currentProj = row.projectId;
+          currentScene = row.sceneId;
+        } else {
+          idx++;
+        }
+        stmt.run(idx, row.id);
+      });
+
+      stmt.finalize(function() {
+        console.log('[video2] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条');
+        callback && callback();
+      });
+    }
+  );
+}
+
+// ========== 初始化默认设置 ==========
+function initDefaultSettings(callback) {
+  const defaults = {
+    llm_provider: 'geekai',
+    llm_model: 'deepseek-chat',
+    llm_fallback_chain: JSON.stringify([
+      { model: 'deepseek-chat', provider: 'geekai', cost: 'low' },
+      { model: 'deepseek-chat', provider: 'siliconflow', cost: 'low' },
+      { model: 'gpt-4o-mini', provider: 'geekai', cost: 'low' },
+      { model: 'glm-4-flash', provider: 'geekai', cost: 'free' }
+    ]),
+    image_provider: 'geekai',
+    image_model: 'gpt-image-2',
+    image_quality: 'medium',
+    image_fallback_chain: JSON.stringify([
+      { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true },
+      { model: 'z-image-turbo', quality: 'standard', provider: 'geekai', cost: 'low', supportsImageRef: false },
+      { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true },
+      { model: 'cogview-4', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: false }
+    ]),
+    default_image_size: '1024x576',
+    export_include_images: 'true',
+    export_format: 'docx',
+    video_target_bitrate_1080p: '3000',
+    video_target_bitrate_720p: '2000',
+    video_target_bitrate_480p: '1000',
+    model_prices: JSON.stringify({
+      'deepseek-chat': { input: 0.001, output: 0.002 },
+      'gpt-4o-mini': { input: 0.01, output: 0.03 },
+      'glm-4-flash': { input: 0, output: 0 },
+      'gpt-image-2': { per_image_medium: 0.08 },
+      'z-image-turbo': { per_image_standard: 0.02 },
+      'nano-banana-2': { per_image_standard: 0.05 },
+      'cogview-4': { per_image_standard: 0.05 }
+    })
+  };
+
+  let remaining = Object.keys(defaults).length;
+  let inserted = 0;
+
+  Object.keys(defaults).forEach(function(key) {
+    video2Db.get('SELECT key FROM settings WHERE key = ?', [key], function(err, row) {
+      if (!row) {
+        video2Db.run(
+          'INSERT INTO settings (key, value) VALUES (?, ?)',
+          [key, defaults[key]],
+          function(err2) {
+            if (!err2) inserted++;
+            remaining--;
+            if (remaining === 0) {
+              console.log('[video2] 已初始化 settings: ' + inserted + ' 条');
+              callback && callback();
+            }
+          }
+        );
+      } else {
+        remaining--;
+        if (remaining === 0) {
+          console.log('[video2] settings 已存在，跳过初始化');
+          callback && callback();
+        }
+      }
+    });
   });
 }
 
@@ -1017,12 +1001,29 @@ const video2Scenes = {
 };
 
 // ── video2Items（扩展）────────────────────────────────────────
+function formatShot(shot) {
+  if (!shot) return shot;
+  if (shot.mergedFrom && typeof shot.mergedFrom === 'string') {
+    try {
+      shot.mergedFrom = JSON.parse(shot.mergedFrom);
+    } catch (e) {
+      shot.mergedFrom = [];
+    }
+  } else if (!shot.mergedFrom) {
+    shot.mergedFrom = [];
+  }
+  if (shot.reference !== undefined) {
+    shot.reference = shot.reference === 1 || shot.reference === true;
+  }
+  return shot;
+}
+
 const video2Items = {
   getAll: async () => {
-    // 向后兼容：返回全部非删除视频
-    return await video2Async.all(
+    const rows = await video2Async.all(
       'SELECT * FROM videos WHERE deleted = 0 ORDER BY sortOrder ASC, id ASC'
     );
+    return rows.map(formatShot);
   },
   getByFilter: async ({ projectId, sceneId, status, deleted, type, reference }) => {
     let sql = 'SELECT * FROM videos WHERE 1=1';
@@ -1034,35 +1035,57 @@ const video2Items = {
     if (type !== undefined) { sql += ' AND type = ?'; params.push(type); }
     if (reference !== undefined) { sql += ' AND reference = ?'; params.push(reference); }
     sql += ' ORDER BY sortOrder ASC, id ASC';
-    return await video2Async.all(sql, params);
+    const rows = await video2Async.all(sql, params);
+    return rows.map(formatShot);
   },
   getByStatus: async (status) => {
-    return await video2Async.all(
+    const rows = await video2Async.all(
       'SELECT * FROM videos WHERE status = ? AND deleted = 0 ORDER BY sortOrder ASC, id ASC',
       [status]
     );
+    return rows.map(formatShot);
   },
-  getStats: async (projectId) => {
-    const whereProject = projectId !== undefined ? ' AND projectId = ?' : '';
-    const params = projectId !== undefined ? [projectId] : [];
+  getStats: async ({ projectId, sceneId } = {}) => {
+    let whereClause = 'WHERE deleted = 0';
+    const params = [];
+    if (projectId !== undefined) { whereClause += ' AND projectId = ?'; params.push(projectId); }
+    if (sceneId !== undefined) {
+      if (sceneId === null) {
+        whereClause += ' AND sceneId IS NULL';
+      } else {
+        whereClause += ' AND sceneId = ?';
+        params.push(sceneId);
+      }
+    }
     const all = await video2Async.all(
-      'SELECT status, COUNT(*) as cnt FROM videos WHERE deleted = 0' + whereProject + ' GROUP BY status',
+      'SELECT status, COUNT(*) as cnt FROM videos ' + whereClause + ' GROUP BY status',
       params
     );
-    const map = { pending: 0, done: 0, total: 0, trash: 0 };
+    const map = { pending: 0, done: 0, total: 0, trash: 0, unclassified: 0 };
     all.forEach(r => {
       map[r.status] = r.cnt;
       map.total += r.cnt;
     });
+    const trashWhere = projectId !== undefined ? ' WHERE deleted = 1 AND projectId = ?' : ' WHERE deleted = 1';
+    const trashParams = projectId !== undefined ? [projectId] : [];
     const trash = await video2Async.get(
-      'SELECT COUNT(*) as cnt FROM videos WHERE deleted = 1' + whereProject,
-      params
+      'SELECT COUNT(*) as cnt FROM videos' + trashWhere,
+      trashParams
     );
     map.trash = trash ? trash.cnt : 0;
+    let unclassifiedWhere = 'WHERE deleted = 0 AND sceneId IS NULL';
+    const unclassifiedParams = [];
+    if (projectId !== undefined) { unclassifiedWhere += ' AND projectId = ?'; unclassifiedParams.push(projectId); }
+    const unclassified = await video2Async.get(
+      'SELECT COUNT(*) as cnt FROM videos ' + unclassifiedWhere,
+      unclassifiedParams
+    );
+    map.unclassified = unclassified ? unclassified.cnt : 0;
     return map;
   },
   getById: async (id) => {
-    return await video2Async.get('SELECT * FROM videos WHERE id = ?', [id]);
+    const row = await video2Async.get('SELECT * FROM videos WHERE id = ?', [id]);
+    return formatShot(row);
   },
   create: async (item) => {
     const maxRow = await video2Async.get(
@@ -1086,7 +1109,7 @@ const video2Items = {
         item.reference || 0
       ]
     );
-    return { id: result.lastID, sortOrder: nextSort, ...item };
+    return formatShot({ id: result.lastID, sortOrder: nextSort, ...item });
   },
   updateStatus: async (id, status) => {
     const result = await video2Async.run(
@@ -1194,17 +1217,478 @@ const video2Items = {
   unsetCover: async (videoId) => {
     const r = await video2Async.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
     return r.changes > 0;
+  },
+
+  // 分镜升级：更新分镜字段（支持批量字段更新）
+  updateShotFields: async (id, fields) => {
+    const allowedFields = [
+      'sceneContent', 'actors', 'props', 'location', 'focalLength',
+      'narration', 'cameraMovement', 'shotType', 'shotAngle', 'lighting',
+      'notes', 'estimatedDuration', 'aiImagePrompt', 'aiStylePrompt',
+      'shotNo', 'status'
+    ];
+    const sets = [];
+    const vals = [];
+    allowedFields.forEach(function(f) {
+      if (fields[f] !== undefined) {
+        sets.push(f + ' = ?');
+        vals.push(fields[f]);
+      }
+    });
+    if (sets.length === 0) return false;
+    sets.push('updatedAt = CURRENT_TIMESTAMP');
+    vals.push(id);
+    const r = await video2Async.run('UPDATE videos SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    return r.changes > 0;
+  },
+
+  // 分镜升级：创建空白分镜（无参考画面）
+  createShot: async (item) => {
+    const maxRow = await video2Async.get(
+      'SELECT MAX(sortOrder) as maxSort FROM videos WHERE deleted = 0 AND projectId = ?' + (item.sceneId !== undefined ? ' AND sceneId ' + (item.sceneId === null ? 'IS NULL' : '= ?') : ''),
+      item.sceneId !== undefined && item.sceneId !== null ? [item.projectId, item.sceneId] : [item.projectId]
+    );
+    const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
+
+    const r = await video2Async.run(
+      `INSERT INTO videos 
+       (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, 
+        sceneContent, actors, props, location, focalLength, narration, 
+        cameraMovement, shotType, shotAngle, lighting, notes, estimatedDuration,
+        aiImagePrompt, aiStylePrompt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        item.sceneContent || item.title || '新分镜',
+        item.filename || '',
+        item.url || '',
+        item.status || 'done',
+        item.size || 0,
+        item.duration || null,
+        item.sortOrder !== undefined ? item.sortOrder : nextSort,
+        item.projectId,
+        item.sceneId !== undefined ? item.sceneId : null,
+        item.type || 'image',
+        item.sceneContent || '',
+        item.actors || '',
+        item.props || '',
+        item.location || '',
+        item.focalLength || '',
+        item.narration || '',
+        item.cameraMovement || '',
+        item.shotType || '',
+        item.shotAngle || '',
+        item.lighting || '',
+        item.notes || '',
+        item.estimatedDuration || '',
+        item.aiImagePrompt || '',
+        item.aiStylePrompt || ''
+      ]
+    );
+    const newId = r.lastID;
+
+    // 重新计算 shotIndex
+    await recalcShotIndexPromise(item.projectId);
+
+    return formatShot({ id: newId, sortOrder: nextSort, ...item });
+  },
+
+  // 分镜升级：合并分镜
+  mergeShots: async (shotIds) => {
+    if (!shotIds || shotIds.length < 2) throw new Error('至少需要2个分镜才能合并');
+
+    const shots = await video2Async.all(
+      `SELECT * FROM videos WHERE id IN (${shotIds.map(() => '?').join(',')}) ORDER BY sortOrder ASC, id ASC`,
+      shotIds
+    );
+    if (shots.length < 2) throw new Error('分镜不存在');
+
+    // 检查是否同一项目
+    const projectId = shots[0].projectId;
+    if (shots.some(s => s.projectId !== projectId)) {
+      throw new Error('只能合并同一项目的分镜');
+    }
+
+    // 检查合并后 shot_media 总数
+    const mediaCount = await video2Async.get(
+      `SELECT COUNT(*) as cnt FROM shot_media WHERE shotId IN (${shotIds.map(() => '?').join(',')})`,
+      shotIds
+    );
+    if (mediaCount && mediaCount.cnt > 10) {
+      throw new Error('合并后参考画面总数不能超过10个');
+    }
+
+    const firstShot = shots[0];
+    const otherShots = shots.slice(1);
+
+    // 合并 sceneContent（拼接）
+    const mergedContent = shots.map(s => s.sceneContent || s.title || '').filter(t => t).join(' / ');
+
+    // 合并后第一个分镜保留，其他分镜的media迁移过来
+    let sortOffset = 0;
+    for (const shot of otherShots) {
+      // 获取该分镜的media最大sortOrder
+      const maxSortRow = await video2Async.get(
+        'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',
+        [firstShot.id]
+      );
+      const baseSort = (maxSortRow ? maxSortRow.maxSort : -1) + 1;
+
+      // 迁移media
+      const media = await video2Async.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [shot.id]);
+      for (let i = 0; i < media.length; i++) {
+        await video2Async.run(
+          'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [firstShot.id, media[i].url, media[i].type, media[i].filename, media[i].size, media[i].duration, baseSort + i, media[i].source, media[i].createdAt]
+        );
+      }
+
+      // 删除被合并的分镜
+      await video2Async.run('DELETE FROM videos WHERE id = ?', [shot.id]);
+    }
+
+    // 收集所有被合并分镜的 mergedFrom，用于递归统计
+    const allMergedFromIds = new Set();
+    for (const shot of shots) {
+      if (shot.mergedFrom) {
+        try {
+          const prevIds = JSON.parse(shot.mergedFrom);
+          if (Array.isArray(prevIds)) {
+            prevIds.forEach(id => allMergedFromIds.add(id));
+          }
+        } catch (e) {
+          // 解析失败，忽略
+        }
+      } else {
+        allMergedFromIds.add(shot.id);
+      }
+    }
+    const mergedFromArray = Array.from(allMergedFromIds);
+
+    // 更新第一个分镜的 sceneContent 和 mergedFrom
+    await video2Async.run(
+      'UPDATE videos SET sceneContent = ?, title = ?, mergedFrom = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+      [mergedContent, mergedContent, JSON.stringify(mergedFromArray), firstShot.id]
+    );
+
+    // 重新计算 shotIndex
+    await recalcShotIndexPromise(projectId);
+
+    // 返回合并后的分镜
+    const merged = await video2Async.get('SELECT * FROM videos WHERE id = ?', [firstShot.id]);
+    const mergedMedia = await video2Async.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [firstShot.id]);
+    return { ...formatShot(merged), media: mergedMedia };
   }
 };
 
+// ========== shot_media（分镜参考画面） ==========
+const video2ShotMedia = {
+  getByShotId: async (shotId) => {
+    return await video2Async.all(
+      'SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC, id ASC',
+      [shotId]
+    );
+  },
+
+  create: async (item) => {
+    const maxRow = await video2Async.get(
+      'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',
+      [item.shotId]
+    );
+    const nextSort = (maxRow ? maxRow.maxSort : -1) + 1;
+
+    const r = await video2Async.run(
+      'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        item.shotId, item.url, item.type || 'image', item.filename || '',
+        item.size || 0, item.duration || null,
+        item.sortOrder !== undefined ? item.sortOrder : nextSort,
+        item.source || 'upload'
+      ]
+    );
+    return { id: r.lastID, sortOrder: nextSort, ...item };
+  },
+
+  delete: async (id) => {
+    const r = await video2Async.run('DELETE FROM shot_media WHERE id = ?', [id]);
+    return r.changes > 0;
+  },
+
+  updateSort: async (shotId, items) => {
+    for (const item of items) {
+      await video2Async.run(
+        'UPDATE shot_media SET sortOrder = ? WHERE id = ? AND shotId = ?',
+        [item.sortOrder, item.id, shotId]
+      );
+    }
+    return true;
+  },
+
+  getBySceneId: async (sceneId) => {
+    return await video2Async.all(
+      `SELECT sm.* FROM shot_media sm
+       INNER JOIN videos v ON sm.shotId = v.id
+       WHERE v.sceneId = ? AND v.deleted = 0 AND sm.type = 'image'
+       ORDER BY sm.id DESC`,
+      [sceneId]
+    );
+  }
+};
+
+// ========== settings（系统设置） ==========
+const video2Settings = {
+  getAll: async () => {
+    const rows = await video2Async.all('SELECT * FROM settings');
+    const result = {};
+    rows.forEach(row => {
+      try {
+        result[row.key] = JSON.parse(row.value);
+      } catch {
+        result[row.key] = row.value;
+      }
+    });
+    return result;
+  },
+
+  get: async (key) => {
+    const row = await video2Async.get('SELECT * FROM settings WHERE key = ?', [key]);
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return row.value;
+    }
+  },
+
+  set: async (key, value) => {
+    const valStr = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const existing = await video2Async.get('SELECT key FROM settings WHERE key = ?', [key]);
+    if (existing) {
+      await video2Async.run(
+        'UPDATE settings SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?',
+        [valStr, key]
+      );
+    } else {
+      await video2Async.run(
+        'INSERT INTO settings (key, value) VALUES (?, ?)',
+        [key, valStr]
+      );
+    }
+    return true;
+  },
+
+  bulkSet: async (settings) => {
+    for (const key of Object.keys(settings)) {
+      await video2Settings.set(key, settings[key]);
+    }
+    return true;
+  }
+};
+
+// ========== ai_tasks（AI 异步任务） ==========
+const video2AiTasks = {
+  create: async (task) => {
+    const id = task.id || crypto.randomUUID();
+    await video2Async.run(
+      'INSERT INTO ai_tasks (id, type, status, projectId, input, progress) VALUES (?, ?, ?, ?, ?, ?)',
+      [
+        id, task.type, task.status || 'pending',
+        task.projectId || null,
+        task.input ? JSON.stringify(task.input) : null,
+        task.progress || 0
+      ]
+    );
+    return { id, ...task };
+  },
+
+  get: async (id) => {
+    const row = await video2Async.get('SELECT * FROM ai_tasks WHERE id = ?', [id]);
+    if (!row) return null;
+    return {
+      ...row,
+      input: row.input ? JSON.parse(row.input) : null,
+      output: row.output ? JSON.parse(row.output) : null
+    };
+  },
+
+  update: async (id, updates) => {
+    const sets = [];
+    const vals = [];
+    const fields = ['status', 'progress', 'error'];
+    fields.forEach(f => {
+      if (updates[f] !== undefined) {
+        sets.push(f + ' = ?');
+        vals.push(updates[f]);
+      }
+    });
+    if (updates.output !== undefined) {
+      sets.push('output = ?');
+      vals.push(JSON.stringify(updates.output));
+    }
+    if (sets.length === 0) return false;
+    sets.push('updatedAt = CURRENT_TIMESTAMP');
+    vals.push(id);
+    const r = await video2Async.run('UPDATE ai_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    return r.changes > 0;
+  }
+};
+
+// ========== ai_usage_logs（AI 费用统计） ==========
+const video2AiUsage = {
+  record: async (log) => {
+    const r = await video2Async.run(
+      `INSERT INTO ai_usage_logs 
+       (taskId, type, model, provider, promptTokens, completionTokens, totalTokens, imageCount, estimatedCost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        log.taskId || null,
+        log.type,
+        log.model,
+        log.provider,
+        log.promptTokens || 0,
+        log.completionTokens || 0,
+        log.totalTokens || 0,
+        log.imageCount || 0,
+        log.estimatedCost || 0
+      ]
+    );
+    return { id: r.lastID, ...log };
+  },
+
+  getStats: async (period = 'month') => {
+    let dateFilter = '';
+    if (period === 'month') {
+      dateFilter = "WHERE createdAt >= datetime('now', 'start of month')";
+    } else if (period === 'week') {
+      dateFilter = "WHERE createdAt >= datetime('now', '-7 days')";
+    } else if (period === 'all') {
+      dateFilter = '';
+    }
+
+    const totalRow = await video2Async.get(
+      `SELECT COALESCE(SUM(estimatedCost), 0) as totalCost FROM ai_usage_logs ${dateFilter}`
+    );
+
+    const typeRows = await video2Async.all(
+      `SELECT type, COALESCE(SUM(estimatedCost), 0) as cost FROM ai_usage_logs ${dateFilter} GROUP BY type`
+    );
+
+    const modelRows = await video2Async.all(
+      `SELECT model, provider, 
+              COALESCE(SUM(promptTokens), 0) as promptTokens,
+              COALESCE(SUM(completionTokens), 0) as completionTokens,
+              COALESCE(SUM(totalTokens), 0) as totalTokens,
+              COALESCE(SUM(imageCount), 0) as imageCount,
+              COALESCE(SUM(estimatedCost), 0) as cost
+       FROM ai_usage_logs ${dateFilter}
+       GROUP BY model, provider
+       ORDER BY cost DESC`
+    );
+
+    const breakdown = { chat: 0, image: 0, video_split: 0 };
+    typeRows.forEach(r => { if (breakdown[r.type] !== undefined) breakdown[r.type] = r.cost; });
+
+    return {
+      totalCost: totalRow ? totalRow.totalCost : 0,
+      breakdown,
+      modelStats: modelRows
+    };
+  }
+};
+
+// ========== transcode_tasks（转码任务持久化） ==========
+const video2TranscodeTasks = {
+  create: async (task) => {
+    await video2Async.run(
+      `INSERT INTO transcode_tasks (id, jobId, requestId, status, progress, videoUrl, outputUrl, outputObject, projectId, options)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        task.id,
+        task.jobId || null,
+        task.requestId || null,
+        task.status || 'pending',
+        task.progress || 0,
+        task.videoUrl || null,
+        task.outputUrl || null,
+        task.outputObject || null,
+        task.projectId || null,
+        task.options ? JSON.stringify(task.options) : null
+      ]
+    );
+    return task;
+  },
+
+  get: async (id) => {
+    const row = await video2Async.get('SELECT * FROM transcode_tasks WHERE id = ?', [id]);
+    if (!row) return null;
+    return {
+      ...row,
+      options: row.options ? JSON.parse(row.options) : null
+    };
+  },
+
+  getByStatus: async (status) => {
+    const rows = await video2Async.all('SELECT * FROM transcode_tasks WHERE status = ?', [status]);
+    return rows.map(row => ({
+      ...row,
+      options: row.options ? JSON.parse(row.options) : null
+    }));
+  },
+
+  getPendingAndProcessing: async () => {
+    const rows = await video2Async.all(
+      "SELECT * FROM transcode_tasks WHERE status IN ('pending', 'processing')"
+    );
+    return rows.map(row => ({
+      ...row,
+      options: row.options ? JSON.parse(row.options) : null
+    }));
+  },
+
+  update: async (id, updates) => {
+    const sets = [];
+    const vals = [];
+    const fields = ['status', 'progress', 'outputUrl', 'outputObject', 'error'];
+    fields.forEach(f => {
+      if (updates[f] !== undefined) {
+        sets.push(f + ' = ?');
+        vals.push(updates[f]);
+      }
+    });
+    if (sets.length === 0) return false;
+    sets.push('updatedAt = CURRENT_TIMESTAMP');
+    vals.push(id);
+    const r = await video2Async.run('UPDATE transcode_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    return r.changes > 0;
+  },
+
+  delete: async (id) => {
+    const r = await video2Async.run('DELETE FROM transcode_tasks WHERE id = ?', [id]);
+    return r.changes > 0;
+  }
+};
+
+// 辅助：Promise 版重新计算 shotIndex
+function recalcShotIndexPromise(projectId) {
+  return new Promise(function(resolve) {
+    recalcShotIndex(resolve);
+  });
+}
+
 module.exports = {
-  portfolioItems,
-  featuredWorks,
-  homeContent,
-  teamMembers,
-  categoriesDetails,
+  // 以下为企业官网时代遗留模块，已废弃，仅供向后兼容
+  // portfolioItems,
+  // featuredWorks,
+  // homeContent,
+  // teamMembers,
+  // categoriesDetails,
+  // video2 视频片段管理模块（当前使用）
   video2Items,
   video2Projects,
   video2Scenes,
+  video2ShotMedia,
+  video2Settings,
+  video2AiTasks,
+  video2AiUsage,
+  video2TranscodeTasks,
   db
 };
