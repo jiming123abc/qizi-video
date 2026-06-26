@@ -13,9 +13,9 @@ import {
   Sparkles,
   Image as ImageIcon,
   Scissors,
-  Copy,
   GripVertical,
   X,
+  Info
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { MediaCarousel } from './MediaCarousel';
@@ -28,7 +28,6 @@ interface ShotCardProps {
   onSelect?: (shot: Shot) => void;
   onUpdate?: (id: number, fields: Partial<Shot>) => void;
   onDelete?: (id: number) => void;
-  onClone?: (id: number) => void;
   onSort?: (id: number, direction: 'up' | 'down') => void;
   onExpand?: (id: number) => void;
   isExpanded?: boolean;
@@ -251,7 +250,6 @@ export function ShotCard({
   onSelect,
   onUpdate,
   onDelete,
-  onClone,
   onSort,
   onExpand,
   isExpanded = false,
@@ -594,17 +592,6 @@ export function ShotCard({
             hideLabel
           />
         </div>
-
-        {/* 折叠线 */}
-        <div className="flex items-center justify-center pt-1">
-          <button
-            onClick={() => onExpand?.(shot.id)}
-            className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white transition px-3 py-1.5 rounded-lg hover:bg-white/5"
-          >
-            {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            <span>{isExpanded ? '收起详情' : '展开详情'}</span>
-          </button>
-        </div>
       </div>
 
       {/* 展开详情区域 */}
@@ -750,26 +737,26 @@ export function ShotCard({
               <button
                 onClick={() => onSort?.(shot.id, 'up')}
                 disabled={isFirst}
-                className={`w-11 h-11 rounded-full border flex items-center justify-center transition ${
+                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isFirst
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'
                 }`}
                 title="上移"
               >
-                <ChevronUp className="w-5 h-5" />
+                <ChevronUp className="w-4 h-4" />
               </button>
               <button
                 onClick={() => onSort?.(shot.id, 'down')}
                 disabled={isLast}
-                className={`w-11 h-11 rounded-full border flex items-center justify-center transition ${
+                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isLast
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'
                 }`}
                 title="下移"
               >
-                <ChevronDown className="w-5 h-5" />
+                <ChevronDown className="w-4 h-4" />
               </button>
             </>
           ) : (
@@ -787,22 +774,23 @@ export function ShotCard({
 
         <div className="flex items-center gap-1.5">
           <button
-            onClick={() => onClone?.(shot.id)}
+            onClick={() => onExpand?.(shot.id)}
             className={`inline-flex items-center gap-1 rounded-full text-xs border border-violet-400/30 hover:bg-violet-500/20 text-violet-200 transition ${
-              isMobile ? 'px-4 py-3' : 'px-2.5 py-1.5'
+              isMobile ? 'px-2.5 py-2' : 'px-2.5 py-1.5'
             }`}
-            title="复制分镜"
+            title={isExpanded ? '收起详情' : '展开详情'}
           >
-            <Copy className={isMobile ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
+            {isExpanded ? <ChevronUp className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} /> : <ChevronDown className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />}
+            {!isMobile && <span>{isExpanded ? '收起' : '详情'}</span>}
           </button>
           <button
             onClick={() => onDelete?.(shot.id)}
             className={`inline-flex items-center gap-1 rounded-full text-xs border border-red-400/30 hover:bg-red-500/20 text-red-200 transition ${
-              isMobile ? 'px-4 py-3' : 'px-2.5 py-1.5'
+              isMobile ? 'px-2.5 py-2' : 'px-2.5 py-1.5'
             }`}
             title="删除"
           >
-            <Trash2 className={isMobile ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
+            <Trash2 className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
           </button>
         </div>
       </div>

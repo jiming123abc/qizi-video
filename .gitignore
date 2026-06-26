@@ -50,3 +50,10 @@ ecosystem.config.local.cjs
 
 # Testing
 coverage/
+
+# Trae IDE
+.trae/
+
+# Documentation (optional - uncomment if docs should be private)
+# md/
+# *.md

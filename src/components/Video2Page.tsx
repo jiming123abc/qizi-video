@@ -122,6 +122,8 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
 
   const [currentTab, setCurrentTab] = useState<'pending' | 'done' | 'trash'>('pending');
   const [searchQuery, setSearchQuery] = useState('');
+  const [showSearchDialog, setShowSearchDialog] = useState(false);
+  const [showDesktopSearch, setShowDesktopSearch] = useState(false);
 
   // 已拍摄按钮确认弹窗
   const [showConfirmDialog, setShowConfirmDialog] = useState<Shot | null>(null);
@@ -958,7 +960,6 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           onSelect={(s) => toggleSelect(s.id)}
           onUpdate={handleUpdate}
           onDelete={handleDelete}
-          onClone={handleClone}
           onSort={handleSort}
           onExpand={handleExpand}
           isExpanded={expandedShotId === shot.id}
@@ -1003,10 +1004,10 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
 
   return (
     <div
-      className="min-h-screen bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white pb-24"
+      className="min-h-screen bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white pb-28"
     >
       {/* 顶部栏 */}
-      <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/75 border-b border-white/10">
+      <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/80 border-b border-white/10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center gap-3">
           <button
             onClick={backToProjectList}
@@ -1043,6 +1044,19 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
             >
               <Share2 className="w-4 h-4 text-white/90" />
             </button>
+
+            {/* 搜索 */}
+            <ShotSearchBar
+              value={searchQuery}
+              onChange={(v) => {
+                setSearchQuery(v);
+                setSelectedIds(new Set());
+                setPlayingVideoKey(null);
+              }}
+              variant="icon"
+              isOpen={showDesktopSearch}
+              onOpenChange={setShowDesktopSearch}
+            />
 
             {/* AI 生成分镜 */}
             <button
@@ -1081,13 +1095,14 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
             </button>
           </div>
 
-          {/* 移动端：AI + 更多菜单 + 上传 */}
+          {/* 移动端：搜索 + 更多菜单 + 上传 */}
           <div className="flex sm:hidden items-center gap-1 relative">
             <button
-              onClick={() => { setPlayingItemId(null); setShowAIScriptDialog(true); }}
-              className="px-2 py-1 rounded text-xs border border-violet-400/40 bg-white/5 hover:bg-violet-500/30 transition"
+              onClick={() => setShowSearchDialog(true)}
+              className="w-8 h-8 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/30 flex items-center justify-center transition"
+              title="搜索"
             >
-              AI
+              <Search className="w-4 h-4 text-white/80" />
             </button>
             <div className="relative">
               <button
@@ -1107,6 +1122,13 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
                     >
                       <Share2 className="w-4 h-4 text-violet-300" />
                       分享
+                    </button>
+                    <button
+                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowAIScriptDialog(true); }}
+                      className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
+                    >
+                      <Sparkles className="w-4 h-4 text-violet-300" />
+                      AI 生成分镜
                     </button>
                     <button
                       onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); videoSplitInputRef.current?.click(); }}
@@ -1329,18 +1351,6 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
       <div
         ref={containerRef}
         className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        {/* 搜索框（垃圾桶 Tab 下隐藏） */}
-        {currentTab !== 'trash' && (
-          <ShotSearchBar
-            value={searchQuery}
-            onChange={(v) => {
-              setSearchQuery(v);
-              setSelectedIds(new Set());
-              setPlayingVideoKey(null);
-            }}
-          />
-        )}
-
         {/* 分镜卡片网格 */}
         {shotsLoading ? (
           <ShotSkeleton count={8} />
@@ -1919,6 +1929,19 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
       )}
 
       {/* ============ 新增对话框 ============ */}
+
+      {/* 移动端搜索对话框 */}
+      <ShotSearchBar
+        value={searchQuery}
+        onChange={(v) => {
+          setSearchQuery(v);
+          setSelectedIds(new Set());
+          setPlayingVideoKey(null);
+        }}
+        variant="dialog"
+        isOpen={showSearchDialog}
+        onOpenChange={setShowSearchDialog}
+      />
 
       {/* 增加分镜 */}
       <AddShotDialog

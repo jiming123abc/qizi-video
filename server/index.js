@@ -110,7 +110,7 @@ app.use((req, res, next) => {
 
 app.use(compression());
 
-// CORS 配置：从环境变量读取允许的来源，默认包含常见开发端口
+// CORS 配置：从环境变量读取允许的来源，默认包含常见开发端口和生产域名
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
   : [
@@ -121,7 +121,10 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
       'http://127.0.0.1:3000',
       'http://127.0.0.1:3002',
       'http://127.0.0.1:5173',
-      'http://127.0.0.1:8080'
+      'http://127.0.0.1:8080',
+      'https://video.qiziwenhua.top',
+      'https://qiziwenhua.top',
+      'https://www.qiziwenhua.top'
     ];
 
 app.use(cors({
@@ -2562,23 +2565,29 @@ app.get('/api/video2/oss-proxy', async (req, res) => {
     }
     
     let ossKey = key;
+    let urlBucket = null;
+    let queryParams = null;
     
     // 如果没有直接传 key，尝试从 URL 中提取
     if (!ossKey && url) {
       const urlStr = String(url);
       console.log('[video2][oss-proxy] 从 URL 提取 key:', urlStr);
       
-      // 尝试匹配 aliyuncs.com 域名
-      let match = urlStr.match(/aliyuncs\.com\/([^?]+)/);
+      // 尝试匹配 aliyuncs.com 域名（同时提取 bucket 名称）
+      let match = urlStr.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
       if (match) {
-        ossKey = decodeURIComponent(match[1]);
+        urlBucket = match[1];
+        ossKey = decodeURIComponent(match[2]);
+        queryParams = match[3] || null;
+        console.log('[video2][oss-proxy] aliyuncs URL, bucket:', urlBucket, 'key:', ossKey, 'query:', queryParams);
       } else {
         // 尝试匹配自定义域名格式（如 xxx.qiziwenhua.top/key 或 qiziwenhua.top/xxx/key）
         // 去掉协议和域名，取路径部分
         try {
           const urlObj = new URL(urlStr);
           ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
-          console.log('[video2][oss-proxy] 使用 URL 路径作为 key:', ossKey);
+          queryParams = urlObj.search || null;
+          console.log('[video2][oss-proxy] 自定义域名 URL, key:', ossKey, 'query:', queryParams);
         } catch (e) {
           // 如果不是完整 URL，尝试直接作为路径
           if (urlStr.startsWith('/')) {
@@ -2593,13 +2602,39 @@ app.get('/api/video2/oss-proxy', async (req, res) => {
       return res.status(400).json({ error: '无法获取 OSS key' });
     }
     
-    console.log('[video2][oss-proxy] 生成签名 URL, key:', ossKey);
-    const signedUrl = ossClient.signatureUrl(ossKey, { expires: 3600 });
+    // 如果 URL 中的 bucket 与当前 ossClient 的 bucket 不一致，切换 bucket
+    let targetClient = ossClient;
+    if (urlBucket && urlBucket !== OSS_BUCKET) {
+      console.log('[video2][oss-proxy] URL bucket (' + urlBucket + ') 与配置 bucket (' + OSS_BUCKET + ') 不一致，切换 bucket');
+      try {
+        targetClient = new OSS({
+          accessKeyId: OSS_ACCESS_KEY_ID,
+          accessKeySecret: OSS_ACCESS_KEY_SECRET,
+          bucket: urlBucket,
+          region: OSS_REGION,
+          secure: true
+        });
+      } catch (e) {
+        console.warn('[video2][oss-proxy] 切换 bucket 失败，使用默认 bucket:', e.message);
+        targetClient = ossClient;
+      }
+    }
+    
+    console.log('[video2][oss-proxy] 生成签名 URL, bucket:', targetClient.options.bucket, 'key:', ossKey);
+    let signedUrl = targetClient.signatureUrl(ossKey, { expires: 3600 });
+    
+    // 如果原始 URL 有查询参数（如 x-oss-process），附加到签名 URL 上
+    if (queryParams && queryParams.length > 1) {
+      const separator = signedUrl.includes('?') ? '&' : '?';
+      signedUrl = signedUrl + separator + queryParams.slice(1);
+      console.log('[video2][oss-proxy] 附加查询参数后的签名 URL:', signedUrl.substring(0, 120) + '...');
+    }
+    
     console.log('[video2][oss-proxy] 签名 URL 生成成功，开始获取内容...');
     
     const response = await fetch(signedUrl);
     if (!response.ok) {
-      console.warn('[video2][oss-proxy] OSS 响应错误:', response.status, response.statusText);
+      console.warn('[video2][oss-proxy] OSS 响应错误:', response.status, response.statusText, 'url:', signedUrl.substring(0, 100) + '...');
       return res.status(response.status).json({ error: 'OSS 响应错误: ' + response.status });
     }
     

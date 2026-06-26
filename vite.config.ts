@@ -1,12 +1,21 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import legacy from '@vitejs/plugin-legacy';
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      legacy({
+        targets: ['chrome >= 50', 'android >= 5', 'ios >= 10', 'safari >= 10'],
+        additionalLegacyPolyfills: ['regenerator-runtime/runtime'],
+        modernPolyfills: ['es.array.flat', 'es.array.flat-map', 'es.object.from-entries'],
+      }),
+    ],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
@@ -14,6 +23,8 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       outDir: 'dist',
+      target: 'es2020',
+      cssTarget: 'chrome80',
     },
     server: {
       port: 3002,
