@@ -167,10 +167,18 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // 视频元素 ref 管理（微信播放需要同步手势调用）
-  const videoRefs = useRef<Map<number, HTMLVideoElement>>(new Map());
+  const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
 
   // 视频互斥播放
   const [playingVideoKey, setPlayingVideoKey] = useState<string | null>(null);
+
+  const handleVideoRefReady = useCallback((key: string, ref: HTMLVideoElement | null) => {
+    if (ref) {
+      videoRefs.current.set(key, ref);
+    } else {
+      videoRefs.current.delete(key);
+    }
+  }, []);
 
   // 视频压缩选择对话框
   const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
@@ -191,12 +199,21 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   }, []);
 
   const handleVideoPlay = useCallback((shotId: number, mediaId: number) => {
-    setPlayingVideoKey(`${shotId}-${mediaId}`);
+    const key = `${shotId}-${mediaId}`;
+    videoRefs.current.forEach((v, k) => {
+      if (k !== key) {
+        try { v.pause(); } catch (_) {}
+      }
+    });
+    setPlayingVideoKey(key);
   }, []);
 
   const handleVideoPause = useCallback((shotId: number, mediaId: number) => {
-    setPlayingVideoKey(null);
-  }, []);
+    const key = `${shotId}-${mediaId}`;
+    if (playingVideoKey === key) {
+      setPlayingVideoKey(null);
+    }
+  }, [playingVideoKey]);
 
   const [fullscreenItem, setFullscreenItem] = useState<ShotMedia | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
@@ -227,23 +244,14 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   // 全屏弹窗支持 Escape 键关闭
   useEscapeKey(() => setFullscreenItem(null), fullscreenItem !== null);
 
-  // 互斥播放：当前正在卡片内播放的 item id
+  // 互斥播放：打开弹窗/切换时暂停所有视频
   const [playingItemId, setPlayingItemId] = useState<number | null>(null);
 
-  // 当 playingItemId 变化时：
-  // 1) 暂停非当前的视频（确保打开弹窗/切换时停止）
-  // 2) 对当前播放项调用 .play()，恢复 IntersectionObserver 驱动的手机浏览器滚动自动播放
   useEffect(() => {
-    videoRefs.current.forEach((v, id) => {
-      if (id !== playingItemId) {
+    if (playingItemId === null) {
+      videoRefs.current.forEach((v) => {
         try { v.pause(); } catch (_) {}
-      }
-    });
-    if (playingItemId !== null) {
-      const v = videoRefs.current.get(playingItemId);
-      if (v) {
-        v.play().catch(() => {});
-      }
+      });
     }
   }, [playingItemId]);
 
@@ -978,6 +986,7 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           onVideoPlay={handleVideoPlay}
           onVideoPause={handleVideoPause}
           playingVideoKey={playingVideoKey}
+          onVideoRefReady={handleVideoRefReady}
         />
       </div>
     );

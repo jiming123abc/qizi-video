@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { MediaCarousel } from './MediaCarousel';
-import { getOssProxyUrl } from '../../lib/ossUtils';
+import { getOssProxyUrl, getVideoPoster } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 interface ShotCardProps {
@@ -46,6 +46,7 @@ interface ShotCardProps {
   onVideoPlay?: (shotId: number, mediaId: number) => void;
   onVideoPause?: (shotId: number, mediaId: number) => void;
   playingVideoKey?: string;
+  onVideoRefReady?: (key: string, ref: HTMLVideoElement | null) => void;
 }
 
 // 行内编辑字段组件
@@ -268,6 +269,7 @@ export function ShotCard({
   onVideoPlay,
   onVideoPause,
   playingVideoKey,
+  onVideoRefReady,
 }: ShotCardProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -275,6 +277,9 @@ export function ShotCard({
   const [bufferProgress, setBufferProgress] = useState(0);
   const [imgError, setImgError] = useState(false);
   const [showMergedFrom, setShowMergedFrom] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
+  const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const media = shot.media || [];
   const currentMedia = media[currentIndex];
@@ -282,15 +287,48 @@ export function ShotCard({
   const videoKey = `${shot.id}-${currentMedia?.id}`;
   const isThisVideoPlaying = playingVideoKey === videoKey;
 
+  useEffect(() => {
+    if (!cardRef.current) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setIsVisible(true);
+            observer.disconnect();
+          }
+        });
+      },
+      { rootMargin: '200px' }
+    );
+    observer.observe(cardRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (onVideoRefReady && videoRef.current) {
+      onVideoRefReady(videoKey, videoRef.current);
+    }
+    return () => {
+      if (onVideoRefReady) {
+        onVideoRefReady(videoKey, null);
+      }
+    };
+  }, [videoKey, onVideoRefReady, shouldLoadVideo]);
+
   const handleFieldUpdate = useCallback((field: keyof Shot, value: string) => {
     onUpdate?.(shot.id, { [field]: value });
   }, [shot.id, onUpdate]);
 
   const handlePlayVideo = useCallback(() => {
-    if (videoRef.current) {
-      videoRef.current.play();
+    if (!shouldLoadVideo) {
+      setShouldLoadVideo(true);
     }
-  }, []);
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.play().catch(() => {});
+      }
+    }, 0);
+  }, [shouldLoadVideo]);
 
   const handlePauseVideo = useCallback(() => {
     if (videoRef.current) {
@@ -335,7 +373,6 @@ export function ShotCard({
   }, []);
 
   const handleFullscreen = useCallback((mediaItem: ShotMedia) => {
-    // 全屏时暂停卡片内播放
     handlePauseVideo();
     onFullscreen?.(mediaItem);
   }, [onFullscreen, handlePauseVideo]);
@@ -343,33 +380,35 @@ export function ShotCard({
   const handlePrevMedia = useCallback(() => {
     handlePauseVideo();
     setImgError(false);
+    setShouldLoadVideo(false);
     setCurrentIndex((prev) => (prev > 0 ? prev - 1 : media.length - 1));
   }, [media.length, handlePauseVideo]);
 
   const handleNextMedia = useCallback(() => {
     handlePauseVideo();
     setImgError(false);
+    setShouldLoadVideo(false);
     setCurrentIndex((prev) => (prev < media.length - 1 ? prev + 1 : 0));
   }, [media.length, handlePauseVideo]);
 
   const hasMedia = media.length > 0;
 
-  // 互斥播放：其他视频开始播放时暂停当前视频
   useEffect(() => {
     if (playingVideoKey && playingVideoKey !== videoKey && isVideoPlaying) {
       handlePauseVideo();
     }
   }, [playingVideoKey, videoKey, isVideoPlaying, handlePauseVideo]);
 
-  // 切换媒体时停止视频
   useEffect(() => {
     handlePauseVideo();
     setIsVideoPlaying(false);
     setBufferProgress(0);
+    setShouldLoadVideo(false);
   }, [currentIndex, handlePauseVideo]);
 
   return (
     <div
+      ref={cardRef}
       className={`relative rounded-2xl border overflow-hidden transition-all ${
         isSelected
           ? 'border-violet-400/60 ring-2 ring-violet-400/30 bg-white/[0.05]'
@@ -386,31 +425,60 @@ export function ShotCard({
             <div className="relative aspect-video bg-black/40">
               {isVideo ? (
                 <>
-                  <video
-                    ref={videoRef}
-                    src={getOssProxyUrl(currentMedia.url)}
-                    poster={currentMedia.url.includes('aliyuncs.com') || currentMedia.url.includes('qiziwenhua.top')
-                      ? getOssProxyUrl(currentMedia.url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast')
-                      : ''}
-                    muted={false}
-                    playsInline
-                    loop
-                    controls={isMobile}
-                    className="w-full h-full object-cover"
-                    onPlay={handleVideoPlay}
-                    onPause={handleVideoPause}
-                    onWaiting={handleVideoWaiting}
-                    onCanPlay={handleVideoCanPlay}
-                    onProgress={handleVideoProgress}
-                    onClick={(e) => {
-                      if (!isMobile && isThisVideoPlaying) {
-                        e.preventDefault();
-                        handleTogglePlay();
-                      }
-                    }}
-                  />
-                  {/* 桌面端播放按钮 */}
-                  {!isMobile && !isThisVideoPlaying && (
+                  {/* 封面图（懒加载，未播放时显示） */}
+                  {(!shouldLoadVideo || !isVisible) && (
+                    <>
+                      {imgError ? (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/30">
+                            <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+                            <circle cx="9" cy="9" r="2"/>
+                            <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+                          </svg>
+                        </div>
+                      ) : isVisible ? (
+                        <img
+                          src={getVideoPoster(currentMedia.url) || getOssProxyUrl(currentMedia.url)}
+                          alt={currentMedia.filename}
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                          onError={() => {
+                            console.error('[ShotCard] 封面加载失败:', { url: currentMedia.url, shotId: shot.id });
+                            setImgError(true);
+                          }}
+                        />
+                      ) : (
+                        <div className="absolute inset-0 bg-black/40" />
+                      )}
+                    </>
+                  )}
+
+                  {/* 视频元素（仅在可见且点击播放后创建） */}
+                  {shouldLoadVideo && isVisible && (
+                    <video
+                      ref={videoRef}
+                      src={getOssProxyUrl(currentMedia.url)}
+                      muted={false}
+                      playsInline
+                      loop
+                      controls={isMobile}
+                      className="w-full h-full object-cover"
+                      onPlay={handleVideoPlay}
+                      onPause={handleVideoPause}
+                      onWaiting={handleVideoWaiting}
+                      onCanPlay={handleVideoCanPlay}
+                      onProgress={handleVideoProgress}
+                      onClick={(e) => {
+                        if (!isMobile && isThisVideoPlaying) {
+                          e.preventDefault();
+                          handleTogglePlay();
+                        }
+                      }}
+                    />
+                  )}
+
+                  {/* 播放按钮（未播放时显示） */}
+                  {!isThisVideoPlaying && (
                     <button
                       onClick={(e) => { e.stopPropagation(); handlePlayVideo(); }}
                       className="absolute inset-0 z-10 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
@@ -420,6 +488,7 @@ export function ShotCard({
                       </div>
                     </button>
                   )}
+
                   {/* 加载进度条 */}
                   {(isVideoLoading || bufferProgress < 100) && isThisVideoPlaying && (
                     <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40 z-20">
@@ -429,6 +498,7 @@ export function ShotCard({
                       />
                     </div>
                   )}
+
                   {/* 加载指示器 */}
                   {isVideoLoading && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/20">

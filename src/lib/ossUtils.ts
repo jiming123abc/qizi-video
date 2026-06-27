@@ -55,6 +55,13 @@ export function getOssProxyUrl(ossUrl: string, ossKey?: string): string {
   return `${API_BASE_URL}/api/video2/oss-proxy?url=${encodeURIComponent(ossUrl)}`;
 }
 
+export function getVideoPoster(url: string): string {
+  if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
+    return getOssProxyUrl(url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast');
+  }
+  return '';
+}
+
 export interface UploadProgress {
   phase: 'idle' | 'checking' | 'compressing' | 'uploading' | 'done';
   progress: number;
