@@ -1860,7 +1860,7 @@ app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
             const ossConfig = aliyunVideo.getOSSConfig();
             const ext = 'mp4';
             const fileName = `transcode-${Date.now()}-${Math.random().toString(36).substr(2, 8)}.${ext}`;
-            const folder = task.options && task.options.projectId ? `${task.options.projectId}/videos` : 'default/videos';
+            const folder = task.options && task.options.projectId ? `projects/${task.options.projectId}/videos` : 'projects/default/videos';
             const ossKey = `${folder}/${fileName}`;
 
             if (isOSSConfigured && ossClient) {
@@ -2496,8 +2496,8 @@ app.post('/api/video2/upload/image', upload.single('file'), async (req, res) => 
     const forceLocalStorage = req.query.forceLocal === 'true';
     if (isOSSConfigured && !forceLocalStorage && ossClient) {
       try {
-        // OSS 路径按项目ID分文件夹，未指定项目时使用 default
-        const folder = projectId ? `${projectId}/images` : 'default/images';
+        // OSS 路径按项目ID分文件夹，未指定项目时使用 default/projects/images
+        const folder = projectId ? `projects/${projectId}/images` : 'projects/default/images';
         ossKey = `${folder}/${fileName}`;
         const result = await ossClient.put(ossKey, fileBuffer);
         fileUrl = result.url;
@@ -2657,6 +2657,168 @@ app.get('/api/video2/oss-proxy', async (req, res) => {
   }
 });
 
+// 签名 URL 接口：前端直连 OSS，服务器只负责生成签名
+app.get('/api/video2/oss-sign-url', async (req, res) => {
+  try {
+    const { url, key, bucket: targetBucket } = req.query;
+    if (!isOSSConfigured || !ossClient) {
+      return res.status(400).json({ error: 'OSS 未配置' });
+    }
+
+    let ossKey = key;
+    let urlBucket = null;
+
+    // 从 URL 中提取 key
+    if (!ossKey && url) {
+      const urlStr = String(url);
+      const match = urlStr.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
+      if (match) {
+        urlBucket = match[1];
+        ossKey = decodeURIComponent(match[2]);
+      } else {
+        try {
+          const urlObj = new URL(urlStr);
+          ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
+        } catch (e) {
+          if (urlStr.startsWith('/')) ossKey = decodeURIComponent(urlStr.slice(1));
+        }
+      }
+    }
+
+    if (!ossKey) {
+      return res.status(400).json({ error: '无法获取 OSS key' });
+    }
+
+    // 确定目标 bucket
+    const finalBucket = targetBucket || urlBucket || OSS_BUCKET;
+    let targetClient = ossClient;
+
+    if (finalBucket && finalBucket !== OSS_BUCKET) {
+      try {
+        targetClient = new OSS({
+          accessKeyId: OSS_ACCESS_KEY_ID,
+          accessKeySecret: OSS_ACCESS_KEY_SECRET,
+          bucket: finalBucket,
+          region: OSS_REGION,
+          secure: true
+        });
+      } catch (e) {
+        console.warn('[oss-sign-url] 切换 bucket 失败，使用默认:', e.message);
+        targetClient = ossClient;
+      }
+    }
+
+    // 生成签名 URL（1小时有效期）
+    const signedUrl = targetClient.signatureUrl(ossKey, { expires: 3600 });
+    res.json({ signedUrl, key: ossKey, bucket: finalBucket });
+  } catch (error) {
+    console.error('[oss-sign-url] 生成签名失败:', error.message);
+    res.status(500).json({ error: '生成签名失败: ' + error.message });
+  }
+});
+
+// 批量签名 URL 接口：一次性为多个 URL 生成签名（减少前端请求）
+app.get('/api/video2/oss-sign-urls', async (req, res) => {
+  try {
+    const { urls } = req.query;
+    if (!isOSSConfigured || !ossClient) {
+      return res.status(400).json({ error: 'OSS 未配置' });
+    }
+    const urlList = Array.isArray(urls) ? urls : (urls ? [urls] : []);
+    if (urlList.length === 0) {
+      return res.json({ signedUrls: {} });
+    }
+
+    const results: Record<string, string> = {};
+
+    for (const urlStr of urlList) {
+      const str = String(urlStr);
+      let ossKey = '';
+      let urlBucket = null;
+
+      const match = str.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
+      if (match) {
+        urlBucket = match[1];
+        ossKey = decodeURIComponent(match[2]);
+      } else {
+        try {
+          const urlObj = new URL(str);
+          ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
+        } catch (e) {
+          if (str.startsWith('/')) ossKey = decodeURIComponent(str.slice(1));
+        }
+      }
+
+      if (ossKey) {
+        const finalBucket = urlBucket || OSS_BUCKET;
+        let targetClient = ossClient;
+        if (finalBucket !== OSS_BUCKET) {
+          try {
+            targetClient = new OSS({
+              accessKeyId: OSS_ACCESS_KEY_ID,
+              accessKeySecret: OSS_ACCESS_KEY_SECRET,
+              bucket: finalBucket,
+              region: OSS_REGION,
+              secure: true
+            });
+          } catch (e) {
+            targetClient = ossClient;
+          }
+        }
+        try {
+          results[str] = targetClient.signatureUrl(ossKey, { expires: 3600 });
+        } catch (e) {
+          results[str] = str;
+        }
+      } else {
+        results[str] = str;
+      }
+    }
+
+    res.json({ signedUrls: results });
+  } catch (error) {
+    console.error('[oss-sign-urls] 批量签名失败:', error.message);
+    res.status(500).json({ error: '批量签名失败: ' + error.message });
+  }
+});
+
+// OSS 上传凭证接口：前端直传 OSS，服务器只负责生成凭证
+app.get('/api/video2/oss-upload-credential', async (req, res) => {
+  try {
+    const { projectId, filename, type } = req.query;
+    if (!isOSSConfigured || !ossClient) {
+      return res.status(400).json({ error: 'OSS 未配置' });
+    }
+    if (!projectId || !filename || !type) {
+      return res.status(400).json({ error: '缺少必要参数: projectId, filename, type' });
+    }
+
+    const subDir = type === 'video' ? 'videos' : 'images';
+    const ossKey = `projects/${projectId}/${subDir}/${Date.now()}-${Math.random().toString(36).substr(2, 8)}-${filename}`;
+
+    // 生成表单上传签名
+    const policy = Buffer.from(JSON.stringify({
+      expiration: new Date(Date.now() + 3600 * 1000).toISOString(),
+      conditions: [['content-length-range', 0, 500 * 1024 * 1024]]
+    })).toString('base64');
+
+    const signature = crypto.createHmac('sha1', OSS_ACCESS_KEY_SECRET).update(policy).digest('base64');
+
+    res.json({
+      host: `https://${OSS_BUCKET}.oss-${OSS_REGION}.aliyuncs.com`,
+      accessKeyId: OSS_ACCESS_KEY_ID,
+      policy,
+      signature,
+      key: ossKey,
+      bucket: OSS_BUCKET,
+      region: OSS_REGION
+    });
+  } catch (error) {
+    console.error('[oss-upload-credential] 生成凭证失败:', error.message);
+    res.status(500).json({ error: '生成上传凭证失败: ' + error.message });
+  }
+});
+
 app.post('/api/video2/upload/video', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '请上传文件' });
@@ -2721,7 +2883,7 @@ app.post('/api/video2/upload/video', upload.single('file'), async (req, res) => 
         if (isOSSConfigured && !task.forceLocalStorage && ossClient) {
           try {
             // OSS 路径按项目ID分文件夹，未指定项目时使用 default
-            const folder = task.projectId ? `${task.projectId}/videos` : 'default/videos';
+            const folder = task.projectId ? `projects/${task.projectId}/videos` : 'projects/default/videos';
             const ossKey = `${folder}/${task.fileName}`;
             const result = await ossClient.put(ossKey, uploadPath);
             fileUrl = result.url;

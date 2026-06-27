@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
 import { uploadVideo2Image, uploadVideo2Video, uploadVideo2FromUrl, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
+import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { ShareHint } from './WeChatShareHint';
@@ -217,6 +218,8 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
 
   const [fullscreenItem, setFullscreenItem] = useState<ShotMedia | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
+  const signedFullscreenUrl = useSignedUrl(fullscreenItem?.url);
+  const signedFullscreenPoster = useSignedUrl(fullscreenItem?.url ? getPosterUrl(fullscreenItem.url) : undefined);
 
   // ============ 新对话框状态 ============
   const [showAddShotDialog, setShowAddShotDialog] = useState(false);
@@ -2065,12 +2068,12 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           </button>
           <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
             {fullscreenItem.type === 'image' ? (
-              <img src={fullscreenItem.url} alt={fullscreenItem.filename || fullscreenItem.url} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
+              <img src={signedFullscreenUrl} alt={fullscreenItem.filename || fullscreenItem.url} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
             ) : (
               <video
                 ref={fullscreenVideoRef}
-                src={fullscreenItem.url}
-                poster={getPosterUrl(fullscreenItem.url)}
+                src={signedFullscreenUrl}
+                poster={signedFullscreenPoster}
                 controls
                 autoPlay
                 playsInline

@@ -62,6 +62,144 @@ export function getVideoPoster(url: string): string {
   return '';
 }
 
+// ================ 签名 URL 缓存（1小时有效期） ================
+const signUrlCache = new Map<string, { url: string; expires: number }>();
+
+export async function getSignedOssUrl(ossUrl: string): Promise<string> {
+  if (!ossUrl) return ossUrl;
+  if (ossUrl.startsWith('data:')) return ossUrl;
+  if (ossUrl.startsWith('/uploads/')) return ossUrl;
+  if (ossUrl.startsWith('/api/')) return ossUrl;
+
+  // 检查缓存
+  const cached = signUrlCache.get(ossUrl);
+  if (cached && cached.expires > Date.now()) {
+    return cached.url;
+  }
+
+  // 调用服务端签名接口
+  const res = await fetch(
+    `${API_BASE_URL}/api/video2/oss-sign-url?url=${encodeURIComponent(ossUrl)}`
+  );
+  if (!res.ok) {
+    console.error('[oss] 获取签名 URL 失败，使用原始 URL:', ossUrl);
+    return ossUrl;
+  }
+  const { signedUrl } = await res.json();
+
+  // 缓存 50 分钟（1小时有效期提前刷新）
+  signUrlCache.set(ossUrl, { url: signedUrl, expires: Date.now() + 50 * 60 * 1000 });
+  return signedUrl;
+}
+
+// 批量获取签名 URL（一次性请求，结果写入缓存）
+export async function batchGetSignedUrls(urls: string[]): Promise<void> {
+  // 过滤出需要签名的 URL（排除缓存命中和非 OSS URL）
+  const toSign = urls.filter(u => {
+    if (!u || u.startsWith('data:') || u.startsWith('/uploads/') || u.startsWith('/api/')) return false;
+    const cached = signUrlCache.get(u);
+    return !cached || cached.expires <= Date.now();
+  });
+
+  if (toSign.length === 0) return;
+
+  try {
+    const params = toSign.map(u => `urls=${encodeURIComponent(u)}`).join('&');
+    const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
+    if (!res.ok) return;
+
+    const { signedUrls } = await res.json();
+    const now = Date.now();
+    for (const [origUrl, signedUrl] of Object.entries(signedUrls)) {
+      signUrlCache.set(origUrl, { url: signedUrl, expires: now + 50 * 60 * 1000 });
+    }
+  } catch (e) {
+    console.error('[oss] 批量签名失败:', e);
+  }
+}
+
+// 从缓存获取签名 URL（同步，立即返回）
+export function getSignedUrlFromCache(ossUrl: string): string {
+  if (!ossUrl) return ossUrl;
+  if (ossUrl.startsWith('data:')) return ossUrl;
+  if (ossUrl.startsWith('/uploads/')) return ossUrl;
+  if (ossUrl.startsWith('/api/')) return ossUrl;
+
+  const cached = signUrlCache.get(ossUrl);
+  if (cached && cached.expires > Date.now()) {
+    return cached.url;
+  }
+  return ossUrl; // 未缓存时返回原始 URL
+}
+
+// ================ OSS 直传凭证 ================
+export interface OssUploadCredential {
+  host: string;
+  accessKeyId: string;
+  policy: string;
+  signature: string;
+  key: string;
+  bucket: string;
+  region: string;
+}
+
+export async function getOssUploadCredential(
+  projectId: number,
+  filename: string,
+  type: 'image' | 'video'
+): Promise<OssUploadCredential> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/video2/oss-upload-credential?projectId=${projectId}&filename=${encodeURIComponent(filename)}&type=${type}`
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: '获取上传凭证失败' }));
+    throw new Error(err.error || '获取上传凭证失败');
+  }
+  return res.json();
+}
+
+// 直传文件到 OSS（使用服务端生成的凭证）
+export async function uploadDirectToOss(
+  file: File,
+  credential: OssUploadCredential,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', credential.host);
+
+    const formData = new FormData();
+    formData.append('key', credential.key);
+    formData.append('OSSAccessKeyId', credential.accessKeyId);
+    formData.append('policy', credential.policy);
+    formData.append('signature', credential.signature);
+    formData.append('file', file);
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        onProgress?.({ phase: 'uploading', progress: pct, message: `上传中... ${pct}%` });
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
+        // 返回 OSS 文件 URL
+        const fileUrl = `https://${credential.bucket}.oss-${credential.region}.aliyuncs.com/${credential.key}`;
+        resolve(fileUrl);
+      } else {
+        reject(new Error(`OSS 上传失败: HTTP ${xhr.status}`));
+      }
+    });
+
+    xhr.addEventListener('error', () => reject(new Error('网络错误')));
+    xhr.addEventListener('timeout', () => reject(new Error('上传超时')));
+
+    xhr.send(formData);
+  });
+}
+
 export interface UploadProgress {
   phase: 'idle' | 'checking' | 'compressing' | 'uploading' | 'done';
   progress: number;

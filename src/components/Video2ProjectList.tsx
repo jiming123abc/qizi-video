@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, Link2, CheckCircle2, XCircle, Info } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
 import { uploadVideo2Image, uploadVideo2Video, detectFileType, uploadVideo2FromUrl, checkVideoBitrate } from '../lib/ossUtils';
+import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from './WeChatShareHint';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
@@ -87,7 +88,10 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
   const [carouselIndex, setCarouselIndex] = useState<Record<number, number>>({});
   const [fullscreenItem, setFullscreenItem] = useState<ReferenceItem | null>(null);
   const [fullscreenTitle, setFullscreenTitle] = useState<string>('');
+  const [signedMediaUrls, setSignedMediaUrls] = useState<Record<string, string>>({});
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
+  const signedFullscreenUrl = useSignedUrl(fullscreenItem?.url);
+  const signedFullscreenPoster = useSignedUrl(fullscreenItem?.url ? getVideoPoster(fullscreenItem.url) : undefined);
 
   // 全屏弹窗打开时自动播放视频
   useEffect(() => {
@@ -100,6 +104,33 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     setToast({ message: msg, type });
     setTimeout(() => setToast(null), 2500);
   }, []);
+
+  // 收集所有媒体 URL 并批量签名
+  const signAllMediaUrls = useCallback(async () => {
+    const urls: string[] = [];
+    for (const refs of Object.values(referencesCache)) {
+      for (const ref of refs) {
+        if (ref.url) urls.push(ref.url);
+      }
+    }
+    if (urls.length === 0) return;
+    const { batchGetSignedUrls, getSignedUrlFromCache } = await import('../lib/ossUtils');
+    const immediate: Record<string, string> = {};
+    urls.forEach(u => { immediate[u] = getSignedUrlFromCache(u); });
+    setSignedMediaUrls(prev => ({ ...prev, ...immediate }));
+    batchGetSignedUrls(urls).then(() => {
+      setSignedMediaUrls(prev => {
+        const updated = { ...prev };
+        urls.forEach(u => { updated[u] = getSignedUrlFromCache(u); });
+        return updated;
+      });
+    });
+  }, [referencesCache]);
+
+  // referencesCache 变化时批量签名
+  useEffect(() => {
+    signAllMediaUrls();
+  }, [signAllMediaUrls]);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -607,11 +638,12 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
                 >
                   {(() => {
                     // 统一渲染：图片与视频都显示为图片海报
-                    const mediaSrc = current
+                    let rawSrc = current
                       ? (current.type === 'video'
                           ? (getVideoPoster(current.url) || current.url)
                           : current.url)
                       : DEFAULT_COVER;
+                    const mediaSrc = current && current.url ? (signedMediaUrls[current.url] || rawSrc) : rawSrc;
                     return (
                       <img
                         src={mediaSrc}
@@ -967,12 +999,12 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
           </button>
           <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
             {fullscreenItem.type === 'image' ? (
-              <img src={fullscreenItem.url} alt={fullscreenTitle || fullscreenItem.title} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
+              <img src={signedFullscreenUrl} alt={fullscreenTitle || fullscreenItem.title} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
             ) : (
               <video
                 ref={fullscreenVideoRef}
-                src={fullscreenItem.url}
-                poster={getVideoPoster(fullscreenItem.url)}
+                src={signedFullscreenUrl}
+                poster={signedFullscreenPoster}
                 controls
                 playsInline
                 className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"

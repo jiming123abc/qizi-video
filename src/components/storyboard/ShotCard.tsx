@@ -21,6 +21,7 @@ import type { Shot, ShotMedia } from '../../lib/types';
 import { MediaCarousel } from './MediaCarousel';
 import { getVideoPoster } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
 
 interface ShotCardProps {
   shot: Shot;
@@ -287,6 +288,10 @@ export function ShotCard({
   const videoKey = `${shot.id}-${currentMedia?.id}`;
   const isThisVideoPlaying = playingVideoKey === videoKey;
 
+  // 签名 URL
+  const signedMediaUrl = useSignedUrl(currentMedia?.url);
+  const signedPosterUrl = useSignedUrl(currentMedia?.url ? getVideoPoster(currentMedia.url) : undefined);
+
   useEffect(() => {
     if (!cardRef.current) return;
     const observer = new IntersectionObserver(
@@ -438,7 +443,7 @@ export function ShotCard({
                         </div>
                       ) : isVisible ? (
                         <img
-                          src={getVideoPoster(currentMedia.url) || currentMedia.url}
+                          src={signedPosterUrl || signedMediaUrl}
                           alt={currentMedia.filename}
                           className="w-full h-full object-cover"
                           loading="lazy"
@@ -457,7 +462,7 @@ export function ShotCard({
                   {shouldLoadVideo && isVisible && (
                     <video
                       ref={videoRef}
-                      src={currentMedia.url}
+                      src={signedMediaUrl}
                       muted={false}
                       playsInline
                       loop
@@ -517,7 +522,7 @@ export function ShotCard({
                   </div>
                 ) : (
                   <img
-                    src={currentMedia.url}
+                    src={signedMediaUrl}
                     alt={currentMedia.filename}
                     className="w-full h-full object-cover"
                     loading="lazy"

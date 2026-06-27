@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Upload, GripVertical, Sparkles, Image as ImageIcon, FileVideo } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from '../VideoCompressionDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
@@ -55,8 +56,30 @@ export default function MediaManagerDialog({
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sceneRefInputRef = useRef<HTMLInputElement>(null);
+
+  // 弹窗打开时批量签名所有媒体 URL
+  useEffect(() => {
+    if (!isOpen) return;
+    const urls = mediaList.map(m => m.url).filter(Boolean);
+    if (urls.length === 0) return;
+    import('../../lib/ossUtils').then(({ batchGetSignedUrls, getSignedUrlFromCache }) => {
+      // 立即使用缓存中的 URL（同步）
+      const immediate: Record<string, string> = {};
+      urls.forEach(u => { immediate[u] = getSignedUrlFromCache(u); });
+      setSignedUrls(immediate);
+      // 异步请求剩余未缓存的
+      batchGetSignedUrls(urls).then(() => {
+        setSignedUrls(prev => {
+          const updated = { ...prev };
+          urls.forEach(u => { updated[u] = getSignedUrlFromCache(u); });
+          return updated;
+        });
+      });
+    });
+  }, [isOpen, mediaList.length]);
 
   // 压缩选择对话框状态
   const [pendingVideo, setPendingVideo] = useState<File | null>(null);
@@ -394,11 +417,11 @@ export default function MediaManagerDialog({
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
                         {media.type === 'image' ? (
-                          <ImageWrapper url={media.url} alt={media.filename} />
+                          <ImageWrapper url={signedUrls[media.url] || media.url} alt={media.filename} />
                         ) : (
                           <>
                             <video
-                              src={media.url}
+                              src={signedUrls[media.url] || media.url}
                               className="w-full h-full object-cover"
                               muted
                               preload="metadata"
