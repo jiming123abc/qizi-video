@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { MediaCarousel } from './MediaCarousel';
-import { getOssProxyUrl, getVideoPoster } from '../../lib/ossUtils';
+import { getVideoPoster } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 interface ShotCardProps {
@@ -438,7 +438,7 @@ export function ShotCard({
                         </div>
                       ) : isVisible ? (
                         <img
-                          src={getVideoPoster(currentMedia.url) || getOssProxyUrl(currentMedia.url)}
+                          src={getVideoPoster(currentMedia.url) || currentMedia.url}
                           alt={currentMedia.filename}
                           className="w-full h-full object-cover"
                           loading="lazy"
@@ -457,7 +457,7 @@ export function ShotCard({
                   {shouldLoadVideo && isVisible && (
                     <video
                       ref={videoRef}
-                      src={getOssProxyUrl(currentMedia.url)}
+                      src={currentMedia.url}
                       muted={false}
                       playsInline
                       loop
@@ -517,7 +517,7 @@ export function ShotCard({
                   </div>
                 ) : (
                   <img
-                    src={getOssProxyUrl(currentMedia.url)}
+                    src={currentMedia.url}
                     alt={currentMedia.filename}
                     className="w-full h-full object-cover"
                     loading="lazy"

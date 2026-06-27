@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
-import { uploadVideo2Image, uploadVideo2Video, uploadVideo2FromUrl, detectFileType, getOssProxyUrl, checkVideoBitrate } from '../lib/ossUtils';
+import { uploadVideo2Image, uploadVideo2Video, uploadVideo2FromUrl, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
 import type { UploadDecision } from '../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { ShareHint } from './WeChatShareHint';
@@ -49,7 +49,7 @@ interface UploadingFile {
 // 视频 poster（OSS 截图）
 function getPosterUrl(videoUrl: string): string {
   if (videoUrl && (videoUrl.includes('aliyuncs.com') || videoUrl.includes('qiziwenhua.top'))) {
-    return getOssProxyUrl(videoUrl + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast');
+    return videoUrl + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
   }
   return '';
 }
@@ -2065,11 +2065,11 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           </button>
           <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
             {fullscreenItem.type === 'image' ? (
-              <img src={getOssProxyUrl(fullscreenItem.url)} alt={fullscreenItem.filename || fullscreenItem.url} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
+              <img src={fullscreenItem.url} alt={fullscreenItem.filename || fullscreenItem.url} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
             ) : (
               <video
                 ref={fullscreenVideoRef}
-                src={getOssProxyUrl(fullscreenItem.url)}
+                src={fullscreenItem.url}
                 poster={getPosterUrl(fullscreenItem.url)}
                 controls
                 autoPlay

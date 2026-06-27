@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Upload, GripVertical, Sparkles, Image as ImageIcon, FileVideo } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
-import { uploadVideo2Image, uploadVideo2Video, detectFileType, getOssProxyUrl, checkVideoBitrate } from '../../lib/ossUtils';
+import { uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from '../VideoCompressionDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
@@ -24,20 +24,19 @@ interface UploadingItem {
   message?: string;
 }
 
-function ImageWrapper({ url, alt, ossKey }: { url: string; alt: string; ossKey?: string }) {
+function ImageWrapper({ url, alt }: { url: string; alt: string }) {
   const [hasError, setHasError] = useState(false);
-  const proxyUrl = getOssProxyUrl(url, ossKey);
   
   if (hasError) {
     return <ImageIcon className="w-8 h-8 text-white/30" />;
   }
   return (
     <img
-      src={proxyUrl}
+      src={url}
       alt={alt}
       className="w-full h-full object-cover absolute inset-0"
       onError={(e) => {
-        console.error('[MediaManager] 图片加载失败:', { url, proxyUrl, ossKey, alt });
+        console.error('[MediaManager] 图片加载失败:', { url, alt });
         setHasError(true);
       }}
     />
@@ -395,11 +394,11 @@ export default function MediaManagerDialog({
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
                         {media.type === 'image' ? (
-                          <ImageWrapper url={media.url} alt={media.filename} ossKey={(media as any).ossKey} />
+                          <ImageWrapper url={media.url} alt={media.filename} />
                         ) : (
                           <>
                             <video
-                              src={getOssProxyUrl(media.url, (media as any).ossKey)}
+                              src={media.url}
                               className="w-full h-full object-cover"
                               muted
                               preload="metadata"

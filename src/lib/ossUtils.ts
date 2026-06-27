@@ -57,7 +57,7 @@ export function getOssProxyUrl(ossUrl: string, ossKey?: string): string {
 
 export function getVideoPoster(url: string): string {
   if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
-    return getOssProxyUrl(url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast');
+    return url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
   }
   return '';
 }
