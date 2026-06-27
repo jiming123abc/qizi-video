@@ -2729,7 +2729,7 @@ app.get('/api/video2/oss-sign-urls', async (req, res) => {
       return res.json({ signedUrls: {} });
     }
 
-    const results: Record<string, string> = {};
+    const results = {};
 
     for (const urlStr of urlList) {
       const str = String(urlStr);
