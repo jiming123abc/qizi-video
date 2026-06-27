@@ -26,6 +26,7 @@ import { useSignedUrl } from '../../hooks/useSignedUrl';
 interface ShotCardProps {
   shot: Shot;
   isSelected?: boolean;
+  highlighted?: boolean;
   onSelect?: (shot: Shot) => void;
   onUpdate?: (id: number, fields: Partial<Shot>) => void;
   onDelete?: (id: number) => void;
@@ -249,6 +250,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
 export function ShotCard({
   shot,
   isSelected = false,
+  highlighted = false,
   onSelect,
   onUpdate,
   onDelete,
@@ -414,12 +416,15 @@ export function ShotCard({
   return (
     <div
       ref={cardRef}
+      id={`shot-card-${shot.id}`}
       className={`relative rounded-2xl border overflow-hidden transition-all ${
-        isSelected
-          ? 'border-violet-400/60 ring-2 ring-violet-400/30 bg-white/[0.05]'
-          : shot.status === 'done'
-            ? 'border-green-500/30 bg-green-900/10 hover:border-green-400/50 border-l-2 border-l-green-400/60'
-            : 'border-white/10 bg-white/[0.03] hover:border-violet-400/30'
+        highlighted
+          ? 'ring-2 ring-violet-400 ring-offset-2 ring-offset-slate-900 border-violet-400/60'
+          : isSelected
+            ? 'border-violet-400/60 ring-2 ring-violet-400/30 bg-white/[0.05]'
+            : shot.status === 'done'
+              ? 'border-green-500/30 bg-green-900/10 hover:border-green-400/50 border-l-2 border-l-green-400/60'
+              : 'border-white/10 bg-white/[0.03] hover:border-violet-400/30'
       }`}
     >
       {/* 顶部媒体区域 */}

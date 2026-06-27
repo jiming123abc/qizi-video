@@ -119,12 +119,14 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
 
   const [project, setProject] = useState<Project | null>(null);
   const [stats, setStats] = useState<{ pending: number; done: number; trash: number; unclassified: number }>({ pending: 0, done: 0, trash: 0, unclassified: 0 });
+  const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, { done: number; total: number }>>({});
   const [loading, setLoading] = useState(true);
 
   const [currentTab, setCurrentTab] = useState<'pending' | 'done' | 'trash'>('pending');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchDialog, setShowSearchDialog] = useState(false);
   const [showDesktopSearch, setShowDesktopSearch] = useState(false);
+  const [highlightedShotId, setHighlightedShotId] = useState<number | null>(null);
 
   // 已拍摄按钮确认弹窗
   const [showConfirmDialog, setShowConfirmDialog] = useState<Shot | null>(null);
@@ -150,6 +152,7 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const [urlInputValue, setUrlInputValue] = useState('');
+  const [urlError, setUrlError] = useState('');
 
   const [shareHintVisible, setShareHintVisible] = useState(false);
   const [shareHintMode, setShareHintMode] = useState<'wechat' | 'default'>('default');
@@ -319,6 +322,23 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
     }
   }, [loadShotsApi, currentSceneId, currentTab]);
 
+  const loadSceneStats = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/video2/scene-stats?projectId=${projectId}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        const map: Record<string, { done: number; total: number }> = {};
+        data.data.forEach((s: any) => {
+          const key = s.id === null ? 'null' : String(s.id);
+          map[key] = { done: s.done, total: s.total };
+        });
+        setSceneStatsMap(map);
+      }
+    } catch (e) {
+      console.error('加载场次统计失败:', e);
+    }
+  }, [projectId]);
+
   const loadStats = useCallback(async () => {
     try {
       const params = new URLSearchParams();
@@ -344,8 +364,8 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   }, [projectId, currentSceneId, currentTab]);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadProject(), loadScenes(), loadShots(), loadStats()]);
-  }, [loadProject, loadScenes, loadShots, loadStats]);
+    await Promise.all([loadProject(), loadScenes(), loadShots(), loadStats(), loadSceneStats()]);
+  }, [loadProject, loadScenes, loadShots, loadStats, loadSceneStats]);
 
   useEffect(() => {
     setLoading(true);
@@ -427,6 +447,7 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
       setShots(prev => prev.filter(it => it.id !== shot.id));
       // 同步 stats
       await loadStats();
+      loadSceneStats();
       showToast(newStatus === 'done' ? '已标记为已拍摄' : '已回到未拍摄');
     } catch (e) {
       console.error('更新状态失败:', e);
@@ -968,6 +989,7 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
         <ShotCard
           shot={shot}
           isSelected={isSelected}
+          highlighted={highlightedShotId === shot.id}
           onSelect={(s) => toggleSelect(s.id)}
           onUpdate={handleUpdate}
           onDelete={handleDelete}
@@ -1007,9 +1029,35 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           shot.sceneContent?.toLowerCase().includes(query) ||
           shot.actors?.toLowerCase().includes(query) ||
           shot.location?.toLowerCase().includes(query) ||
-          shot.narration?.toLowerCase().includes(query)
+          shot.narration?.toLowerCase().includes(query) ||
+          shot.shotNo?.toLowerCase().includes(query)
         );
       });
+
+  // # 编号快速定位
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed.startsWith('#')) {
+      setHighlightedShotId(null);
+      return;
+    }
+    const shotNoQuery = trimmed.slice(1).toLowerCase();
+    if (!shotNoQuery) return;
+    const target = sortedShots.find(s => s.shotNo?.toLowerCase().includes(shotNoQuery));
+    if (target) {
+      setHighlightedShotId(target.id);
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`shot-card-${target.id}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 50);
+      const clearTimer = setTimeout(() => setHighlightedShotId(null), 2500);
+      return () => { clearTimeout(timer); clearTimeout(clearTimer); };
+    } else {
+      setHighlightedShotId(null);
+    }
+  }, [searchQuery, sortedShots]);
 
   // 上传按钮是否可用
   const uploadAvailable = currentTab === 'pending';
@@ -1255,6 +1303,19 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
                     <GripVertical className="w-3.5 h-3.5 text-white/90 shrink-0 cursor-grab active:cursor-grabbing" />
                   )}
                   <span>{scene.name}</span>
+                  {(() => {
+                    const s = sceneStatsMap[String(scene.id)];
+                    if (s && s.total > 0) {
+                      return (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          isActive ? 'bg-white/20 text-white/90' : 'bg-white/10 text-slate-400'
+                        }`}>
+                          {s.done}/{s.total}
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
                 </button>
               );
             })}
@@ -1275,6 +1336,19 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
                 title="未分类"
               >
                 未分类
+                {(() => {
+                  const s = sceneStatsMap['null'];
+                  if (s && s.total > 0) {
+                    return (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ml-1 ${
+                        currentSceneId === null ? 'bg-white/20 text-white/90' : 'bg-white/10 text-slate-400'
+                      }`}>
+                        {s.done}/{s.total}
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
               </button>
             )}
 
@@ -1720,18 +1794,39 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
                   <input
                     type="text"
                     value={urlInputValue}
-                    onChange={(e) => setUrlInputValue(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setUrlInputValue(val);
+                      if (val.trim()) {
+                        try {
+                          const u = new URL(val);
+                          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+                            setUrlError('仅支持 HTTP/HTTPS 链接');
+                          } else {
+                            setUrlError('');
+                          }
+                        } catch {
+                          setUrlError('请输入有效的 URL 地址');
+                        }
+                      } else {
+                        setUrlError('');
+                      }
+                    }}
                     placeholder="https://example.com/image.jpg 或 https://example.com/video.mp4"
-                    className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm transition"
-                    onKeyDown={(e) => e.key === 'Enter' && handleUploadFromUrl()}
+                    className={`flex-1 px-4 py-2.5 rounded-xl bg-white/5 border outline-none text-sm transition ${
+                      urlError ? 'border-red-500/50 focus:border-red-400/60' : 'border-white/10 focus:border-violet-400/50'
+                    }`}
+                    onKeyDown={(e) => e.key === 'Enter' && !urlError && handleUploadFromUrl()}
                   />
                   <button
                     onClick={handleUploadFromUrl}
-                    disabled={!urlInputValue.trim()}
+                    disabled={!urlInputValue.trim() || !!urlError}
                     className="px-4 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
                   >转存</button>
                 </div>
-                <p className="text-xs text-slate-500 mt-2">URL 必须是公开可访问资源链接</p>
+                <p className={'text-xs mt-2 ' + (urlError ? 'text-red-400' : 'text-slate-500')}>
+                  {urlError || 'URL 必须是公开可访问资源链接'}
+                </p>
               </div>
             )}
 

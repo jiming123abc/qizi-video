@@ -56,6 +56,7 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [projectStats, setProjectStats] = useState<Record<number, { done: number; pending: number; total: number }>>({});
 
   // 分享提示
   const [shareHintVisible, setShareHintVisible] = useState(false);
@@ -136,7 +137,20 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     try {
       const res = await fetch('/api/video2/projects');
       const data = await res.json();
-      if (data.success) setProjects(data.data);
+      if (data.success) {
+        setProjects(data.data);
+        const ids = (data.data || []).map((p: Project) => p.id);
+        ids.forEach(id => {
+          fetch(`/api/video2/stats?projectId=${id}`)
+            .then(r => r.json())
+            .then(d => {
+              if (d.success) {
+                setProjectStats(prev => ({ ...prev, [id]: d.data }));
+              }
+            })
+            .catch(() => {});
+        });
+      }
     } catch (e) {
       console.error('加载项目列表失败:', e);
     } finally {
@@ -767,9 +781,37 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
                   </div>
 
                   <div className="flex items-center gap-3 text-xs text-slate-400 mt-1">
-                    <span className="inline-flex items-center gap-1">
-                      <Film className="w-3.5 h-3.5" /> {project.videoCount} 项
-                    </span>
+                    {(() => {
+                      const st = projectStats[project.id];
+                      if (st && st.total > 0) {
+                        const pct = Math.round((st.done / st.total) * 100);
+                        const R = 8;
+                        const C = 2 * Math.PI * R;
+                        const offset = C * (1 - pct / 100);
+                        return (
+                          <span className="inline-flex items-center gap-1.5">
+                            <svg width="18" height="18" viewBox="0 0 20 20">
+                              <circle cx="10" cy="10" r={R} stroke="rgba(255,255,255,0.1)" strokeWidth="2.5" fill="none" />
+                              <circle cx="10" cy="10" r={R} stroke="url(#progGrad)" strokeWidth="2.5" fill="none"
+                                strokeDasharray={C} strokeDashoffset={offset} strokeLinecap="round"
+                                transform="rotate(-90 10 10)" />
+                              <defs>
+                                <linearGradient id="progGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                  <stop offset="0%" stopColor="#8b5cf6" />
+                                  <stop offset="100%" stopColor="#ec4899" />
+                                </linearGradient>
+                              </defs>
+                            </svg>
+                            {st.done}/{st.total} 已拍摄
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="inline-flex items-center gap-1">
+                          <Film className="w-3.5 h-3.5" /> {project.videoCount} 项
+                        </span>
+                      );
+                    })()}
                     <span className="inline-flex items-center gap-1">
                       <HardDrive className="w-3.5 h-3.5" /> {formatSize(project.totalSize)}
                     </span>

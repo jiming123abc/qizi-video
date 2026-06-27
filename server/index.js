@@ -1922,6 +1922,18 @@ app.get('/api/video2/stats', async (req, res) => {
   }
 });
 
+app.get('/api/video2/scene-stats', async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) return res.status(400).json({ success: false, message: '缺少 projectId' });
+    const stats = await db.video2Items.getSceneStats(parseInt(projectId));
+    res.json({ success: true, data: stats });
+  } catch (error) {
+    console.error('[video2] 获取场次统计失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // ========== 数据导出端点 ==========
 
 app.get('/api/video2/projects/:id/export', async (req, res) => {
@@ -2980,9 +2992,49 @@ app.post('/api/video2/upload/from-url', async (req, res) => {
     const { url, type, projectId, sceneId, title, reference } = req.body;
     if (!url) return res.status(400).json({ success: false, message: '缺少 url' });
 
-    const actualType = type === 'image' ? 'image' : 'video';
-    // OSS 路径按项目ID分文件夹，未指定项目时使用 default
-    const folder = projectId ? `${projectId}/${actualType}s` : `default/${actualType}s`;
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ success: false, message: 'URL 格式无效' });
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return res.status(400).json({ success: false, message: '仅支持 HTTP/HTTPS 链接' });
+    }
+
+    let probeOk = false;
+    let detectedType = null;
+    let probeError = null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const probe = await fetch(url, {
+        method: 'HEAD',
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (probe.ok) {
+        probeOk = true;
+        const contentType = probe.headers.get('content-type') || '';
+        if (contentType.startsWith('image/')) detectedType = 'image';
+        else if (contentType.startsWith('video/')) detectedType = 'video';
+      } else {
+        probeError = `HTTP ${probe.status}`;
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        probeError = '探测超时';
+      } else {
+        probeError = err.message;
+      }
+    }
+
+    if (!probeOk) {
+      return res.status(400).json({ success: false, message: `URL 无法访问：${probeError || '未知错误'}` });
+    }
+
+    const actualType = type === 'image' ? 'image' : (detectedType || 'video');
+    const folder = projectId ? `projects/${projectId}/${actualType}s` : `projects/default/${actualType}s`;
     const ext = (url.split('.').pop() || '').split('?')[0] || (actualType === 'image' ? 'jpg' : 'mp4');
     const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 8)}.${ext}`;
 

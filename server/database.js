@@ -1083,6 +1083,37 @@ const video2Items = {
     map.unclassified = unclassified ? unclassified.cnt : 0;
     return map;
   },
+  getSceneStats: async (projectId) => {
+    const rows = await video2Async.all(
+      `SELECT v.sceneId, s.name as sceneName, v.status, COUNT(*) as cnt
+       FROM videos v
+       LEFT JOIN video2_scenes s ON v.sceneId = s.id
+       WHERE v.projectId = ? AND v.deleted = 0 AND v.status != 'trash'
+       GROUP BY v.sceneId, v.status
+       ORDER BY s.sortOrder IS NULL, s.sortOrder ASC, v.sceneId IS NULL, v.sceneId ASC`,
+      [projectId]
+    );
+    const sceneMap = {};
+    rows.forEach(r => {
+      const key = r.sceneId ?? 'null';
+      if (!sceneMap[key]) {
+        sceneMap[key] = {
+          id: r.sceneId,
+          name: r.sceneName || '未分类',
+          pending: 0,
+          done: 0,
+          total: 0
+        };
+      }
+      if (r.status === 'done') {
+        sceneMap[key].done = r.cnt;
+      } else {
+        sceneMap[key].pending += r.cnt;
+      }
+      sceneMap[key].total += r.cnt;
+    });
+    return Object.values(sceneMap);
+  },
   getById: async (id) => {
     const row = await video2Async.get('SELECT * FROM videos WHERE id = ?', [id]);
     return formatShot(row);
