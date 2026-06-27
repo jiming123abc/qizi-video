@@ -1087,7 +1087,7 @@ const video2Items = {
     const rows = await video2Async.all(
       `SELECT v.sceneId, s.name as sceneName, v.status, COUNT(*) as cnt
        FROM videos v
-       LEFT JOIN video2_scenes s ON v.sceneId = s.id
+       LEFT JOIN scenes s ON v.sceneId = s.id
        WHERE v.projectId = ? AND v.deleted = 0 AND v.status != 'trash'
        GROUP BY v.sceneId, v.status
        ORDER BY s.sortOrder IS NULL, s.sortOrder ASC, v.sceneId IS NULL, v.sceneId ASC`,
