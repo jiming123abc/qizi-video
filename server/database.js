@@ -1114,6 +1114,121 @@ const video2Items = {
     });
     return Object.values(sceneMap);
   },
+  exportProject: async (projectId) => {
+    const project = await video2Async.get('SELECT * FROM projects WHERE id = ?', [projectId]);
+    if (!project) return null;
+    const scenes = await video2Async.all(
+      'SELECT id, name, sortOrder, createdAt, updatedAt FROM scenes WHERE projectId = ? ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC',
+      [projectId]
+    );
+    const shots = await video2Async.all(
+      `SELECT id, title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
+              narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
+              props, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
+              focalLength, lighting, estimatedDuration, aiStylePrompt, shotIndex
+       FROM videos WHERE projectId = ? AND deleted = 0
+       ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC`,
+      [projectId]
+    );
+    const shotIds = shots.map(s => s.id);
+    let media = [];
+    if (shotIds.length > 0) {
+      const placeholders = shotIds.map(() => '?').join(',');
+      media = await video2Async.all(
+        `SELECT id, shotId, url, type, filename, size, duration, sortOrder, source, createdAt
+         FROM shot_media WHERE shotId IN (${placeholders})
+         ORDER BY shotId ASC, sortOrder ASC, id ASC`,
+        shotIds
+      );
+    }
+    return {
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      project: {
+        name: project.name,
+        description: project.description,
+        coverUrl: project.coverUrl,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt
+      },
+      scenes,
+      shots,
+      media
+    };
+  },
+  importProject: async (projectData, targetProjectId = null, mode = 'merge') => {
+    const { project, scenes, shots, media } = projectData;
+    let newProjectId = targetProjectId;
+
+    if (!targetProjectId) {
+      const result = await video2Async.run(
+        'INSERT INTO projects (name, description, coverUrl, sortOrder) VALUES (?, ?, ?, ?)',
+        [
+          project?.name || '导入的项目',
+          project?.description || '',
+          project?.coverUrl || null,
+          null
+        ]
+      );
+      newProjectId = result.lastID;
+    } else {
+      const existing = await video2Async.get('SELECT * FROM projects WHERE id = ?', [targetProjectId]);
+      if (!existing) throw new Error('目标项目不存在');
+    }
+
+    const sceneIdMap = {};
+    if (scenes && scenes.length > 0) {
+      for (const s of scenes) {
+        const result = await video2Async.run(
+          'INSERT INTO scenes (name, sortOrder, projectId) VALUES (?, ?, ?)',
+          [s.name, s.sortOrder ?? null, newProjectId]
+        );
+        sceneIdMap[s.id] = result.lastID;
+      }
+    }
+
+    const shotIdMap = {};
+    if (shots && shots.length > 0) {
+      for (const sh of shots) {
+        const newSceneId = sh.sceneId != null ? (sceneIdMap[sh.sceneId] ?? null) : null;
+        const result = await video2Async.run(
+          `INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
+            narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
+            props, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
+            aiStylePrompt, shotIndex)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            sh.title, sh.filename, sh.url, sh.status || 'pending', sh.size || 0, sh.duration || 0,
+            sh.sortOrder ?? null, newProjectId, newSceneId, sh.type || 'video',
+            sh.coverUrl || null, sh.reference || 0,
+            sh.narration || null, sh.sceneContent || null, sh.actors || null, sh.location || null,
+            sh.shotNo || null, sh.shotType || null, sh.cameraMovement || null, sh.shotAngle || null,
+            sh.durationSeconds || null, sh.props || null, sh.notes || null,
+            sh.mergedFrom || null, sh.aiImageTaskId || null, sh.aiImagePrompt || null,
+            sh.focalLength || null, sh.lighting || null, sh.estimatedDuration || null,
+            sh.aiStylePrompt || null, sh.shotIndex || 0
+          ]
+        );
+        shotIdMap[sh.id] = result.lastID;
+      }
+    }
+
+    if (media && media.length > 0) {
+      for (const m of media) {
+        const newShotId = shotIdMap[m.shotId];
+        if (!newShotId) continue;
+        await video2Async.run(
+          'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            newShotId, m.url, m.type || 'image', m.filename || '',
+            m.size || 0, m.duration || null, m.sortOrder ?? 0, m.source || 'upload'
+          ]
+        );
+      }
+    }
+
+    return { projectId: newProjectId, sceneIdMap, shotIdMap };
+  },
   getById: async (id) => {
     const row = await video2Async.get('SELECT * FROM videos WHERE id = ?', [id]);
     return formatShot(row);

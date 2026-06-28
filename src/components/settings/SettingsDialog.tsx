@@ -1,11 +1,13 @@
-import { useState, useEffect, useCallback, DragEvent } from 'react';
-import { X, Eye, EyeOff, Plus, GripVertical, Trash2, ChevronDown, Loader2 } from 'lucide-react';
+import { useState, useEffect, useCallback, DragEvent, useRef } from 'react';
+import { X, Eye, EyeOff, Plus, GripVertical, Trash2, ChevronDown, Loader2, Download, Upload, AlertTriangle, LogIn, LogOut, Lock } from 'lucide-react';
 import type { ModelConfig, Settings } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { getAdminToken, setAdminToken, clearAdminToken, checkAuth, loginWithToken } from '../../lib/auth';
 
 interface SettingsDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  projectId?: number;
 }
 
 // 可用的模型列表
@@ -47,10 +49,21 @@ function maskApiKey(key: string): string {
   return key.slice(0, 8) + '••••••••••••••••••' + key.slice(-6);
 }
 
-export default function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
+export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsDialogProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [backingUp, setBackingUp] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMode, setImportMode] = useState<'new' | 'merge'>('new');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [loginToken, setLoginToken] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [showToken, setShowToken] = useState(false);
 
   // API Key 显示/隐藏状态
   const [showGeekaiKey, setShowGeekaiKey] = useState(false);
@@ -88,11 +101,16 @@ export default function SettingsDialog({ isOpen, onClose }: SettingsDialogProps)
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/video2/settings');
-      if (res.ok) {
-        const data = await res.json();
+      const [settingsRes, authRes] = await Promise.all([
+        fetch('/api/video2/settings'),
+        checkAuth()
+      ]);
+      if (settingsRes.ok) {
+        const data = await settingsRes.json();
         setSettings(prev => ({ ...prev, ...data }));
       }
+      setAuthEnabled(authRes.enabled);
+      setAuthenticated(authRes.authenticated);
     } catch (e) {
       console.error('加载设置失败:', e);
       setError('加载设置失败');
@@ -136,6 +154,102 @@ export default function SettingsDialog({ isOpen, onClose }: SettingsDialogProps)
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleBackup = async () => {
+    if (!projectId) return;
+    setBackingUp(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/video2/projects/${projectId}/backup`);
+      if (!res.ok) throw new Error('导出失败');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = res.headers.get('Content-Disposition');
+      let fileName = 'project_backup.json';
+      if (cd) {
+        const match = cd.match(/filename="?([^"]+)"?/);
+        if (match) fileName = decodeURIComponent(match[1]);
+      }
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('导出备份失败:', e);
+      setError('导出备份失败');
+    } finally {
+      setBackingUp(false);
+    }
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    setError(null);
+    try {
+      const text = await file.text();
+      const projectData = JSON.parse(text);
+
+      const res = await fetch('/api/video2/projects/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectData,
+          targetProjectId: importMode === 'merge' ? projectId : null,
+          mode: importMode
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || '导入失败');
+      }
+
+      const data = await res.json();
+      alert(`导入成功！\n场次: ${data.sceneCount} 个\n分镜: ${data.shotCount} 个`);
+      onClose();
+      window.location.reload();
+    } catch (e: any) {
+      console.error('导入备份失败:', e);
+      setError('导入备份失败: ' + (e.message || ''));
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!loginToken.trim()) return;
+    setLoginLoading(true);
+    setError(null);
+    try {
+      const ok = await loginWithToken(loginToken.trim());
+      if (ok) {
+        setAuthenticated(true);
+        setLoginToken('');
+      } else {
+        setError('密码错误，请重试');
+      }
+    } catch (e) {
+      setError('登录失败');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    clearAdminToken();
+    setAuthenticated(false);
   };
 
   // LLM 降级链操作
@@ -536,6 +650,153 @@ export default function SettingsDialog({ isOpen, onClose }: SettingsDialogProps)
                   </select>
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                 </div>
+              </section>
+
+              <div className="h-px bg-white/10" />
+
+              {/* 项目备份与恢复 */}
+              {projectId && (
+                <section>
+                  <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
+                    <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
+                    项目备份与恢复
+                  </h3>
+
+                  <div className="space-y-4">
+                    <button
+                      onClick={handleBackup}
+                      disabled={backingUp}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-violet-500/20 to-fuchsia-500/20 border border-violet-500/30 hover:from-violet-500/30 hover:to-fuchsia-500/30 text-violet-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      {backingUp ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                      导出项目备份（JSON）
+                    </button>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <label className="text-sm text-slate-300">导入模式：</label>
+                        <div className="flex items-center gap-4">
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              checked={importMode === 'new'}
+                              onChange={() => setImportMode('new')}
+                              className="accent-violet-500"
+                            />
+                            <span className="text-sm text-slate-300">新建项目</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              checked={importMode === 'merge'}
+                              onChange={() => setImportMode('merge')}
+                              className="accent-violet-500"
+                            />
+                            <span className="text-sm text-slate-300">合并到当前</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleImportClick}
+                        disabled={importing}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition"
+                      >
+                        {importing ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Upload className="w-4 h-4" />
+                        )}
+                        从备份文件导入
+                      </button>
+
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".json"
+                        onChange={handleFileChange}
+                        className="hidden"
+                      />
+
+                      {importMode === 'merge' && (
+                        <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                          <p className="text-xs text-amber-300">
+                            合并模式会将备份中的场次和分镜添加到当前项目，不会覆盖现有数据。
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              <div className="h-px bg-white/10" />
+
+              {/* 管理员鉴权 */}
+              <section>
+                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
+                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
+                  管理员鉴权
+                </h3>
+
+                {!authEnabled ? (
+                  <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                    <Lock className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <p className="text-xs text-emerald-300">
+                      未启用管理员鉴权，所有操作均可公开访问。
+                    </p>
+                  </div>
+                ) : authenticated ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                      <LogIn className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <p className="text-sm text-emerald-300">
+                        已登录，拥有管理员权限
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleLogout}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm font-medium transition"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      退出登录
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="relative">
+                      <input
+                        type={showToken ? 'text' : 'password'}
+                        value={loginToken}
+                        onChange={(e) => setLoginToken(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                        placeholder="请输入管理员密码"
+                        className="w-full px-4 py-2.5 pr-10 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 placeholder-slate-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowToken(!showToken)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition"
+                      >
+                        {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <button
+                      onClick={handleLogin}
+                      disabled={loginLoading || !loginToken.trim()}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:shadow-lg hover:shadow-violet-500/30 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      {loginLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <LogIn className="w-4 h-4" />
+                      登录
+                    </button>
+                  </div>
+                )}
               </section>
 
               {/* 错误提示 */}

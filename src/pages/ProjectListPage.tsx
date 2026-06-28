@@ -4,8 +4,8 @@ import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils
 import { uploadVideo2Image, uploadVideo2Video, detectFileType, uploadVideo2FromUrl, checkVideoBitrate } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
-import { ShareHint } from './WeChatShareHint';
-import { VideoCompressionDialog } from './VideoCompressionDialog';
+import { ShareHint } from '../components/WeChatShareHint';
+import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { timeAgo, formatSize } from '../lib/utils';
 
 interface Project {
@@ -42,11 +42,11 @@ function getVideoPoster(url: string): string {
   return '';
 }
 
-interface Video2ProjectListProps {
+interface ProjectListPageProps {
   onSelectProject?: (projectId: number) => void;
 }
 
-export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
+export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -161,12 +161,12 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
   useEffect(() => {
     loadProjects();
     setupShareMetadata({
-      title: '柒子文化拍摄辅助',
+      title: '柒子文化AI拍摄辅助系统',
       desc: '专业的视频拍摄管理工具，帮助团队高效管理拍摄素材',
       link: window.location.href,
       imgUrl: '/images/hero-home.png'
     });
-    document.title = '柒子文化拍摄辅助';
+    document.title = '柒子文化AI拍摄辅助系统';
   }, [loadProjects]);
 
   // 加载某项目的参考文件
@@ -263,7 +263,7 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
     const shareUrl = project.shareUrl || `${window.location.origin}/share/video2/project/${project.id}`;
     setupShareMetadata({
       title: project.name,
-      desc: project.description || '柒子文化拍摄辅助 - 专业项目管理',
+      desc: project.description || '柒子文化AI拍摄辅助系统 - 专业项目管理',
       link: shareUrl,
       imgUrl: project.coverUrl || DEFAULT_COVER
     });
@@ -568,7 +568,7 @@ export function Video2ProjectList({ onSelectProject }: Video2ProjectListProps) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div>
             <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-violet-300 via-pink-300 to-fuchsia-300 bg-clip-text text-transparent">
-              柒子文化拍摄辅助
+              柒子文化AI拍摄辅助系统
             </h1>
             <p className="text-sm text-slate-400 mt-0.5 hidden sm:block">项目管理 · 多场景素材统筹</p>
           </div>

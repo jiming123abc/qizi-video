@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Video2ProjectList } from './components/Video2ProjectList';
-import { Video2Page } from './components/Video2Page';
+import { ProjectListPage } from './pages/ProjectListPage';
+import { StoryboardPage } from './pages/StoryboardPage';
 
-type Video2Route = { page: 'list' } | { page: 'project'; projectId: number };
+type Route = { page: 'list' } | { page: 'project'; projectId: number };
 
-export default function Video2App() {
-  const [route, setRoute] = useState<Video2Route>({ page: 'list' });
+export default function App() {
+  const [route, setRoute] = useState<Route>({ page: 'list' });
 
   useEffect(() => {
     const parseRoute = () => {
@@ -40,8 +40,8 @@ export default function Video2App() {
   };
 
   if (route.page === 'project') {
-    return <Video2Page projectId={route.projectId} onBack={navigateToList} />;
+    return <StoryboardPage projectId={route.projectId} onBack={navigateToList} />;
   }
 
-  return <Video2ProjectList onSelectProject={navigateToProject} />;
+  return <ProjectListPage onSelectProject={navigateToProject} />;
 }

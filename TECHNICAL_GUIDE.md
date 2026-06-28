@@ -123,13 +123,45 @@ video.qiziwenhua.top 启用了 Cloudflare CDN：
 ```
 qizi-video/
 ├── src/                    # 前端源码
+│   ├── pages/              # 页面级组件
+│   │   ├── StoryboardPage.tsx    # 分镜主页面（原 Video2Page）
+│   │   └── ProjectListPage.tsx   # 项目列表页（原 Video2ProjectList）
 │   ├── components/         # React 组件
 │   │   ├── storyboard/     # 分镜相关组件
+│   │   │   ├── ShotCard.tsx
+│   │   │   ├── ShotSearchBar.tsx
+│   │   │   ├── ShotSkeleton.tsx
+│   │   │   ├── EmptyState.tsx
+│   │   │   ├── BottomTabBar.tsx
+│   │   │   ├── MediaCarousel.tsx
+│   │   │   ├── MediaManagerDialog.tsx
+│   │   │   ├── AddShotDialog.tsx
+│   │   │   ├── VideoSplitDialog.tsx
+│   │   │   ├── VideoCompressionDialog.tsx
+│   │   │   ├── SceneTabs.tsx        # 场次标签栏
+│   │   │   ├── SceneManager.tsx     # 场次管理面板
+│   │   │   ├── UploadDialog.tsx     # 上传对话框
+│   │   │   └── MediaFullscreen.tsx  # 全屏媒体预览
 │   │   ├── ai/             # AI 相关组件
-│   │   └── ...
+│   │   ├── settings/       # 设置相关
+│   │   └── ui/             # 通用 UI 组件
 │   ├── hooks/              # 自定义 Hooks
+│   │   ├── useUpload.ts           # 上传逻辑 hook
+│   │   ├── useShots.ts
+│   │   ├── useScenes.ts
+│   │   ├── useSignedUrl.ts
+│   │   ├── useToast.ts
+│   │   └── useEscapeKey.ts
 │   ├── lib/                # 工具函数和类型定义
-│   └── App.tsx             # 主应用
+│   │   ├── auth.ts               # 鉴权工具
+│   │   ├── taskStream.ts         # SSE 任务订阅
+│   │   ├── ossUtils.ts
+│   │   ├── shareUtils.ts
+│   │   ├── types.ts
+│   │   ├── utils.ts
+│   │   └── videoCompressor.ts
+│   ├── App.tsx             # 根组件
+│   └── main.tsx            # 入口文件
 ├── server/                 # 后端源码
 │   ├── index.js            # 服务入口
 │   ├── database.js         # 数据库操作
@@ -339,9 +371,159 @@ curl http://127.0.0.1:3001/api/video2/stats
 - 支持状态切换（待拍摄 / 已拍摄）
 - 支持搜索和筛选
 
+### 11.4 API 鉴权体系
+
+#### 当前方案：管理员 Token 模式
+
+基于 `ADMIN_TOKEN` 环境变量的简单鉴权，适合单人/小团队使用。
+
+**鉴权开关**：
+- 未设置 `ADMIN_TOKEN`（默认）：所有接口公开访问
+- 设置 `ADMIN_TOKEN` 后：写操作需要 token
+
+**鉴权规则**：
+
+| 请求方法 | 是否需要鉴权 | 说明 |
+|----------|-------------|------|
+| GET | ❌ 不需要 | 读取操作公开 |
+| POST / PUT / DELETE | ✅ 需要 | 写入操作需验证 |
+
+**例外接口**（始终公开）：
+- `GET /api/video2/auth/check` — 检查鉴权状态
+- `POST /api/video2/auth/login` — 管理员登录
+
+**Token 传递方式**（二选一）：
+```
+x-admin-token: your_token
+Authorization: Bearer your_token
+```
+
+**核心代码**：
+- 后端中间件：`server/index.js` 中的 `requireAuth` 函数
+- 前端拦截器：`src/lib/auth.ts` 中的 fetch 拦截（自动添加 token 头）
+- 前端 UI：`src/components/settings/SettingsDialog.tsx` 中的管理员登录区
+
+#### 未来扩展：用户系统方案
+
+当前架构为接入用户系统预留了平滑扩展路径，无需推翻重写。
+
+**演进路线**：
+
+```
+阶段1（当前）    阶段2           阶段3
+单管理员 Token → 多用户登录   → 角色权限(RBAC)
+所有人可读写  → 登录才能操作  → 不同角色不同权限
+```
+
+**改造步骤**：
+
+1. **数据库新增用户表**
+   ```sql
+   CREATE TABLE users (
+     id TEXT PRIMARY KEY,
+     username TEXT UNIQUE NOT NULL,
+     passwordHash TEXT NOT NULL,
+     role TEXT DEFAULT 'user', -- user / admin
+     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+   );
+   ```
+
+2. **替换 `requireAuth` 中间件**
+   - 从验证 `x-admin-token` 改为验证 JWT 或 Session Cookie
+   - 解析出用户信息后挂载到 `req.user`
+   - 示例：
+   ```javascript
+   const requireAuth = async (req, res, next) => {
+     const token = req.headers.authorization?.replace('Bearer ', '');
+     if (!token) return res.status(401).json({ error: '未登录' });
+     
+     try {
+       const payload = jwt.verify(token, JWT_SECRET);
+       const user = await db.users.getById(payload.userId);
+       if (!user) return res.status(401).json({ error: '用户不存在' });
+       req.user = user;
+       next();
+     } catch {
+       return res.status(401).json({ error: 'Token 无效' });
+     }
+   };
+   ```
+
+3. **数据权限隔离（可选）**
+   - 在查询层增加 `userId` 过滤，确保用户只能看到自己的数据
+   - 管理员角色可查看所有数据
+
+4. **前端适配**
+   - 管理员登录页改为通用登录/注册页
+   - 存储 JWT 替代当前的 admin token
+   - fetch 拦截器逻辑不变（只需改 header 名称）
+
+**兼容策略**：
+- 可保留 `ADMIN_TOKEN` 作为超级管理员后门
+- 新老鉴权方式可共存一段时间，逐步迁移
+- 中间件接口保持一致，业务代码无需改动
+
+### 11.5 SSE 任务推送
+
+使用 Server-Sent Events 实现 AI 任务状态实时推送。
+
+**端点**：`GET /api/video2/ai/task/:taskId/stream`
+
+**架构**：
+- 后端：`EventEmitter` 作为事件总线，任务更新时 emit 事件
+- Monkey-patch `db.video2AiTasks.update`，每次更新自动发事件
+- 前端：`EventSource` 监听，失败时自动回退到轮询
+
+**优点**：
+- 比轮询更高效、延迟更低
+- 比 WebSocket 更轻量，基于 HTTP，无需额外协议
+- 天然支持降级（SSE 不可用时自动回退轮询）
+
+**前端工具**：`src/lib/taskStream.ts` 中的 `subscribeToTask` 函数
+
 ---
 
-## 12. GitHub 仓库
+## 12. 重构记录
+
+### 2026-06-28 重命名与代码拆分重构
+
+**目标**：移除 Video2 前缀，拆分大文件，提升代码可维护性。
+
+**完成内容**：
+
+#### 程序名修改
+- "柒子文化拍摄辅助" → "柒子文化AI拍摄辅助系统"
+- 涉及文件：index.html、scripts/postbuild.cjs、server/index.js、前端组件
+
+#### 文件重命名与目录调整
+| 旧路径 | 新路径 | 说明 |
+|--------|--------|------|
+| `src/components/Video2Page.tsx` | `src/pages/StoryboardPage.tsx` | 分镜主页面 |
+| `src/components/Video2ProjectList.tsx` | `src/pages/ProjectListPage.tsx` | 项目列表页 |
+| `src/components/VideoCompressionDialog.tsx` | `src/components/storyboard/VideoCompressionDialog.tsx` | 移入 storyboard 目录 |
+| `src/main-video2.tsx` | `src/main.tsx` | 统一入口文件 |
+| `Video2App` (组件名) | `App` | 根组件重命名 |
+
+#### StoryboardPage 拆分
+**原文件行数**：2214 行 → **重构后**：1674 行（减少 24.4%）
+
+**新增组件/Hook**：
+- `src/hooks/useUpload.ts` — 上传逻辑 hook（文件/URL上传、压缩处理、进度管理）
+- `src/components/storyboard/SceneTabs.tsx` — 场次标签栏组件
+- `src/components/storyboard/SceneManager.tsx` — 场次管理面板组件
+- `src/components/storyboard/UploadDialog.tsx` — 上传对话框组件
+- `src/components/storyboard/MediaFullscreen.tsx` — 全屏媒体预览组件
+
+**保留在 StoryboardPage 中的内容**：
+- 页面整体布局和状态管理
+- 顶层数据加载（项目信息、统计数据）
+- 对话框开关状态管理
+- 视频分割专用上传逻辑
+- URL 输入验证逻辑
+
+---
+
+## 13. GitHub 仓库
 
 **仓库地址**：https://github.com/jiming123abc/qizi-video
 
@@ -351,4 +533,4 @@ curl http://127.0.0.1:3001/api/video2/stats
 
 ---
 
-*最后更新：2026-06-26*
+*最后更新：2026-06-28*

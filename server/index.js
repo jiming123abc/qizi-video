@@ -8,8 +8,24 @@ const crypto = require('crypto');
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs');
+const { EventEmitter } = require('events');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
 const db = require('./database');
+
+const taskEvents = new EventEmitter();
+taskEvents.setMaxListeners(100);
+
+const _originalAiTaskUpdate = db.video2AiTasks.update.bind(db.video2AiTasks);
+db.video2AiTasks.update = async function(taskId, updates) {
+  const success = await _originalAiTaskUpdate(taskId, updates);
+  if (success) {
+    const task = await db.video2AiTasks.get(taskId);
+    if (task) {
+      taskEvents.emit('taskUpdate', task);
+    }
+  }
+  return success;
+};
 
 const deprecatedRoutes = new Set();
 function warnDeprecated(route, newRoute) {
@@ -147,6 +163,49 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '1mb' }));
+
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+
+function requireAuth(req, res, next) {
+  if (!ADMIN_TOKEN) {
+    return next();
+  }
+  const token = req.headers['x-admin-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (!token || token !== ADMIN_TOKEN) {
+    return res.status(401).json({ success: false, message: '未授权，请先登录' });
+  }
+  next();
+}
+
+app.get('/api/video2/auth/check', (req, res) => {
+  if (!ADMIN_TOKEN) {
+    return res.json({ enabled: false, authenticated: true });
+  }
+  const token = req.headers['x-admin-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  res.json({ enabled: true, authenticated: token === ADMIN_TOKEN });
+});
+
+app.post('/api/video2/auth/login', (req, res) => {
+  if (!ADMIN_TOKEN) {
+    return res.json({ success: true, authenticated: true });
+  }
+  const { token } = req.body || {};
+  if (token === ADMIN_TOKEN) {
+    res.json({ success: true, authenticated: true });
+  } else {
+    res.status(401).json({ success: false, message: '密码错误' });
+  }
+});
+
+app.use((req, res, next) => {
+  if (ADMIN_TOKEN && req.path.startsWith('/api/video2/') && req.method !== 'GET') {
+    if (req.path === '/api/video2/auth/login' || req.path === '/api/video2/auth/check') {
+      return next();
+    }
+    return requireAuth(req, res, next);
+  }
+  next();
+});
 
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.parse.failed') {
@@ -857,6 +916,63 @@ app.get('/api/video2/ai/task/:taskId', async (req, res) => {
     console.error('[video2] 查询 AI 任务失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
+});
+
+// SSE 监听任务状态
+app.get('/api/video2/ai/task/:taskId/stream', (req, res) => {
+  const { taskId } = req.params;
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  res.write(': SSE connected\n\n');
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const handleUpdate = (updatedTask) => {
+    if (updatedTask.id === taskId) {
+      sendEvent('update', updatedTask);
+      if (updatedTask.status === 'completed' || updatedTask.status === 'failed' || updatedTask.status === 'error') {
+        taskEvents.removeListener('taskUpdate', handleUpdate);
+        res.end();
+      }
+    }
+  };
+
+  taskEvents.on('taskUpdate', handleUpdate);
+
+  db.video2AiTasks.get(taskId).then(task => {
+    if (task) {
+      sendEvent('update', task);
+      if (task.status === 'completed' || task.status === 'failed' || task.status === 'error') {
+        taskEvents.removeListener('taskUpdate', handleUpdate);
+        res.end();
+      }
+    } else {
+      sendEvent('error', { message: '任务不存在' });
+      res.end();
+    }
+  }).catch(err => {
+    console.error('[SSE] 获取任务失败:', err);
+    sendEvent('error', { message: err.message });
+    res.end();
+  });
+
+  const heartbeat = setInterval(() => {
+    res.write(': heartbeat\n\n');
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    taskEvents.removeListener('taskUpdate', handleUpdate);
+  });
 });
 
 // AI 脚本解析生成分镜
@@ -1934,6 +2050,60 @@ app.get('/api/video2/scene-stats', async (req, res) => {
   }
 });
 
+// ========== 项目备份/恢复端点 ==========
+
+app.get('/api/video2/projects/:id/backup', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const projectId = parseInt(id);
+
+    const data = await db.video2Items.exportProject(projectId);
+    if (!data) {
+      return res.status(404).json({ success: false, message: '项目不存在' });
+    }
+
+    const fileName = `${data.project.name || 'project'}_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.json(data);
+  } catch (err) {
+    console.error('[backup] 导出备份失败:', err);
+    res.status(500).json({ success: false, message: '导出备份失败', error: err.message });
+  }
+});
+
+app.post('/api/video2/projects/import', async (req, res) => {
+  try {
+    const { projectData, targetProjectId, mode = 'new' } = req.body;
+
+    if (!projectData) {
+      return res.status(400).json({ success: false, message: '缺少项目数据' });
+    }
+
+    let parsedData = projectData;
+    if (typeof projectData === 'string') {
+      parsedData = JSON.parse(projectData);
+    }
+
+    if (!parsedData.project || !parsedData.shots) {
+      return res.status(400).json({ success: false, message: '备份文件格式不正确' });
+    }
+
+    const targetId = mode === 'merge' && targetProjectId ? parseInt(targetProjectId) : null;
+    const result = await db.video2Items.importProject(parsedData, targetId, mode);
+
+    res.json({
+      success: true,
+      projectId: result.projectId,
+      sceneCount: Object.keys(result.sceneIdMap).length,
+      shotCount: Object.keys(result.shotIdMap).length
+    });
+  } catch (err) {
+    console.error('[import] 导入备份失败:', err);
+    res.status(500).json({ success: false, message: '导入备份失败', error: err.message });
+  }
+});
+
 // ========== 数据导出端点 ==========
 
 app.get('/api/video2/projects/:id/export', async (req, res) => {
@@ -1973,10 +2143,161 @@ app.get('/api/video2/projects/:id/export', async (req, res) => {
       shotsByScene[sceneKey].push(shot);
     });
     
-    // 生成 Word 文档
+    const sceneIds = Object.keys(shotsByScene).sort((a, b) => a === 'default' ? -1 : (parseInt(a) - parseInt(b)));
+
+    const fmt = String(format).toLowerCase();
+
+    if (fmt === 'xlsx' || fmt === 'excel') {
+      const ExcelJS = require('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = '柒子文化AI拍摄辅助系统';
+      workbook.created = new Date();
+
+      const worksheet = workbook.addWorksheet('分镜脚本');
+      worksheet.columns = [
+        { header: '场次', key: 'scene', width: 15 },
+        { header: '序号', key: 'index', width: 8 },
+        { header: '镜头编号', key: 'shotNo', width: 12 },
+        { header: '画面内容', key: 'sceneContent', width: 40 },
+        { header: '景别', key: 'shotType', width: 12 },
+        { header: '角度', key: 'shotAngle', width: 12 },
+        { header: '镜头运动', key: 'cameraMovement', width: 15 },
+        { header: '演员', key: 'actors', width: 20 },
+        { header: '道具', key: 'props', width: 20 },
+        { header: '地点', key: 'location', width: 20 },
+        { header: '灯光', key: 'lighting', width: 15 },
+        { header: '旁白/台词', key: 'narration', width: 30 },
+        { header: '预估时长', key: 'estimatedDuration', width: 10 },
+        { header: '备注', key: 'notes', width: 30 }
+      ];
+
+      worksheet.getRow(1).font = { bold: true, size: 12 };
+      worksheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF8B5CF6' }
+      };
+      worksheet.getRow(1).font.color = { argb: 'FFFFFFFF' };
+
+      for (const sceneKey of sceneIds) {
+        const sceneShots = shotsByScene[sceneKey];
+        const sceneName = sceneKey === 'default' ? '未分类' : (sceneNameMap[sceneKey] || `第 ${sceneKey} 场`);
+        
+        for (let i = 0; i < sceneShots.length; i++) {
+          const shot = sceneShots[i];
+          worksheet.addRow({
+            scene: i === 0 ? sceneName : '',
+            index: shot.shotIndex || (i + 1),
+            shotNo: shot.shotNo || '',
+            sceneContent: shot.sceneContent || shot.title || '',
+            shotType: shot.shotType || '',
+            shotAngle: shot.shotAngle || '',
+            cameraMovement: shot.cameraMovement || '',
+            actors: shot.actors || '',
+            props: shot.props || '',
+            location: shot.location || '',
+            lighting: shot.lighting || '',
+            narration: shot.narration || '',
+            estimatedDuration: shot.estimatedDuration || '',
+            notes: shot.notes || ''
+          });
+        }
+      }
+
+      worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        row.alignment = { vertical: 'top', wrapText: true };
+        if (rowNumber > 1) {
+          row.border = {
+            bottom: { style: 'thin', color: { argx: 'FFE5E7EB' } }
+          };
+        }
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(project.name)}_分镜脚本.xlsx"`);
+      res.send(Buffer.from(buffer));
+      console.log(`[video2] 导出 Excel 成功，共 ${shots.length} 个分镜`);
+      return;
+    }
+
+    if (fmt === 'pdf') {
+      const PDFDocument = require('pdfkit');
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      
+      const chunks = [];
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(project.name)}_分镜脚本.pdf"`);
+        res.send(buffer);
+      });
+
+      doc.fontSize(20).text(project.name, { align: 'center' });
+      doc.moveDown();
+      doc.fontSize(10).fillColor('#666').text(`导出日期：${new Date().toLocaleDateString('zh-CN')}`, { align: 'center' });
+      doc.text(`共 ${shots.length} 个分镜`, { align: 'center' });
+      doc.moveDown(2);
+
+      for (const sceneKey of sceneIds) {
+        const sceneShots = shotsByScene[sceneKey];
+        const sceneName = sceneKey === 'default' ? '未分类' : (sceneNameMap[sceneKey] || `第 ${sceneKey} 场`);
+        
+        if (sceneKey !== 'default') {
+          doc.fontSize(16).fillColor('#8B5CF6').text(sceneName);
+          doc.moveDown(0.5);
+          doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#E5E7EB');
+          doc.moveDown();
+        }
+
+        for (const shot of sceneShots) {
+          doc.fontSize(13).fillColor('#111').text(`分镜 #${shot.shotIndex || ''} ${shot.sceneContent || shot.title || ''}`);
+          doc.moveDown(0.3);
+
+          const details = [
+            { label: '镜头编号', value: shot.shotNo || '' },
+            { label: '画面内容', value: shot.sceneContent || '' },
+            { label: '景别', value: shot.shotType || '' },
+            { label: '角度', value: shot.shotAngle || '' },
+            { label: '镜头运动', value: shot.cameraMovement || '' },
+            { label: '演员', value: shot.actors || '' },
+            { label: '道具', value: shot.props || '' },
+            { label: '地点', value: shot.location || '' },
+            { label: '灯光', value: shot.lighting || '' },
+            { label: '旁白/台词', value: shot.narration || '' },
+            { label: '预估时长', value: shot.estimatedDuration ? `${shot.estimatedDuration}秒` : '' },
+            { label: '备注', value: shot.notes || '' }
+          ];
+
+          doc.fontSize(10).fillColor('#333');
+          for (const detail of details) {
+            if (detail.value) {
+              doc.font('Helvetica-Bold').text(`${detail.label}：`, { continued: true });
+              doc.font('Helvetica').text(detail.value);
+            }
+          }
+
+          if (shot.media && shot.media.length > 0 && includeImages === 'true') {
+            doc.moveDown(0.3);
+            doc.fillColor('#666').text(`参考画面：${shot.media.length}张`);
+          }
+
+          doc.moveDown();
+          doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#E5E7EB');
+          doc.moveDown();
+        }
+
+        doc.addPage();
+      }
+
+      doc.end();
+      console.log(`[video2] 导出 PDF 成功，共 ${shots.length} 个分镜`);
+      return;
+    }
+
+    // 生成 Word 文档（默认）
     const { Document, Packer, Paragraph, Table, TableRow, TableCell, TextRun, HeadingLevel, AlignmentType, WidthType } = require('docx');
-    // ImageRun 未使用，注释掉
-    // const { ImageRun } = require('docx');
     
     const children = [];
     
@@ -2001,8 +2322,6 @@ app.get('/api/video2/projects/:id/export', async (req, res) => {
     }));
     
     // 遍历每个场次
-    const sceneIds = Object.keys(shotsByScene).sort((a, b) => a === 'default' ? -1 : (parseInt(a) - parseInt(b)));
-    
     for (const sceneKey of sceneIds) {
       const sceneShots = shotsByScene[sceneKey];
       
@@ -2060,8 +2379,6 @@ app.get('/api/video2/projects/:id/export', async (req, res) => {
             spacing: { after: 100 }
           }));
           
-          // 尝试下载并嵌入图片（如果可用）
-          // 注意：docx 的图片嵌入比较复杂，这里简化为文字描述
           const mediaUrls = shot.media.map(m => m.url).filter(url => url).join('\n');
           if (mediaUrls) {
             children.push(new Paragraph({
@@ -3192,7 +3509,7 @@ app.get('/share/project/:id', async (req, res) => {
 
     const origin = `${req.protocol}://${req.get('host')}`;
     const title = project.name;
-    const description = project.description || '柒子文化拍摄辅助 · 项目分享';
+    const description = project.description || '柒子文化AI拍摄辅助系统 · 项目分享';
     const image = project.coverUrl || '/images/hero-home.png';
     const shareUrl = `${origin}/share/project/${projectId}`;
     const redirectUrl = `${origin}/project/${projectId}`;

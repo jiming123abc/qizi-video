@@ -1,50 +1,44 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
-import { uploadVideo2Image, uploadVideo2Video, uploadVideo2FromUrl, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
+import { uploadVideo2Video, detectFileType } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
-import type { UploadDecision } from '../lib/ossUtils';
-import { VideoCompressionDialog } from './VideoCompressionDialog';
-import { ShareHint } from './WeChatShareHint';
-import { timeAgo } from '../lib/utils';
+import { ShareHint } from '../components/WeChatShareHint';
 import { useEscapeKey } from '../hooks/useEscapeKey';
 import { useToast } from '../hooks/useToast';
 import { useScenes } from '../hooks/useScenes';
 import { useShots } from '../hooks/useShots';
+import { useUpload } from '../hooks/useUpload';
+import type { UploadingFile } from '../hooks/useUpload';
 
 // 分镜组件
-import { ShotCard } from './storyboard/ShotCard';
-import { ShotSearchBar } from './storyboard/ShotSearchBar';
-import { ShotSkeleton } from './storyboard/ShotSkeleton';
-import { EmptyState } from './storyboard/EmptyState';
-import { BottomTabBar } from './storyboard/BottomTabBar';
-import MediaManagerDialog from './storyboard/MediaManagerDialog';
-import AddShotDialog from './storyboard/AddShotDialog';
-import VideoSplitDialog from './storyboard/VideoSplitDialog';
+import { ShotCard } from '../components/storyboard/ShotCard';
+import { ShotSearchBar } from '../components/storyboard/ShotSearchBar';
+import { ShotSkeleton } from '../components/storyboard/ShotSkeleton';
+import { EmptyState } from '../components/storyboard/EmptyState';
+import { BottomTabBar } from '../components/storyboard/BottomTabBar';
+import MediaManagerDialog from '../components/storyboard/MediaManagerDialog';
+import AddShotDialog from '../components/storyboard/AddShotDialog';
+import VideoSplitDialog from '../components/storyboard/VideoSplitDialog';
+import { SceneTabs } from '../components/storyboard/SceneTabs';
+import { SceneManager } from '../components/storyboard/SceneManager';
+import { UploadDialog } from '../components/storyboard/UploadDialog';
+import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
 
 // AI 组件
-import AIScriptDialog from './ai/AIScriptDialog';
-import AIImageGenDialog from './ai/AIImageGenDialog';
-import AIUsagePanel from './ai/AIUsagePanel';
+import AIScriptDialog from '../components/ai/AIScriptDialog';
+import AIImageGenDialog from '../components/ai/AIImageGenDialog';
+import AIUsagePanel from '../components/ai/AIUsagePanel';
 
 // 设置组件
-import SettingsDialog from './settings/SettingsDialog';
+import SettingsDialog from '../components/settings/SettingsDialog';
 
 // 类型
 import type { Shot, ShotMedia, Project, Scene } from '../lib/types';
 
-interface Video2PageProps {
+interface StoryboardPageProps {
   projectId: number;
   onBack?: () => void;
-}
-
-interface UploadingFile {
-  id: string;
-  name: string;
-  size: number;
-  progress: number;
-  status: 'uploading' | 'done' | 'error' | 'cancelled';
-  message?: string;
 }
 
 // 视频 poster（OSS 截图）
@@ -55,7 +49,7 @@ function getPosterUrl(videoUrl: string): string {
   return '';
 }
 
-export function Video2Page({ projectId, onBack }: Video2PageProps) {
+export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const { toast, toastVisible, showToast, hideToast } = useToast();
 
   const {
@@ -117,6 +111,32 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
     cloneShot,
   } = useShots({ projectId, showToast });
 
+  const {
+    uploadingFiles,
+    setUploadingFiles,
+    uploadTab,
+    setUploadTab,
+    urlInputValue,
+    setUrlInputValue,
+    urlError,
+    setUrlError,
+    pendingCompressionVideo,
+    pendingCompressionDecision,
+    handleUploadFiles,
+    handleUploadFromUrl,
+    cancelUpload,
+    handleCompressionDecision,
+    aliyunConfigured,
+    clearUploadingFiles,
+  } = useUpload({
+    projectId,
+    currentSceneId,
+    showToast,
+    loadShots,
+    loadStats,
+    loadProject,
+  });
+
   const [project, setProject] = useState<Project | null>(null);
   const [stats, setStats] = useState<{ pending: number; done: number; trash: number; unclassified: number }>({ pending: 0, done: 0, trash: 0, unclassified: 0 });
   const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, { done: number; total: number }>>({});
@@ -149,10 +169,6 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   const [renameSceneId, setRenameSceneId] = useState<number | null>(null);
   const [renameSceneName, setRenameSceneName] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
-  const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
-  const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
-  const [urlInputValue, setUrlInputValue] = useState('');
-  const [urlError, setUrlError] = useState('');
 
   const [shareHintVisible, setShareHintVisible] = useState(false);
   const [shareHintMode, setShareHintMode] = useState<'wechat' | 'default'>('default');
@@ -184,23 +200,7 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
     }
   }, []);
 
-  // 视频压缩选择对话框
-  const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
-  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const [pendingUploadIndex, setPendingUploadIndex] = useState<number>(-1);
-  const pendingValidFilesRef = useRef<File[]>([]);
-  const uploadCancelledRef = useRef(false);
-  const uploadAbortControllerRef = useRef<AbortController | null>(null);
 
-  // 阿里云配置状态
-  const [aliyunConfigured, setAliyunConfigured] = useState(false);
-
-  useEffect(() => {
-    fetch('/api/video2/aliyun/status')
-      .then(res => res.json())
-      .then(data => setAliyunConfigured(data.configured || false))
-      .catch(() => {});
-  }, []);
 
   const handleVideoPlay = useCallback((shotId: number, mediaId: number) => {
     const key = `${shotId}-${mediaId}`;
@@ -376,10 +376,10 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
   // SEO / 分享元数据
   useEffect(() => {
     if (!project) return;
-    document.title = project.name + ' · 柒子文化拍摄辅助';
+    document.title = project.name + ' · 柒子文化AI拍摄辅助系统';
     setupShareMetadata({
       title: project.name,
-      desc: project.description || '柒子文化拍摄辅助 - 专业项目管理',
+      desc: project.description || '柒子文化AI拍摄辅助系统 - 专业项目管理',
       link: window.location.href,
       imgUrl: project.coverUrl || ''
     });
@@ -691,181 +691,48 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
     if (videoSplitInputRef.current) videoSplitInputRef.current.value = '';
   };
 
-  // ============ 上传 ============
-  const handleUploadFiles = async (files: FileList | File[]) => {
-    const list = Array.from(files);
-    if (list.length === 0) return;
-
-    const valid = list.filter(f => {
-      const d = detectFileType(f);
-      if (!d.supported) {
-        showToast(`忽略不支持的文件：${f.name}`);
-      }
-      return d.supported;
-    });
-    if (valid.length === 0) return;
-
-    const initial: UploadingFile[] = valid.map(f => ({
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`,
-      name: f.name, size: f.size, progress: 5, status: 'uploading'
-    }));
-    setUploadingFiles(initial);
-    pendingValidFilesRef.current = valid;
-    uploadCancelledRef.current = false;
-    uploadAbortControllerRef.current = new AbortController();
-
-    let firstCoverUrl: string | null = null;
-    let stopped = false;
-    for (let i = 0; i < valid.length; i++) {
-      if (uploadCancelledRef.current) {
-        setUploadingFiles(prev => prev.map((uf, idx) => idx >= i ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
-        break;
-      }
-
-      const file = valid[i];
-      const detected = detectFileType(file);
-
-      if (detected.type === 'video') {
-        setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 5, message: '检测视频信息...' } : uf));
-        const decision = await checkVideoBitrate(file);
-        if (decision.decision === 'must_compress') {
-          setUploadingFiles(prev => prev.map((uf, idx) => {
-            if (idx === i) {
-              return { ...uf, status: 'error', progress: 0, message: '需选择压缩方式' };
-            } else if (idx > i) {
-              return { ...uf, status: 'pending', progress: 0, message: '等待中' };
-            }
-            return uf;
-          }));
-          setPendingCompressionVideo(file);
-          setPendingCompressionDecision(decision);
-          setPendingUploadIndex(i);
-          stopped = true;
-          break;
+  // ============ 上传对话框关闭逻辑 ============
+  const handleCloseUploadDialog = () => {
+    const isUploading = uploadingFiles.some(f => f.status === 'uploading');
+    if (!isUploading) {
+      setShowUploadDialog(false);
+      clearUploadingFiles();
+    } else {
+      setGenericConfirm({
+        isOpen: true,
+        title: '上传进行中',
+        message: '文件正在上传中，您可以选择取消上传或让上传在后台继续。',
+        confirmText: '取消上传',
+        cancelText: '后台继续',
+        confirmButtonClass: 'px-4 py-2 rounded-xl bg-gradient-to-br from-red-500 to-rose-500 text-white text-sm font-medium transition',
+        onConfirm: () => {
+          setGenericConfirm(null);
+          cancelUpload();
+          setShowUploadDialog(false);
+        },
+        onCancel: () => {
+          setGenericConfirm(null);
+          setShowUploadDialog(false);
         }
-      }
-
-      try {
-        if (detected.type === 'image') {
-          await uploadVideo2Image(file, {
-            projectId,
-            sceneId: currentSceneId !== null ? currentSceneId : undefined,
-            title: file.name,
-            createShot: true,
-            signal: uploadAbortControllerRef.current?.signal
-          });
-          if (!firstCoverUrl) firstCoverUrl = '';
-          setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
-        } else {
-          await uploadVideo2Video(file, {
-            projectId,
-            sceneId: currentSceneId !== null ? currentSceneId : undefined,
-            title: file.name,
-            createShot: true,
-            compressionMethod: 'none',
-            skipBitrateCheck: true,
-            signal: uploadAbortControllerRef.current?.signal,
-            onProgress: p => {
-              setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: p.progress, message: p.message } : uf));
-            }
-          });
-          setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
-        }
-      } catch (e) {
-        if (uploadCancelledRef.current) {
-          setUploadingFiles(prev => prev.map((uf, idx) => idx >= i ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
-          break;
-        }
-        console.error('上传失败:', file.name, e);
-        setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, status: 'error', message: (e as Error).message } : uf));
-      }
-    }
-
-    if (!stopped && !uploadCancelledRef.current) {
-      await loadShots();
-      await loadStats();
-      await loadProject();
-      showToast(`上传完成（${valid.length} 项）`);
-    }
-
-    uploadAbortControllerRef.current = null;
-  };
-
-  const handleCancelUpload = () => {
-    uploadCancelledRef.current = true;
-    if (uploadAbortControllerRef.current) {
-      uploadAbortControllerRef.current.abort();
-    }
-  };
-
-  const handleCompressionSelect = async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
-    if (!pendingCompressionVideo || !pendingCompressionDecision || pendingUploadIndex < 0) {
-      setPendingCompressionVideo(null);
-      setPendingCompressionDecision(null);
-      setPendingUploadIndex(-1);
-      return;
-    }
-
-    const videoFile = pendingCompressionVideo;
-    const idx = pendingUploadIndex;
-
-    setPendingCompressionVideo(null);
-    setPendingCompressionDecision(null);
-    setPendingUploadIndex(-1);
-
-    if (method === 'cancel') {
-      return;
-    }
-
-    setUploadingFiles(prev => prev.map((uf, i) => i === idx ? { ...uf, status: 'uploading', progress: 10, message: '准备上传...' } : uf));
-
-    (async () => {
-      try {
-        await uploadVideo2Video(videoFile, {
-          projectId,
-          sceneId: currentSceneId !== null ? currentSceneId : undefined,
-          title: videoFile.name,
-          createShot: true,
-          compressionMethod: method,
-          skipBitrateCheck: true,
-          onProgress: p => {
-            setUploadingFiles(prev => prev.map((uf, i) => i === idx ? { ...uf, progress: p.progress, message: p.message } : uf));
-          }
-        });
-        setUploadingFiles(prev => prev.map((uf, i) => i === idx ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
-        await loadShots();
-        await loadStats();
-      } catch (e) {
-        console.error('上传失败:', videoFile.name, e);
-        setUploadingFiles(prev => prev.map((uf, i) => i === idx ? { ...uf, status: 'error', message: (e as Error).message } : uf));
-      }
-    })();
-  };
-
-  const handleUploadFromUrl = async () => {
-    const url = urlInputValue.trim();
-    if (!url) return;
-    const newItem: UploadingFile = {
-      id: `${Date.now()}-url`,
-      name: url.substring(0, 50) + '...',
-      size: 0,
-      progress: 20,
-      status: 'uploading'
-    };
-    setUploadingFiles(prev => [...prev, newItem]);
-    try {
-      await uploadVideo2FromUrl(url, {
-        projectId,
-        sceneId: currentSceneId !== null ? currentSceneId : undefined,
-        title: url
       });
-      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, progress: 100, status: 'done', message: '转存完成' } : uf));
-      setUrlInputValue('');
-      await loadShots();
-      await loadStats();
-      await loadProject();
-    } catch (e) {
-      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, status: 'error', message: String(e) } : uf));
+    }
+  };
+
+  const handleUrlInputChange = (val: string) => {
+    setUrlInputValue(val);
+    if (val.trim()) {
+      try {
+        const u = new URL(val);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+          setUrlError('仅支持 HTTP/HTTPS 链接');
+        } else {
+          setUrlError('');
+        }
+      } catch {
+        setUrlError('请输入有效的 URL 地址');
+      }
+    } else {
+      setUrlError('');
     }
   };
 
@@ -1105,18 +972,20 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
               <Share2 className="w-4 h-4 text-white/90" />
             </button>
 
-            {/* 搜索 */}
-            <ShotSearchBar
-              value={searchQuery}
-              onChange={(v) => {
-                setSearchQuery(v);
-                setSelectedIds(new Set());
-                setPlayingVideoKey(null);
-              }}
-              variant="icon"
-              isOpen={showDesktopSearch}
-              onOpenChange={setShowDesktopSearch}
-            />
+            {/* 搜索（垃圾桶模式下隐藏） */}
+            {currentTab !== 'trash' && (
+              <ShotSearchBar
+                value={searchQuery}
+                onChange={(v) => {
+                  setSearchQuery(v);
+                  setSelectedIds(new Set());
+                  setPlayingVideoKey(null);
+                }}
+                variant="icon"
+                isOpen={showDesktopSearch}
+                onOpenChange={setShowDesktopSearch}
+              />
+            )}
 
             {/* AI 生成分镜 */}
             <button
@@ -1155,15 +1024,17 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
             </button>
           </div>
 
-          {/* 移动端：搜索 + 更多菜单 + 上传 */}
+          {/* 移动端：搜索 + 更多菜单 + 上传（垃圾桶模式下隐藏搜索） */}
           <div className="flex sm:hidden items-center gap-1 relative">
-            <button
-              onClick={() => setShowSearchDialog(true)}
-              className="w-8 h-8 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/30 flex items-center justify-center transition"
-              title="搜索"
-            >
-              <Search className="w-4 h-4 text-white/80" />
-            </button>
+            {currentTab !== 'trash' && (
+              <button
+                onClick={() => setShowSearchDialog(true)}
+                className="w-8 h-8 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/30 flex items-center justify-center transition"
+                title="搜索"
+              >
+                <Search className="w-4 h-4 text-white/80" />
+              </button>
+            )}
             <div className="relative">
               <button
                 onClick={() => setShowMobileMoreMenu(v => !v)}
@@ -1234,145 +1105,42 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
           </button>
         </div>
 
-        {/* 场次 Tab 栏：桌面端六个点手柄在选中 tab 内部 */}
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 pb-3">
-          {/* 左侧渐变遮罩 + 左箭头 */}
-          {canScrollLeft && (
-            <>
-              <div className="absolute left-0 top-0 bottom-0 w-10 bg-gradient-to-r from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
-              <button
-                onClick={() => scrollSceneTabs('left')}
-                className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
-                title="向左滚动"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-            </>
-          )}
-          {/* 右侧渐变遮罩 + 右箭头 */}
-          {canScrollRight && (
-            <>
-              <div className="absolute right-0 top-0 bottom-0 w-10 bg-gradient-to-l from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
-              <button
-                onClick={() => scrollSceneTabs('right')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
-                title="向右滚动"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </>
-          )}
-          <div
-            ref={sceneTabRef}
-            onScroll={updateSceneScrollState}
-            className="overflow-x-auto scrollbar-hide"
-          >
-          <div className="flex items-center gap-2 min-w-max px-1">
-            {sortedScenes.map((scene) => {
-              const isActive = currentSceneId === scene.id;
-              const isDragOverScene = dragOverSceneId === scene.id && dragSceneId !== scene.id;
-              const isDraggingScene = dragSceneId === scene.id;
-              return (
-                <button
-                  key={scene.id}
-                  onClick={() => { setCurrentSceneId(scene.id); setSelectedIds(new Set()); }}
-                  draggable={!isMobile}
-                  onDragOver={(e) => handleSceneDragOver(e, scene.id)}
-                  onDragLeave={() => setDragOverSceneId(null)}
-                  onDrop={(e) => { e.preventDefault(); handleSceneDrop(scene.id); }}
-                  onDragStart={(e) => { if (!isMobile) { handleSceneDragStart(scene.id); try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {} } }}
-                  onDragEnd={() => { setDragSceneId(null); setDragOverSceneId(null); }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setPlayingItemId(null);
-                    setRenameSceneId(scene.id);
-                    setRenameSceneName(scene.name);
-                    setSceneManagerMode('edit');
-                    setShowSceneManager(true);
-                  }}
-                  className={`inline-flex items-center gap-1.5 pl-2 pr-3 sm:pr-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap border transition-all duration-200 ${
-                    isDraggingScene ? 'opacity-50 scale-95' : ''
-                  } ${
-                    isActive
-                      ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 border-transparent text-white shadow-lg shadow-violet-500/25'
-                      : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10'
-                  } ${isDragOverScene ? 'ring-2 ring-violet-400/70 scale-105' : ''}`}
-                  title={isActive ? '点击切换 · 右键重命名' : '点击切换场次 · 右键重命名'}
-                >
-                  {isActive && !isMobile && (
-                    <GripVertical className="w-3.5 h-3.5 text-white/90 shrink-0 cursor-grab active:cursor-grabbing" />
-                  )}
-                  <span>{scene.name}</span>
-                  {(() => {
-                    const s = sceneStatsMap[String(scene.id)];
-                    if (s && s.total > 0) {
-                      return (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                          isActive ? 'bg-white/20 text-white/90' : 'bg-white/10 text-slate-400'
-                        }`}>
-                          {s.done}/{s.total}
-                        </span>
-                      );
-                    }
-                    return null;
-                  })()}
-                </button>
-              );
-            })}
-
-            {/* 未分类 - 只有存在未分类分镜时才显示 */}
-            {stats.unclassified > 0 && (
-              <button
-                onClick={() => {
-                  userManualSelectedUnclassifiedRef.current = true;
-                  setCurrentSceneId(null);
-                  setSelectedIds(new Set());
-                }}
-                className={`px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap border transition ${
-                  currentSceneId === null
-                    ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 border-transparent text-white shadow-lg shadow-violet-500/25'
-                    : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10'
-                }`}
-                title="未分类"
-              >
-                未分类
-                {(() => {
-                  const s = sceneStatsMap['null'];
-                  if (s && s.total > 0) {
-                    return (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ml-1 ${
-                        currentSceneId === null ? 'bg-white/20 text-white/90' : 'bg-white/10 text-slate-400'
-                      }`}>
-                        {s.done}/{s.total}
-                      </span>
-                    );
-                  }
-                  return null;
-                })()}
-              </button>
-            )}
-
-            {/* 无场次提示：没有任何场次且没有未分类时显示 */}
-            {scenes.length === 0 && stats.unclassified === 0 && (
-              <span className="px-2 text-xs text-slate-500">
-                无场次
-              </span>
-            )}
-
-            {/* + 场次管理 */}
-            <button
-              onClick={() => {
-                setPlayingItemId(null);
-                setSceneManagerMode('list');
-                setShowSceneManager(true);
-              }}
-              className="w-8 h-8 rounded-full border border-dashed border-white/25 hover:border-violet-400/50 hover:bg-violet-500/10 text-slate-400 hover:text-violet-200 flex items-center justify-center transition shrink-0"
-              title="场次管理"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-          </div>
+        {/* 场次 Tab 栏（sticky 常驻顶部） */}
+        <div className="sticky top-0 z-20 bg-gradient-to-br from-slate-900 via-violet-950/50 to-pink-950/30 pt-2 pb-1">
+          <SceneTabs
+            scenes={scenes}
+            sortedScenes={sortedScenes}
+            currentSceneId={currentSceneId}
+            onSelectScene={(sceneId) => { setCurrentSceneId(sceneId); setSelectedIds(new Set()); }}
+            onOpenSceneManager={() => { setPlayingItemId(null); setSceneManagerMode('list'); setShowSceneManager(true); }}
+            onRenameScene={(scene) => {
+              setPlayingItemId(null);
+              setRenameSceneId(scene.id);
+              setRenameSceneName(scene.name);
+              setSceneManagerMode('edit');
+              setShowSceneManager(true);
+            }}
+            dragSceneId={dragSceneId}
+            setDragSceneId={setDragSceneId}
+            dragOverSceneId={dragOverSceneId}
+            setDragOverSceneId={setDragOverSceneId}
+            handleSceneDragStart={handleSceneDragStart}
+            handleSceneDragOver={handleSceneDragOver}
+            handleSceneDrop={handleSceneDrop}
+            canScrollLeft={canScrollLeft}
+            canScrollRight={canScrollRight}
+            sceneTabRef={sceneTabRef}
+            updateSceneScrollState={updateSceneScrollState}
+            scrollSceneTabs={scrollSceneTabs}
+            sceneStatsMap={sceneStatsMap}
+            unclassifiedCount={stats.unclassified}
+            isMobile={isMobile}
+            onSelectUnclassified={() => {
+              userManualSelectedUnclassifiedRef.current = true;
+              setCurrentSceneId(null);
+              setSelectedIds(new Set());
+            }}
+          />
         </div>
 
         {/* 批量操作栏（sticky，滚动常驻） */}
@@ -1697,343 +1465,63 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
       )}
 
       {/* 批量上传弹窗 */}
-      {showUploadDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => {
-          const isUploading = uploadingFiles.some(f => f.status === 'uploading');
-          if (!isUploading) {
-            setShowUploadDialog(false);
-          } else {
-            setGenericConfirm({
-              isOpen: true,
-              title: '上传进行中',
-              message: '文件正在上传中，您可以选择取消上传或让上传在后台继续。',
-              confirmText: '取消上传',
-              cancelText: '后台继续',
-              confirmButtonClass: 'px-4 py-2 rounded-xl bg-gradient-to-br from-red-500 to-rose-500 text-white text-sm font-medium transition',
-              onConfirm: () => {
-                setGenericConfirm(null);
-                handleCancelUpload();
-                setShowUploadDialog(false);
-              },
-              onCancel: () => {
-                setGenericConfirm(null);
-                setShowUploadDialog(false);
-              }
-            });
-          }
-        }}>
-          <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-base font-semibold">批量上传</h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  当前场次：{currentSceneId === null ? '未分类' : (scenes.find(s => s.id === currentSceneId)?.name || '')}
-                </p>
-              </div>
-              <button onClick={() => {
-                const isUploading = uploadingFiles.some(f => f.status === 'uploading');
-                if (!isUploading) {
-                  setShowUploadDialog(false);
-                } else {
-                  setGenericConfirm({
-                    isOpen: true,
-                    title: '上传进行中',
-                    message: '文件正在上传中，您可以选择取消上传或让上传在后台继续。',
-                    confirmText: '取消上传',
-                    cancelText: '后台继续',
-                    confirmButtonClass: 'px-4 py-2 rounded-xl bg-gradient-to-br from-red-500 to-rose-500 text-white text-sm font-medium transition',
-                    onConfirm: () => {
-                      setGenericConfirm(null);
-                      handleCancelUpload();
-                      setShowUploadDialog(false);
-                    },
-                    onCancel: () => {
-                      setGenericConfirm(null);
-                      setShowUploadDialog(false);
-                    }
-                  });
-                }
-              }} className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      <UploadDialog
+        isOpen={showUploadDialog}
+        onClose={handleCloseUploadDialog}
+        uploadTab={uploadTab}
+        setUploadTab={setUploadTab}
+        uploadingFiles={uploadingFiles}
+        urlInputValue={urlInputValue}
+        setUrlInputValue={handleUrlInputChange}
+        urlError={urlError}
+        onUploadFiles={handleUploadFiles}
+        onUploadFromUrl={handleUploadFromUrl}
+        onCancelUpload={cancelUpload}
+        pendingCompressionVideo={pendingCompressionVideo}
+        pendingCompressionDecision={pendingCompressionDecision}
+        onCompressionDecision={handleCompressionDecision}
+        aliyunConfigured={aliyunConfigured}
+        currentSceneName={currentSceneId === null ? '未分类' : (scenes.find(s => s.id === currentSceneId)?.name || '')}
+      />
 
-            <div className="flex gap-2 mb-4 bg-white/5 p-1 rounded-2xl">
-              <button
-                onClick={() => setUploadTab('file')}
-                className={`flex-1 py-2 text-sm rounded-xl transition ${uploadTab === 'file' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                <Upload className="w-4 h-4 inline mr-1.5" /> 选择文件
-              </button>
-              <button
-                onClick={() => setUploadTab('url')}
-                className={`flex-1 py-2 text-sm rounded-xl transition ${uploadTab === 'url' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                <Link2 className="w-4 h-4 inline mr-1.5" /> 网络 URL
-              </button>
-            </div>
-
-            {uploadTab === 'file' ? (
-              <div>
-                <label className="block border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-2xl p-8 text-center cursor-pointer transition bg-white/[0.02]">
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/*,video/*"
-                    className="hidden"
-                    onChange={(e) => { if (e.target.files) handleUploadFiles(e.target.files); e.target.value = ''; }}
-                  />
-                  <ImageIcon className="w-10 h-10 mx-auto mb-3 text-violet-300/60" />
-                  <p className="text-sm font-medium mb-1">点击选择图片或视频</p>
-                  <p className="text-xs text-slate-500">支持多选，非图片视频文件会被自动忽略</p>
-                </label>
-              </div>
-            ) : (
-              <div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={urlInputValue}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setUrlInputValue(val);
-                      if (val.trim()) {
-                        try {
-                          const u = new URL(val);
-                          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-                            setUrlError('仅支持 HTTP/HTTPS 链接');
-                          } else {
-                            setUrlError('');
-                          }
-                        } catch {
-                          setUrlError('请输入有效的 URL 地址');
-                        }
-                      } else {
-                        setUrlError('');
-                      }
-                    }}
-                    placeholder="https://example.com/image.jpg 或 https://example.com/video.mp4"
-                    className={`flex-1 px-4 py-2.5 rounded-xl bg-white/5 border outline-none text-sm transition ${
-                      urlError ? 'border-red-500/50 focus:border-red-400/60' : 'border-white/10 focus:border-violet-400/50'
-                    }`}
-                    onKeyDown={(e) => e.key === 'Enter' && !urlError && handleUploadFromUrl()}
-                  />
-                  <button
-                    onClick={handleUploadFromUrl}
-                    disabled={!urlInputValue.trim() || !!urlError}
-                    className="px-4 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
-                  >转存</button>
-                </div>
-                <p className={'text-xs mt-2 ' + (urlError ? 'text-red-400' : 'text-slate-500')}>
-                  {urlError || 'URL 必须是公开可访问资源链接'}
-                </p>
-              </div>
-            )}
-
-            {/* 上传进度 */}
-            {uploadingFiles.length > 0 && (
-              <div className="mt-5 space-y-2">
-                {uploadingFiles.map(f => (
-                  <div key={f.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/10">
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-slate-200 truncate">{f.name}</div>
-                      <div className="h-1.5 rounded-full bg-white/10 overflow-hidden mt-2">
-                        <div
-                          className={`h-full rounded-full transition-all ${f.status === 'error' ? 'bg-red-400' : f.status === 'done' ? 'bg-green-400' : 'bg-gradient-to-r from-violet-500 to-fuchsia-500'}`}
-                          style={{ width: `${f.progress}%` }}
-                        />
-                      </div>
-                    </div>
-                    <div className="text-xs text-right">
-                      {f.status === 'error' ? (
-                        <span className="text-red-300">{f.message || '失败'}</span>
-                      ) : (
-                        <span className="text-slate-300">{f.message || `${f.progress}%`}</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                <div className="text-center pt-2">
-                  <button
-                    onClick={() => { setUploadingFiles([]); setShowUploadDialog(false); }}
-                    className="px-4 py-2 rounded-full text-xs text-slate-400 hover:text-white hover:bg-white/5 transition"
-                  >{uploadingFiles.every(f => f.status !== 'uploading') ? '关闭' : '完成后可点击关闭'}</button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* 场次管理面板（统一上下居中，内联多视图） */}
-      {showSceneManager && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setSceneManagerMode('list'); setShowSceneManager(false); }}>
-          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-4 shadow-2xl max-h-[75vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            {/* 列表视图 */}
-            {sceneManagerMode === 'list' && (
-              <>
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-base font-semibold">场次管理</h2>
-                  <button onClick={() => { setSceneManagerMode('list'); setShowSceneManager(false); }} className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-                {/* 新建按钮 */}
-                <button
-                  onClick={() => { setNewSceneName(''); setSceneManagerMode('create'); }}
-                  className="w-full mb-3 py-2.5 rounded-2xl border border-dashed border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20 text-sm font-medium text-violet-200 flex items-center justify-center gap-2 transition"
-                >
-                  <Plus className="w-4 h-4" /> 新建场次
-                </button>
-                {/* 场次列表 */}
-                <div className="space-y-1.5">
-                  {sortedScenes.length === 0 ? (
-                    <div className="py-10 text-center">
-                      <div className="text-4xl mb-3">🎬</div>
-                      <p className="text-sm text-slate-400">还没有创建场次</p>
-                      <p className="text-xs text-slate-500 mt-1">点击上方按钮创建第一个场次</p>
-                    </div>
-                  ) : (
-                    sortedScenes.map((scene, sceneIdx) => (
-                      <div key={scene.id} className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl border transition ${currentSceneId === scene.id ? 'border-violet-400/40 bg-violet-500/10' : 'border-white/10 hover:bg-white/5'}`}>
-                        <button
-                          onClick={() => moveScene(scene.id, -1)}
-                          disabled={sceneIdx <= 0}
-                          className={`w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${sceneIdx <= 0 ? 'border-white/10 text-slate-600 cursor-not-allowed' : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'}`}
-                        >
-                          <ChevronUp className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => moveScene(scene.id, 1)}
-                          disabled={sceneIdx >= sortedScenes.length - 1}
-                          className={`w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${sceneIdx >= sortedScenes.length - 1 ? 'border-white/10 text-slate-600 cursor-not-allowed' : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'}`}
-                        >
-                          <ChevronDown className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => { setRenameSceneId(scene.id); setRenameSceneName(scene.name); setSceneManagerMode('edit'); }}
-                          className="flex-1 text-left text-sm text-white/80 hover:text-white truncate transition"
-                          title="点击重命名"
-                        >
-                          {currentSceneId === scene.id && <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 mr-2 align-middle" />}
-                          {scene.name}
-                        </button>
-                        <button
-                          onClick={() => {
-                            const tip = stats.unclassified > 0
-                              ? '该场次下的素材将移到未分类，不会删除。'
-                              : '该场次下的素材将变为未分类状态，不会删除。';
-                            setGenericConfirm({
-                              isOpen: true,
-                              title: '删除场次',
-                              message: `确认删除场次「${scene.name}」？\n${tip}`,
-                              confirmText: '删除',
-                              onConfirm: () => {
-                                setGenericConfirm(null);
-                                deleteScene(scene.id);
-                              }
-                            });
-                          }}
-                          className="w-8 h-8 rounded-full border border-white/15 hover:border-red-400/50 hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-300 shrink-0 transition"
-                          title="删除场次"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-                {stats.unclassified > 0 && (
-                  <p className="text-xs text-slate-500 mt-3 text-center">另有 {stats.unclassified} 个素材在「未分类」中</p>
-                )}
-              </>
-            )}
-
-            {/* 新建视图 */}
-            {sceneManagerMode === 'create' && (
-              <>
-                <div className="flex items-center justify-between mb-4">
-                  <button onClick={() => setSceneManagerMode('list')} className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
-                    <ArrowLeft className="w-4 h-4" />
-                  </button>
-                  <h2 className="text-base font-semibold">新建场次</h2>
-                  <div className="w-8 h-8" />
-                </div>
-                <input
-                  type="text"
-                  value={newSceneName}
-                  onChange={(e) => setNewSceneName(e.target.value)}
-                  placeholder="例如：场景 1 - 客厅"
-                  className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm transition"
-                  onKeyDown={(e) => e.key === 'Enter' && createScene()}
-                  autoFocus
-                />
-                <div className="flex items-center justify-end gap-2 mt-5">
-                  <button onClick={() => setSceneManagerMode('list')} className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition">取消</button>
-                  <button
-                    onClick={createScene}
-                    disabled={!newSceneName.trim()}
-                    className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
-                  >创建</button>
-                </div>
-              </>
-            )}
-
-            {/* 编辑视图 */}
-            {sceneManagerMode === 'edit' && (
-              <>
-                <div className="flex items-center justify-between mb-4">
-                  <button onClick={() => setSceneManagerMode('list')} className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
-                    <ArrowLeft className="w-4 h-4" />
-                  </button>
-                  <h2 className="text-base font-semibold">重命名场次</h2>
-                  <div className="w-8 h-8" />
-                </div>
-                <input
-                  type="text"
-                  value={renameSceneName}
-                  onChange={(e) => setRenameSceneName(e.target.value)}
-                  placeholder="新的场次名称"
-                  className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm transition"
-                  onKeyDown={(e) => e.key === 'Enter' && renameScene()}
-                  autoFocus
-                />
-                <div className="flex items-center justify-between mt-5">
-                  <button
-                    onClick={() => {
-                      if (renameSceneId === null) return;
-                      const tip = stats.unclassified > 0
-                        ? '该场次下的素材将移到未分类，不会删除。'
-                        : '该场次下的素材将变为未分类状态，不会删除。';
-                      setGenericConfirm({
-                        isOpen: true,
-                        title: '删除场次',
-                        message: `确认删除本场次？\n${tip}`,
-                        confirmText: '删除',
-                        onConfirm: () => {
-                          setGenericConfirm(null);
-                          if (renameSceneId !== null) deleteScene(renameSceneId);
-                        }
-                      });
-                    }}
-                    className="px-3 py-2 rounded-xl text-sm text-red-300 hover:text-red-200 hover:bg-red-500/10 transition"
-                  >
-                    删除本场次
-                  </button>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setSceneManagerMode('list')} className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition">取消</button>
-                    <button
-                      onClick={renameScene}
-                      disabled={!renameSceneName.trim()}
-                      className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
-                    >保存</button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {/* 场次管理面板 */}
+      <SceneManager
+        isOpen={showSceneManager}
+        onClose={() => setShowSceneManager(false)}
+        scenes={sortedScenes}
+        mode={sceneManagerMode}
+        setMode={setSceneManagerMode}
+        newSceneName={newSceneName}
+        setNewSceneName={setNewSceneName}
+        renameSceneId={renameSceneId}
+        setRenameSceneId={setRenameSceneId}
+        renameSceneName={renameSceneName}
+        setRenameSceneName={setRenameSceneName}
+        onCreateScene={createScene}
+        onRenameScene={renameScene}
+        onDeleteScene={deleteScene}
+        currentSceneId={currentSceneId}
+        onSelectScene={(id) => { setCurrentSceneId(id); setSelectedIds(new Set()); }}
+        sceneStatsMap={sceneStatsMap}
+        currentTab={currentTab}
+        moveScene={moveScene}
+        unclassifiedCount={stats.unclassified}
+        onRequestDeleteConfirm={(sceneId, sceneName, onConfirm) => {
+          const tip = stats.unclassified > 0
+            ? '该场次下的素材将移到未分类，不会删除。'
+            : '该场次下的素材将变为未分类状态，不会删除。';
+          setGenericConfirm({
+            isOpen: true,
+            title: '删除场次',
+            message: `确认删除场次「${sceneName}」？\n${tip}`,
+            confirmText: '删除',
+            onConfirm: () => {
+              setGenericConfirm(null);
+              onConfirm();
+            }
+          });
+        }}
+      />
 
       {/* ============ 新增对话框 ============ */}
 
@@ -2116,19 +1604,13 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
         }}
       />
 
-      <VideoCompressionDialog
-        isOpen={pendingCompressionVideo !== null}
-        onClose={() => { setPendingCompressionVideo(null); setPendingCompressionDecision(null); setPendingUploadIndex(-1); }}
-        file={pendingCompressionVideo}
-        decision={pendingCompressionDecision}
-        aliyunConfigured={aliyunConfigured}
-        onSelect={handleCompressionSelect}
-      />
+
 
       {/* 设置 */}
       <SettingsDialog
         isOpen={showSettingsDialog}
         onClose={() => setShowSettingsDialog(false)}
+        projectId={projectId}
       />
 
       {/* 费用统计 */}
@@ -2153,33 +1635,18 @@ export function Video2Page({ projectId, onBack }: Video2PageProps) {
       )}
 
       {/* 全屏查看 */}
-      {fullscreenItem && (
-        <div className="fixed inset-0 z-[80] bg-black/95 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setFullscreenItem(null)}>
-          <button
-            onClick={() => setFullscreenItem(null)}
-            className="absolute top-4 right-4 w-10 h-10 rounded-full border border-white/25 bg-white/5 hover:bg-white/15 flex items-center justify-center text-white z-10"
-          >
-            <X className="w-5 h-5" />
-          </button>
-          <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
-            {fullscreenItem.type === 'image' ? (
-              <img src={signedFullscreenUrl} alt={fullscreenItem.filename || fullscreenItem.url} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
-            ) : (
-              <video
-                ref={fullscreenVideoRef}
-                src={signedFullscreenUrl}
-                poster={signedFullscreenPoster}
-                controls
-                autoPlay
-                playsInline
-                muted={false}
-                className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"
-              />
-            )}
-            <p className="text-center text-sm text-slate-300 mt-4">{fullscreenItem.filename || fullscreenItem.url}</p>
-          </div>
-        </div>
-      )}
+      <MediaFullscreen
+        isOpen={fullscreenItem !== null}
+        onClose={() => setFullscreenItem(null)}
+        mediaType={fullscreenItem?.type || 'image'}
+        mediaUrl={fullscreenItem?.url || ''}
+        filename={fullscreenItem?.filename}
+        videoRefCallback={(ref) => {
+          if (ref) {
+            fullscreenVideoRef.current = ref;
+          }
+        }}
+      />
 
       {/* 微信分享提示 */}
       <ShareHint

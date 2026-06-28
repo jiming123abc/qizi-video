@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload } from 'lucide-react';
 import { checkVideoBitrate, uploadVideo2Video } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
-import { VideoCompressionDialog } from '../VideoCompressionDialog';
+import { VideoCompressionDialog } from './VideoCompressionDialog';
 
 interface VideoSplitDialogProps {
   isOpen: boolean;
@@ -75,8 +75,13 @@ export default function VideoSplitDialog({
   const [estimatedCost, setEstimatedCost] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [shotThumbnails, setShotThumbnails] = useState<Record<string, string>>({});
+  const [generatingThumbs, setGeneratingThumbs] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const thumbVideoRef = useRef<HTMLVideoElement>(null);
+  const thumbCanvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = thumbCanvasRef;
   const timelineRef = useRef<HTMLDivElement>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -382,12 +387,16 @@ export default function VideoSplitDialog({
     setSplitPoints(prev => [...prev, newPoint].sort((a, b) => a.time - b.time));
   };
 
-  // 轮询任务状态
+  // 监听任务状态（优先 SSE，失败回退轮询）
   const pollTaskStatus = useCallback((tid: string) => {
-    pollIntervalRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/video2/ai/task/${tid}`);
-        const data: TaskResult = await res.json();
+    let sseFailed = false;
+    let sseClosed = false;
+
+    try {
+      const eventSource = new EventSource(`/api/video2/ai/task/${tid}/stream`);
+
+      const handleTaskUpdate = (data: any) => {
+        if (sseClosed) return;
 
         if (data.status === 'processing' || data.status === 'pending') {
           setProgress(data.progress || 0);
@@ -395,18 +404,15 @@ export default function VideoSplitDialog({
           if (data.output?.shots) {
             setDetectedShots(data.output.shots.length);
           }
-        } else if (data.status === 'done') {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
-          }
+        } else if (data.status === 'done' || data.status === 'completed') {
+          sseClosed = true;
+          eventSource.close();
           setProgress(100);
           setDetectedShots(data.output?.shots?.length || 0);
           setEstimatedCost(data.output?.estimatedCost || 0);
 
-          // 将 AI 检测结果转换为分割点
           if (data.output?.shots) {
-            const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot, idx) => ({
+            const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot: any, idx: number) => ({
               id: generateId(),
               time: shot.startTime
             }));
@@ -414,18 +420,126 @@ export default function VideoSplitDialog({
           }
 
           setState('completed');
-        } else if (data.status === 'error') {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
-          }
+        } else if (data.status === 'error' || data.status === 'failed') {
+          sseClosed = true;
+          eventSource.close();
           setError(data.error || '分割失败，请重试');
           setState('initial');
         }
-      } catch (e) {
-        console.error('轮询任务状态失败:', e);
-      }
-    }, 2000);
+      };
+
+      eventSource.addEventListener('update', (event: any) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleTaskUpdate(data);
+        } catch (e) {
+          console.error('解析 SSE 消息失败:', e);
+        }
+      });
+
+      eventSource.addEventListener('error', (event: any) => {
+        if (sseClosed) return;
+        sseFailed = true;
+        eventSource.close();
+        startPolling();
+      });
+
+      eventSource.onerror = () => {
+        if (sseClosed) return;
+        if (!sseFailed) {
+          sseFailed = true;
+          eventSource.close();
+          startPolling();
+        }
+      };
+
+      const startPolling = () => {
+        pollIntervalRef.current = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/video2/ai/task/${tid}`);
+            const data: TaskResult = await res.json();
+
+            if (data.status === 'processing' || data.status === 'pending') {
+              setProgress(data.progress || 0);
+              setCurrentPhase(data.output?.shots ? '正在识别镜头边界' : '正在分析视频关键帧');
+              if (data.output?.shots) {
+                setDetectedShots(data.output.shots.length);
+              }
+            } else if (data.status === 'done') {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              setProgress(100);
+              setDetectedShots(data.output?.shots?.length || 0);
+              setEstimatedCost(data.output?.estimatedCost || 0);
+
+              if (data.output?.shots) {
+                const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot, idx) => ({
+                  id: generateId(),
+                  time: shot.startTime
+                }));
+                setSplitPoints(newSplitPoints);
+              }
+
+              setState('completed');
+            } else if (data.status === 'error') {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              setError(data.error || '分割失败，请重试');
+              setState('initial');
+            }
+          } catch (e) {
+            console.error('轮询任务状态失败:', e);
+          }
+        }, 2000);
+      };
+    } catch (e) {
+      console.warn('SSE 不可用，使用轮询:', e);
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/video2/ai/task/${tid}`);
+          const data: TaskResult = await res.json();
+
+          if (data.status === 'processing' || data.status === 'pending') {
+            setProgress(data.progress || 0);
+            setCurrentPhase(data.output?.shots ? '正在识别镜头边界' : '正在分析视频关键帧');
+            if (data.output?.shots) {
+              setDetectedShots(data.output.shots.length);
+            }
+          } else if (data.status === 'done') {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
+            setProgress(100);
+            setDetectedShots(data.output?.shots?.length || 0);
+            setEstimatedCost(data.output?.estimatedCost || 0);
+
+            if (data.output?.shots) {
+              const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot, idx) => ({
+                id: generateId(),
+                time: shot.startTime
+              }));
+              setSplitPoints(newSplitPoints);
+            }
+
+            setState('completed');
+          } else if (data.status === 'error') {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
+            setError(data.error || '分割失败，请重试');
+            setState('initial');
+          }
+        } catch (e) {
+          console.error('轮询任务状态失败:', e);
+        }
+      }, 2000);
+    }
   }, []);
 
   // 开始分割
@@ -473,6 +587,67 @@ export default function VideoSplitDialog({
       setState('initial');
     }
   };
+
+  const generateThumbnail = (time: number): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const video = thumbVideoRef.current;
+      const canvas = thumbCanvasRef.current;
+      if (!video || !canvas) {
+        reject(new Error('video or canvas not available'));
+        return;
+      }
+
+      const handleSeeked = () => {
+        try {
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('canvas context not available'));
+            return;
+          }
+          canvas.width = 160;
+          canvas.height = 90;
+          ctx.drawImage(video, 0, 0, 160, 90);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+          video.removeEventListener('seeked', handleSeeked);
+          resolve(dataUrl);
+        } catch (e) {
+          video.removeEventListener('seeked', handleSeeked);
+          reject(e);
+        }
+      };
+
+      video.addEventListener('seeked', handleSeeked);
+      video.currentTime = Math.min(time, video.duration - 0.1);
+    });
+  };
+
+  const generateAllThumbnails = useCallback(async () => {
+    if (splitPoints.length === 0 || !thumbVideoRef.current) return;
+
+    setGeneratingThumbs(true);
+    const thumbs: Record<string, string> = {};
+
+    try {
+      const times = [0, ...splitPoints.map(p => p.time)];
+      for (let i = 0; i < times.length; i++) {
+        try {
+          const thumb = await generateThumbnail(times[i]);
+          thumbs[`shot_${i}`] = thumb;
+        } catch (e) {
+          console.warn('生成缩略图失败:', times[i], e);
+        }
+      }
+      setShotThumbnails(thumbs);
+    } finally {
+      setGeneratingThumbs(false);
+    }
+  }, [splitPoints]);
+
+  useEffect(() => {
+    if (state === 'completed' && videoDuration > 0 && splitPoints.length > 0) {
+      generateAllThumbnails();
+    }
+  }, [state, videoDuration, splitPoints, generateAllThumbnails]);
 
   // 取消处理
   const handleCancel = () => {
@@ -884,7 +1059,62 @@ export default function VideoSplitDialog({
               )}
 
               {/* 提示 */}
-              <p className="text-sm text-slate-400">可拖动调整分割点</p>
+              <p className="text-sm text-slate-400">可拖动调整分割点，点击缩略图跳转到对应位置</p>
+
+              {/* 分镜缩略图预览 */}
+              {videoDuration > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-400">分镜预览</span>
+                    {generatingThumbs && (
+                      <span className="text-slate-500 flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        生成缩略图中...
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto pb-2">
+                    {(() => {
+                      const shotTimes = [0, ...splitPoints.map(p => p.time)];
+                      return shotTimes.map((time, idx) => {
+                        const endTime = idx < splitPoints.length ? splitPoints[idx].time : videoDuration;
+                        const thumbKey = `shot_${idx}`;
+                        return (
+                          <div
+                            key={idx}
+                            className="shrink-0 w-36 space-y-1 cursor-pointer group"
+                            onClick={() => {
+                              if (videoRef.current) {
+                                videoRef.current.currentTime = time;
+                              }
+                            }}
+                          >
+                            <div className="relative aspect-video rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-violet-400/50 transition">
+                              {shotThumbnails[thumbKey] ? (
+                                <img
+                                  src={shotThumbnails[thumbKey]}
+                                  alt={`分镜 ${idx + 1}`}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <Loader2 className="w-5 h-5 text-slate-500 animate-spin" />
+                                </div>
+                              )}
+                              <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-xs text-white">
+                                #{idx + 1}
+                              </div>
+                            </div>
+                            <div className="text-xs text-slate-400 text-center">
+                              {formatTime(time)} - {formatTime(endTime)}
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+              )}
 
               {/* 时间轴预览 */}
               {videoDuration > 0 && (
@@ -929,6 +1159,19 @@ export default function VideoSplitDialog({
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {/* 隐藏的 video 和 canvas，用于生成缩略图 */}
+          {videoUrl && (
+            <div className="hidden">
+              <video
+                ref={thumbVideoRef}
+                src={videoUrl}
+                crossOrigin="anonymous"
+                muted
+                playsInline
+              />
+              <canvas ref={thumbCanvasRef} />
             </div>
           )}
         </div>

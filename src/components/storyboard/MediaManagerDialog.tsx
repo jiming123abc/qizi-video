@@ -4,7 +4,7 @@ import type { Shot, ShotMedia } from '../../lib/types';
 import { uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 import type { UploadDecision } from '../../lib/ossUtils';
-import { VideoCompressionDialog } from '../VideoCompressionDialog';
+import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 interface MediaManagerDialogProps {

@@ -1,10 +1,12 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import Video2App from './App';
+import App from './App';
 import './index.css';
+import './lib/auth';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Video2App />
-  </React.StrictMode>
+    <App />
+  </React.StrictMode>,
 );
+
