@@ -111,32 +111,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     cloneShot,
   } = useShots({ projectId, showToast });
 
-  const {
-    uploadingFiles,
-    setUploadingFiles,
-    uploadTab,
-    setUploadTab,
-    urlInputValue,
-    setUrlInputValue,
-    urlError,
-    setUrlError,
-    pendingCompressionVideo,
-    pendingCompressionDecision,
-    handleUploadFiles,
-    handleUploadFromUrl,
-    cancelUpload,
-    handleCompressionDecision,
-    aliyunConfigured,
-    clearUploadingFiles,
-  } = useUpload({
-    projectId,
-    currentSceneId,
-    showToast,
-    loadShots,
-    loadStats,
-    loadProject,
-  });
-
   const [project, setProject] = useState<Project | null>(null);
   const [stats, setStats] = useState<{ pending: number; done: number; trash: number; unclassified: number }>({ pending: 0, done: 0, trash: 0, unclassified: 0 });
   const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, { done: number; total: number }>>({});
@@ -362,6 +336,32 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       console.error('加载统计失败:', e);
     }
   }, [projectId, currentSceneId, currentTab]);
+
+  const {
+    uploadingFiles,
+    setUploadingFiles,
+    uploadTab,
+    setUploadTab,
+    urlInputValue,
+    setUrlInputValue,
+    urlError,
+    setUrlError,
+    pendingCompressionVideo,
+    pendingCompressionDecision,
+    handleUploadFiles,
+    handleUploadFromUrl,
+    cancelUpload,
+    handleCompressionDecision,
+    aliyunConfigured,
+    clearUploadingFiles,
+  } = useUpload({
+    projectId,
+    currentSceneId,
+    showToast,
+    loadShots,
+    loadStats,
+    loadProject,
+  });
 
   const refreshAll = useCallback(async () => {
     await Promise.all([loadProject(), loadScenes(), loadShots(), loadStats(), loadSceneStats()]);
@@ -955,8 +955,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
                 if (e.key === 'Escape' && project) (e.currentTarget as HTMLInputElement).value = project.name;
               }}
-              className="w-full text-lg sm:text-2xl font-bold bg-transparent border-b border-transparent hover:border-white/20 focus:border-violet-400/60 outline-none transition truncate"
-              title="点击编辑项目名称"
+              className="w-full text-lg sm:text-2xl font-bold bg-transparent border-b border-transparent hover:border-white/20 focus:border-violet-400/60 outline-none transition truncate whitespace-nowrap overflow-hidden"
+              title={project?.name || '点击编辑项目名称'}
             />
             {project?.description && (
               <p className="text-xs sm:text-sm text-slate-400 hidden sm:block truncate mt-0.5">{project.description}</p>

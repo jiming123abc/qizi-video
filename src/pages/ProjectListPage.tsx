@@ -592,7 +592,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div>
             <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-violet-300 via-pink-300 to-fuchsia-300 bg-clip-text text-transparent leading-tight">
-              柒子文化<br />AI拍摄辅助系统
+              柒子文化<span className="sm:hidden"><br /></span>AI拍摄辅助系统
             </h1>
             <p className="text-sm text-slate-400 mt-0.5 hidden sm:block">项目管理 · 多场景素材统筹</p>
           </div>

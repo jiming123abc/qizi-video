@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, DragEvent, useRef } from 'react';
+import React, { useState, useEffect, useCallback, DragEvent, useRef } from 'react';
 import { X, Eye, EyeOff, Plus, GripVertical, Trash2, ChevronDown, Loader2, Download, Upload, AlertTriangle, LogIn, LogOut, Lock } from 'lucide-react';
 import type { ModelConfig, Settings } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';

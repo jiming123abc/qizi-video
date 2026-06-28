@@ -1,5 +1,6 @@
+import React from 'react';
 import { X, Server, Monitor, Hand, AlertTriangle, Cloud } from 'lucide-react';
-import type { UploadDecision } from '../lib/ossUtils';
+import type { UploadDecision } from '../../lib/ossUtils';
 
 interface VideoCompressionDialogProps {
   isOpen: boolean;

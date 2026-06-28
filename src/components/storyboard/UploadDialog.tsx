@@ -1,3 +1,4 @@
+import React from 'react';
 import { Upload, Link2, Image as ImageIcon, X } from 'lucide-react';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
