@@ -11,6 +11,8 @@ const fs = require('fs');
 const { EventEmitter } = require('events');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
 const db = require('./database');
+const aliyunVideo = require('./aliyunVideo');
+const aiClient = require('./aiClient');
 
 const taskEvents = new EventEmitter();
 taskEvents.setMaxListeners(100);
