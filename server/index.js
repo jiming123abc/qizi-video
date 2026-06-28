@@ -3439,6 +3439,28 @@ app.get('/api/video2/projects/:id/references', async (req, res) => {
   }
 });
 
+// 删除项目参考文件
+app.delete('/api/video2/projects/:projectId/references/:itemId', async (req, res) => {
+  try {
+    const projectId = parseInt(req.params.projectId);
+    const itemId = parseInt(req.params.itemId);
+    const item = await db.video2Items.getById(itemId);
+    if (!item || item.projectId !== projectId) {
+      return res.status(404).json({ success: false, message: '参考文件不存在' });
+    }
+    await db.video2Items.softDelete(itemId);
+    // 如果被删的文件同时是项目封面，清除封面
+    const project = await db.video2Projects.getById(projectId);
+    if (project && project.coverUrl === item.url) {
+      await db.video2Projects.update(projectId, { coverUrl: '' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[video2] 删除参考文件失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.get('/api/video2/scenes/:sceneId/references', async (req, res) => {
   try {
     const sceneId = parseInt(req.params.sceneId);

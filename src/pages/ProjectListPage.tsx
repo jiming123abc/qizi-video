@@ -106,13 +106,17 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     setTimeout(() => setToast(null), 2500);
   }, []);
 
-  // 收集所有媒体 URL 并批量签名
+  // 收集所有媒体 URL（含项目 coverUrl）并批量签名
   const signAllMediaUrls = useCallback(async () => {
     const urls: string[] = [];
     for (const refs of Object.values(referencesCache)) {
       for (const ref of refs) {
         if (ref.url) urls.push(ref.url);
       }
+    }
+    // 同时签名项目的 coverUrl
+    for (const p of projects) {
+      if (p.coverUrl) urls.push(p.coverUrl);
     }
     if (urls.length === 0) return;
     const { batchGetSignedUrls, getSignedUrlFromCache } = await import('../lib/ossUtils');
@@ -126,7 +130,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         return updated;
       });
     });
-  }, [referencesCache]);
+  }, [referencesCache, projects]);
 
   // referencesCache 变化时批量签名
   useEffect(() => {
@@ -185,6 +189,26 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       console.error('加载参考文件失败:', e);
     }
   }, []);
+
+  // 删除项目参考文件
+  const deleteReference = useCallback(async (projectId: number, itemId: number) => {
+    try {
+      const res = await fetch(`/api/video2/projects/${projectId}/references/${itemId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setReferencesCache(prev => ({
+          ...prev,
+          [projectId]: (prev[projectId] || []).filter(item => item.id !== itemId)
+        }));
+        // 同步刷新项目列表（封面可能需要清除）
+        loadProjects();
+        showToast('参考素材已删除');
+      }
+    } catch (e) {
+      console.error('删除参考文件失败:', e);
+      showToast('删除失败', 'error');
+    }
+  }, [loadProjects, showToast]);
 
   // 兜底：若无参考文件，则加载项目内前 6 个普通素材作为预览
   const loadProjectMedia = useCallback(async (projectId: number) => {
@@ -567,8 +591,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/70 border-b border-white/10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-violet-300 via-pink-300 to-fuchsia-300 bg-clip-text text-transparent">
-              柒子文化AI拍摄辅助系统
+            <h1 className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-violet-300 via-pink-300 to-fuchsia-300 bg-clip-text text-transparent leading-tight">
+              柒子文化<br />AI拍摄辅助系统
             </h1>
             <p className="text-sm text-slate-400 mt-0.5 hidden sm:block">项目管理 · 多场景素材统筹</p>
           </div>
@@ -1007,7 +1031,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 <h3 className="text-sm font-medium mb-3 text-slate-300">已上传的素材（{referencesCache[uploadDialogProject.id]!.length}）</h3>
                 <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
                   {referencesCache[uploadDialogProject.id]!.map(item => (
-                    <div key={item.id} className="relative aspect-video rounded-xl overflow-hidden border border-white/10 bg-black/30">
+                    <div key={item.id} className="relative aspect-video rounded-xl overflow-hidden border border-white/10 bg-black/30 group">
                       {item.type === 'image' ? (
                         <img src={item.url} alt={item.title} className="w-full h-full object-cover" />
                       ) : (
@@ -1018,9 +1042,16 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                           </div>
                         </>
                       )}
-                      <div className="absolute top-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-[10px] uppercase">
+                      <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-[10px] uppercase">
                         {item.type}
                       </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteReference(uploadDialogProject.id, item.id); }}
+                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-red-500/80 hover:bg-red-500 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="删除"
+                      >
+                        <X className="w-3 h-3 text-white" />
+                      </button>
                     </div>
                   ))}
                 </div>
