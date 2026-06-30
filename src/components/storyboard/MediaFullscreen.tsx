@@ -35,22 +35,29 @@ export function MediaFullscreen({
   videoRefCallback,
 }: MediaFullscreenProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const signedUrl = useSignedUrl(mediaUrl);
-  const signedPoster = useSignedUrl(mediaType === 'video' && mediaUrl ? getPosterUrl(mediaUrl) : undefined);
+
+  // 优先从 mediaList[currentIndex] 获取当前媒体信息
+  const currentMedia = mediaList && mediaList[currentIndex];
+  const actualMediaType = currentMedia?.type || mediaType;
+  const actualMediaUrl = currentMedia?.url || mediaUrl;
+  const actualFilename = currentMedia?.filename || filename;
+
+  const signedUrl = useSignedUrl(actualMediaUrl);
+  const signedPoster = useSignedUrl(actualMediaType === 'video' && actualMediaUrl ? getPosterUrl(actualMediaUrl) : undefined);
 
   useEscapeKey(onClose, isOpen);
 
   useEffect(() => {
-    if (isOpen && mediaType === 'video' && videoRef.current) {
+    if (isOpen && actualMediaType === 'video' && videoRef.current) {
       videoRef.current.play().catch(() => {});
     }
-  }, [isOpen, mediaType, mediaUrl]);
+  }, [isOpen, actualMediaType, actualMediaUrl]);
 
   useEffect(() => {
     if (videoRefCallback) {
       videoRefCallback(videoRef.current);
     }
-  }, [videoRefCallback, isOpen, mediaUrl]);
+  }, [videoRefCallback, isOpen, actualMediaUrl]);
 
   const handlePrev = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -100,10 +107,10 @@ export function MediaFullscreen({
       )}
 
       <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
-        {mediaType === 'image' ? (
+        {actualMediaType === 'image' ? (
           <img
             src={signedUrl}
-            alt={filename || mediaUrl}
+            alt={actualFilename || actualMediaUrl}
             className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl"
           />
         ) : (
@@ -113,13 +120,14 @@ export function MediaFullscreen({
             poster={signedPoster}
             controls
             autoPlay
+            loop
             playsInline
             muted={false}
             className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"
           />
         )}
         <p className="text-center text-sm text-slate-300 mt-4">
-          {filename || mediaUrl}
+          {actualFilename || actualMediaUrl}
         </p>
       </div>
     </div>

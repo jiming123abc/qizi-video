@@ -46,8 +46,13 @@ export function MediaCarousel({
   const goTo = useCallback((index: number) => {
     if (index < 0) index = media.length - 1;
     if (index >= media.length) index = 0;
-    setCurrentIndex(index);
+
+    // 先暂停当前播放的视频
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
     setIsPlaying(false);
+    setCurrentIndex(index);
   }, [media.length]);
 
   const goNext = useCallback(() => {
@@ -122,9 +127,15 @@ export function MediaCarousel({
             muted
             playsInline
             loop
-            controls={isPlaying}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover cursor-pointer"
             onEnded={() => setIsPlaying(false)}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isPlaying && videoRef.current) {
+                videoRef.current.pause();
+                setIsPlaying(false);
+              }
+            }}
           />
           {/* 非播放状态显示封面和播放按钮 */}
           {!isPlaying && (

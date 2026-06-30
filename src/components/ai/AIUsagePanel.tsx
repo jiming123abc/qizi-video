@@ -160,7 +160,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
             <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border border-emerald-500/20">
               <p className="text-sm text-slate-300 mb-1">总费用</p>
               <p className="text-3xl font-bold text-emerald-400">
-                ¥{stats.totalCost.toFixed(2)}
+                ¥{(stats.totalCost ?? 0).toFixed(2)}
               </p>
             </div>
 
@@ -180,7 +180,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
                           <span className="text-slate-400">{item.icon}</span>
                           <span className="text-sm text-slate-200">{item.label}</span>
                         </div>
-                        <span className="text-sm font-medium text-white">¥{value.toFixed(2)}</span>
+                        <span className="text-sm font-medium text-white">¥{(value ?? 0).toFixed(2)}</span>
                       </div>
                       <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                         <div
@@ -211,14 +211,14 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
                         <div>
                           <p className="text-sm font-medium text-white">{model.model}</p>
                           <p className="text-xs text-slate-500">
-                            {model.totalTokens > 0
-                              ? `${(model.totalTokens / 1000).toFixed(0)}K tokens`
-                              : `${model.imageCount} 张`}
+                            {(model.totalTokens ?? 0) > 0
+                              ? `${((model.totalTokens ?? 0) / 1000).toFixed(0)}K tokens`
+                              : `${model.imageCount ?? 0} 张`}
                           </p>
                         </div>
                       </div>
                       <span className="text-sm font-medium text-emerald-400">
-                        ¥{model.cost.toFixed(2)}
+                        ¥{(model.cost ?? 0).toFixed(2)}
                       </span>
                     </div>
                   ))}

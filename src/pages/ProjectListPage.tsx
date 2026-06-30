@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, Link2, CheckCircle2, XCircle, Info } from 'lucide-react';
+import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, Link2, CheckCircle2, XCircle, Info, Video } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
 import { uploadVideo2Image, uploadVideo2Video, detectFileType, uploadVideo2FromUrl, checkVideoBitrate } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
 import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
+import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
 import { timeAgo, formatSize } from '../lib/utils';
+import type { ShotMedia } from '../lib/types';
 
 interface Project {
   id: number;
@@ -88,18 +90,17 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [referencesCache, setReferencesCache] = useState<Record<number, ReferenceItem[]>>({});
   const [carouselIndex, setCarouselIndex] = useState<Record<number, number>>({});
   const [fullscreenItem, setFullscreenItem] = useState<ReferenceItem | null>(null);
+  const [fullscreenProjectId, setFullscreenProjectId] = useState<number | null>(null);
   const [fullscreenTitle, setFullscreenTitle] = useState<string>('');
   const [signedMediaUrls, setSignedMediaUrls] = useState<Record<string, string>>({});
+  const [cardPlayingProjectId, setCardPlayingProjectId] = useState<number | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
+  const cardVideoRef = useRef<HTMLVideoElement>(null);
   const signedFullscreenUrl = useSignedUrl(fullscreenItem?.url);
   const signedFullscreenPoster = useSignedUrl(fullscreenItem?.url ? getVideoPoster(fullscreenItem.url) : undefined);
 
-  // 全屏弹窗打开时自动播放视频
-  useEffect(() => {
-    if (fullscreenItem && fullscreenItem.type === 'video' && fullscreenVideoRef.current) {
-      fullscreenVideoRef.current.play().catch(() => {});
-    }
-  }, [fullscreenItem]);
+  // 全屏弹窗打开时自动播放视频（通过 MediaFullscreen 组件的 autoPlay 处理）
+  // fullscreenVideoRef 用于 MediaFullscreen 的 videoRefCallback
 
   const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message: msg, type });
@@ -112,6 +113,11 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     for (const refs of Object.values(referencesCache)) {
       for (const ref of refs) {
         if (ref.url) urls.push(ref.url);
+        // 视频类型素材也需要对其海报 URL（带 x-oss-process）进行签名
+        if (ref.type === 'video' && ref.url) {
+          const poster = getVideoPoster(ref.url);
+          if (poster && poster !== ref.url) urls.push(poster);
+        }
       }
     }
     // 同时签名项目的 coverUrl
@@ -132,48 +138,42 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     });
   }, [referencesCache, projects]);
 
-  // referencesCache 变化时批量签名
+  // referencesCache 变化时批量签名（防抖，避免频繁触发）
+  const signingRef = useRef(false);
+  const signingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    signAllMediaUrls();
-  }, [signAllMediaUrls]);
-
-  const loadProjects = useCallback(async () => {
-    try {
-      const res = await fetch('/api/video2/projects');
-      const data = await res.json();
-      if (data.success) {
-        setProjects(data.data);
-        const ids = (data.data || []).map((p: Project) => p.id);
-        ids.forEach(id => {
-          fetch(`/api/video2/stats?projectId=${id}`)
-            .then(r => r.json())
-            .then(d => {
-              if (d.success) {
-                setProjectStats(prev => ({ ...prev, [id]: d.data }));
-              }
-            })
-            .catch(() => {});
-        });
+    if (signingRef.current) return;
+    if (signingTimeoutRef.current) clearTimeout(signingTimeoutRef.current);
+    signingTimeoutRef.current = setTimeout(() => {
+      signingRef.current = true;
+      // 过滤出需要签名的URL（非data:uri）
+      const needsSigning: string[] = [];
+      for (const refs of Object.values(referencesCache)) {
+        for (const ref of refs) {
+          if (ref.url && !ref.url.startsWith('data:')) {
+            needsSigning.push(ref.url);
+          }
+        }
       }
-    } catch (e) {
-      console.error('加载项目列表失败:', e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+      for (const p of projects) {
+        if (p.coverUrl && !p.coverUrl.startsWith('data:')) {
+          needsSigning.push(p.coverUrl);
+        }
+      }
+      if (needsSigning.length > 0) {
+        signAllMediaUrls().finally(() => {
+          signingRef.current = false;
+        });
+      } else {
+        signingRef.current = false;
+      }
+    }, 300);
+    return () => {
+      if (signingTimeoutRef.current) clearTimeout(signingTimeoutRef.current);
+    };
+  }, [referencesCache, projects, signAllMediaUrls]);
 
-  useEffect(() => {
-    loadProjects();
-    setupShareMetadata({
-      title: '柒子文化AI拍摄辅助系统',
-      desc: '专业的视频拍摄管理工具，帮助团队高效管理拍摄素材',
-      link: window.location.href,
-      imgUrl: '/images/hero-home.png'
-    });
-    document.title = '柒子文化AI拍摄辅助系统';
-  }, [loadProjects]);
-
-  // 加载某项目的参考文件
+  // 加载某项目的参考文件（单个）
   const loadReferences = useCallback(async (projectId: number) => {
     try {
       const res = await fetch(`/api/video2/projects/${projectId}/references`);
@@ -189,6 +189,79 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       console.error('加载参考文件失败:', e);
     }
   }, []);
+
+  // 批量加载所有项目的参考文件（一次请求获取所有）
+  const loadAllReferences = useCallback(async (projectIds: number[]) => {
+    if (projectIds.length === 0) return;
+    try {
+      const idsParam = projectIds.join(',');
+      const res = await fetch(`/api/video2/projects/references/batch?ids=${idsParam}`);
+      const data = await res.json();
+      if (data.success && data.data) {
+        setReferencesCache(prev => {
+          const next = { ...prev };
+          for (const [pid, refs] of Object.entries(data.data)) {
+            const projectId = Number(pid);
+            const refList: ReferenceItem[] = ((refs as any[]) || []).map((r: any) => ({
+              id: r.id,
+              type: r.type,
+              url: r.url,
+              title: r.title
+            }));
+            if (next[projectId] === undefined) {
+              next[projectId] = refList;
+            }
+          }
+          return next;
+        });
+      }
+    } catch (e) {
+      console.error('批量加载参考文件失败:', e);
+    }
+  }, []);
+
+  const loadProjects = useCallback(async () => {
+    try {
+      const res = await fetch('/api/video2/projects');
+      const data = await res.json();
+      if (data.success) {
+        setProjects(data.data);
+        const ids = (data.data || []).map((p: Project) => p.id);
+        
+        // 批量获取统计数据
+        ids.forEach(id => {
+          fetch(`/api/video2/stats?projectId=${id}`)
+            .then(r => r.json())
+            .then(d => {
+              if (d.success) {
+                setProjectStats(prev => ({ ...prev, [id]: d.data }));
+              }
+            })
+            .catch(() => {});
+        });
+        
+        // 批量加载所有项目的参考文件（一次请求）
+        if (ids.length > 0) {
+          loadAllReferences(ids);
+        }
+      }
+    } catch (e) {
+      console.error('加载项目列表失败:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [loadAllReferences]);
+
+  useEffect(() => {
+    loadProjects();
+    setupShareMetadata({
+      title: '柒子文化AI拍摄辅助系统',
+      desc: '专业的视频拍摄管理工具，帮助团队高效管理拍摄素材',
+      link: window.location.href,
+      imgUrl: '/images/hero-home.png'
+    });
+    document.title = '柒子文化AI拍摄辅助系统';
+  }, [loadProjects]);
 
   // 删除项目参考文件
   const deleteReference = useCallback(async (projectId: number, itemId: number) => {
@@ -209,30 +282,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       showToast('删除失败', 'error');
     }
   }, [loadProjects, showToast]);
-
-  // 兜底：若无参考文件，则加载项目内前 6 个普通素材作为预览
-  const loadProjectMedia = useCallback(async (projectId: number) => {
-    try {
-      const params = new URLSearchParams();
-      params.set('projectId', String(projectId));
-      params.set('status', 'pending');
-      const res = await fetch(`/api/video2/list?${params.toString()}`);
-      const data = await res.json();
-      const items: any[] = (data.data || []).slice(0, 6);
-      const refs: ReferenceItem[] = items.map((it: any) => ({
-        id: it.id,
-        type: it.type,
-        url: it.url,
-        title: it.title
-      }));
-      setReferencesCache(prev => {
-        if (prev[projectId] && prev[projectId]!.length > 0) return prev;
-        return { ...prev, [projectId]: refs };
-      });
-    } catch (e) {
-      console.error('加载项目素材兜底失败:', e);
-    }
-  }, []);
 
   const handleCreate = async () => {
     if (!createName.trim()) return;
@@ -326,9 +375,169 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     }
   };
 
+  const deleteProjectCover = async (projectId: number) => {
+    try {
+      const res = await fetch(`/api/video2/projects/${projectId}/cover`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setProjects(prev => prev.map(p => p.id === projectId ? { ...p, coverUrl: DEFAULT_COVER } : p));
+        showToast('封面已删除');
+      }
+    } catch (e) {
+      console.error('删除封面失败:', e);
+      showToast('删除失败', 'error');
+    }
+  };
+
+  const handleCoverImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !uploadDialogProject) return;
+    
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) {
+      showToast('请选择图片文件', 'error');
+      e.target.value = '';
+      return;
+    }
+    
+    const file = imageFiles[0];
+    const project = uploadDialogProject;
+    setUploadDialogLoading(true);
+    setUploadDialogMessage('正在上传封面...');
+
+    try {
+      const result = await uploadVideo2Image(file, {
+        projectId: project.id,
+        reference: true,
+        title: file.name,
+        usage: 'project-cover'
+      });
+      if (result.url) {
+        await setProjectCover(project.id, result.url);
+        setUploadDialogMessage('封面设置成功');
+      }
+    } catch (err: any) {
+      console.error('封面上传失败:', err);
+      showToast(err.message || '封面上传失败，请重试', 'error');
+      setUploadDialogMessage('上传失败');
+    }
+
+    setUploadDialogLoading(false);
+    setTimeout(() => setUploadDialogMessage(''), 3000);
+    e.target.value = '';
+  };
+
+  const handleReferenceVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !uploadDialogProject) return;
+    
+    const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
+    if (videoFiles.length === 0) {
+      showToast('请选择视频文件', 'error');
+      e.target.value = '';
+      return;
+    }
+    
+    setUploadDialogLoading(true);
+    setUploadDialogMessage(`正在上传 0 / ${videoFiles.length}`);
+
+    let successCount = 0;
+    const project = uploadDialogProject;
+    let stopped = false;
+
+    for (let i = 0; i < videoFiles.length; i++) {
+      const file = videoFiles[i];
+      try {
+        setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 检测视频信息...`);
+        const decision = await checkVideoBitrate(file);
+        if (decision.decision === 'must_compress') {
+          pendingUploadRef.current = { file, index: i, total: videoFiles.length, successCount, project, usage: 'project-reference' } as any;
+          setPendingCompressionVideo(file);
+          setPendingCompressionDecision(decision);
+          setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 需选择压缩方式`);
+          stopped = true;
+          break;
+        }
+        await uploadVideo2Video(file, {
+          projectId: project.id,
+          reference: true,
+          title: file.name,
+          usage: 'project-reference',
+          skipBitrateCheck: true,
+          onProgress: p => {
+            setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: ${p.message} (${p.progress}%)`);
+          }
+        });
+        successCount++;
+        setUploadDialogMessage(`已上传 ${successCount} / ${videoFiles.length}`);
+      } catch (err: any) {
+        console.error('上传失败:', err);
+        showToast(err.message || '上传失败，请重试', 'error');
+      }
+    }
+
+    if (!stopped) {
+      await loadReferences(project.id);
+      setUploadDialogMessage(`完成：成功 ${successCount}`);
+      setUploadDialogLoading(false);
+      setTimeout(() => setUploadDialogMessage(''), 3000);
+      e.target.value = '';
+    }
+  };
+
+  const handleReferenceUrlUpload = async () => {
+    const url = uploadDialogUrl.trim();
+    if (!url || !uploadDialogProject) return;
+
+    setUploadDialogLoading(true);
+    setUploadDialogMessage('正在转存...');
+    const project = uploadDialogProject;
+
+    try {
+      const res = await fetch(`/api/video2/projects/${project.id}/references/url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await res.json();
+      if (data.success) {
+        await loadReferences(project.id);
+        setUploadDialogMessage('转存成功');
+        setUploadDialogUrl('');
+      } else {
+        throw new Error(data.error || '转存失败');
+      }
+    } catch (err: any) {
+      console.error('URL转存失败:', err);
+      showToast(err.message || '转存失败，请重试', 'error');
+      setUploadDialogMessage('转存失败');
+    }
+
+    setUploadDialogLoading(false);
+    setTimeout(() => setUploadDialogMessage(''), 3000);
+  };
+
+  const isDefaultCover = (coverUrl: string) => {
+    return !coverUrl || coverUrl.startsWith('data:image/svg+xml');
+  };
+
+  const hasUserCover = (projectId: number) => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project) return false;
+    return !isDefaultCover(project.coverUrl);
+  };
+
   const handleFileUploadToProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0 || !uploadDialogProject) return;
+    
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length > 1) {
+      showToast('封面图片最多只能上传1张', 'error');
+      e.target.value = '';
+      return;
+    }
+    
     setUploadDialogLoading(true);
     setUploadDialogMessage(`正在上传 0 / ${files.length}`);
 
@@ -346,13 +555,16 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       }
       try {
         if (detected.type === 'image') {
-          await uploadVideo2Image(file, {
+          const result = await uploadVideo2Image(file, {
             projectId: project.id,
             reference: true,
             title: file.name
           });
+          if (result.url) {
+            await setProjectCover(project.id, result.url);
+          }
           if (!firstUploadedUrl) {
-            firstUploadedUrl = '';
+            firstUploadedUrl = result.url || '';
             firstUploadedType = 'image';
           }
         } else {
@@ -381,14 +593,15 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         setUploadDialogMessage(`已上传 ${successCount} / ${files.length}`);
       } catch (err: any) {
         console.error('上传失败:', err);
-        showToast('上传失败：' + (err.message || '请重试'), 'error');
+        showToast(err.message || '上传失败，请重试', 'error');
       }
     }
 
     if (!stopped) {
       await loadReferences(project.id);
       const newRefs = referencesCache[project.id] || [];
-      if (newRefs.length > 0) {
+      const videoRefs = newRefs.filter(r => r.type === 'video');
+      if (newRefs.length > 0 && !project.coverUrl) {
         const first = newRefs[0];
         const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
         await setProjectCover(project.id, coverUrl);
@@ -418,6 +631,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
     const { file, index, total, successCount, project } = pending;
     let currentSuccess = successCount;
+    const usage = (pending as any).usage || 'project-reference';
 
     try {
       await uploadVideo2Video(file, {
@@ -425,6 +639,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         reference: true,
         title: file.name,
         compressionMethod: method,
+        usage,
         skipBitrateCheck: true,
         onProgress: p => {
           setUploadDialogMessage(`视频 ${index + 1}/${total}: ${p.message} (${p.progress}%)`);
@@ -434,63 +649,50 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
 
       for (let i = index + 1; i < total; i++) {
-        const nextFile = (document.querySelector('input[type="file"]') as HTMLInputElement)?.files?.[i];
+        const nextFile = (document.querySelector('input[type="file"][accept*="video"]') as HTMLInputElement)?.files?.[i];
         if (!nextFile) continue;
         const detected = detectFileType(nextFile);
-        if (!detected.supported) continue;
+        if (!detected.supported || detected.type !== 'video') continue;
 
         try {
-          if (detected.type === 'image') {
-            await uploadVideo2Image(nextFile, {
-              projectId: project.id,
-              reference: true,
-              title: nextFile.name
-            });
-          } else {
-            setUploadDialogMessage(`视频 ${i + 1}/${total}: 检测视频信息...`);
-            const nextDecision = await checkVideoBitrate(nextFile);
-            if (nextDecision.decision === 'must_compress') {
-              pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project };
-              setPendingCompressionVideo(nextFile);
-              setPendingCompressionDecision(nextDecision);
-              setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
-              return;
-            }
-            await uploadVideo2Video(nextFile, {
-              projectId: project.id,
-              reference: true,
-              title: nextFile.name,
-              skipBitrateCheck: true,
-              onProgress: p => {
-                setUploadDialogMessage(`视频 ${i + 1}/${total}: ${p.message} (${p.progress}%)`);
-              }
-            });
+          setUploadDialogMessage(`视频 ${i + 1}/${total}: 检测视频信息...`);
+          const nextDecision = await checkVideoBitrate(nextFile);
+          if (nextDecision.decision === 'must_compress') {
+            pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project, usage } as any;
+            setPendingCompressionVideo(nextFile);
+            setPendingCompressionDecision(nextDecision);
+            setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
+            return;
           }
+          await uploadVideo2Video(nextFile, {
+            projectId: project.id,
+            reference: true,
+            title: nextFile.name,
+            usage,
+            skipBitrateCheck: true,
+            onProgress: p => {
+              setUploadDialogMessage(`视频 ${i + 1}/${total}: ${p.message} (${p.progress}%)`);
+            }
+          });
           currentSuccess++;
           setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
         } catch (err: any) {
           console.error('上传失败:', err);
-          showToast('上传失败：' + (err.message || '请重试'), 'error');
+          showToast(err.message || '上传失败，请重试', 'error');
         }
       }
 
       await loadReferences(project.id);
-      const newRefs = referencesCache[project.id] || [];
-      if (newRefs.length > 0) {
-        const first = newRefs[0];
-        const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
-        await setProjectCover(project.id, coverUrl);
-      }
       setUploadDialogMessage(`完成：成功 ${currentSuccess}`);
       setUploadDialogLoading(false);
       setTimeout(() => setUploadDialogMessage(''), 3000);
-      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      const fileInput = document.querySelector('input[type="file"][accept*="video"]') as HTMLInputElement;
       if (fileInput) fileInput.value = '';
     } catch (err: any) {
       console.error('压缩上传失败:', err);
       setUploadDialogMessage('失败：' + (err.message || '压缩上传失败'));
       setUploadDialogLoading(false);
-      showToast('上传失败：' + (err.message || '请重试'), 'error');
+      showToast(err.message || '上传失败，请重试', 'error');
     }
   };
 
@@ -506,7 +708,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       });
       await loadReferences(uploadDialogProject.id);
       const newRefs = referencesCache[uploadDialogProject.id] || [];
-      if (newRefs.length > 0) {
+      if (newRefs.length > 0 && !uploadDialogProject.coverUrl) {
         const first = newRefs[0];
         const coverUrl = first.type === 'video' ? getVideoPoster(first.url) || first.url : first.url;
         await setProjectCover(uploadDialogProject.id, coverUrl);
@@ -561,24 +763,32 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   };
 
   // 轮播：封面 + reference 合并为一个展示列表（避免重复）
+  // 只有当封面是真实的URL（非data:uri）时才显示
   const buildMediaList = (project: Project): ReferenceItem[] => {
     const refs = referencesCache[project.id] || [];
-    const cover: ReferenceItem | null = project.coverUrl
-      ? { id: -1, type: 'image', url: project.coverUrl, title: '封面' }
-      : null;
-    if (refs.length === 0) {
-      return cover ? [cover] : [];
+    const videoRefs = refs.filter(r => r.type === 'video');
+    const hasUserCover = !isDefaultCover(project.coverUrl);
+    
+    const media: ReferenceItem[] = [];
+    
+    if (hasUserCover) {
+      media.push({ id: -1, type: 'image', url: project.coverUrl, title: '封面' });
     }
-    // 如果封面等于第一个参考素材（或其视频截图），则去重
-    const firstRef = refs[0];
-    const firstRefUrl = firstRef.url || '';
-    const firstRefPoster = firstRef.type === 'video' ? getVideoPoster(firstRef.url) || firstRefUrl : firstRefUrl;
-    const firstRefIsCover = cover && firstRef && (firstRefUrl === cover.url || firstRefPoster === cover.url);
-    if (firstRefIsCover) return refs;
-    return cover ? [cover, ...refs] : refs;
+    
+    for (const ref of videoRefs) {
+      media.push(ref);
+    }
+    
+    return media;
   };
 
   const moveCarousel = (projectId: number, dir: 1 | -1) => {
+    // 先暂停当前播放的视频
+    if (cardVideoRef.current) {
+      cardVideoRef.current.pause();
+    }
+    setCardPlayingProjectId(null);
+
     const media = buildMediaList(projects.find(p => p.id === projectId) || { id: projectId } as Project);
     if (media.length <= 1) return;
     const current = carouselIndex[projectId] || 0;
@@ -625,14 +835,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {projects.map(project => {
-            // 首次进入项目列表时，尝试加载素材作为预览；优先参考文件，其次是项目内素材
-            if (referencesCache[project.id] === undefined) {
-              loadReferences(project.id).then(() => {
-                if (!referencesCache[project.id] || referencesCache[project.id]!.length === 0) {
-                  loadProjectMedia(project.id);
-                }
-              });
-            }
             const mediaList = buildMediaList(project);
             const currentIdx = carouselIndex[project.id] || 0;
             const hasMultiple = mediaList.length > 1;
@@ -675,20 +877,56 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                   className="relative aspect-[16/10] overflow-hidden bg-black/30"
                 >
                   {(() => {
-                    // 统一渲染：图片与视频都显示为图片海报
-                    let rawSrc = current
-                      ? (current.type === 'video'
-                          ? (getVideoPoster(current.url) || current.url)
-                          : current.url)
-                      : DEFAULT_COVER;
-                    const mediaSrc = current && current.url ? (signedMediaUrls[current.url] || rawSrc) : rawSrc;
+                    const isCardPlaying = cardPlayingProjectId === project.id;
+                    if (current && current.type === 'video' && isCardPlaying) {
+                      const videoSrc = signedMediaUrls[current.url] || current.url;
+                      return (
+                        <video
+                          ref={cardPlayingProjectId === project.id ? cardVideoRef : undefined}
+                          src={videoSrc}
+                          className="w-full h-full object-cover cursor-pointer"
+                          playsInline
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (cardVideoRef.current) {
+                              cardVideoRef.current.pause();
+                            }
+                            setCardPlayingProjectId(null);
+                          }}
+                        />
+                      );
+                    }
+                    let mediaSrc = DEFAULT_COVER;
+                    let fallbackSrc = '';
+                    if (current && current.url) {
+                      if (current.type === 'video') {
+                        const posterUrl = getVideoPoster(current.url);
+                        if (posterUrl) {
+                          mediaSrc = signedMediaUrls[posterUrl] || posterUrl;
+                          fallbackSrc = posterUrl;
+                        } else {
+                          mediaSrc = signedMediaUrls[current.url] || current.url;
+                          fallbackSrc = current.url;
+                        }
+                      } else {
+                        mediaSrc = signedMediaUrls[current.url] || current.url;
+                        fallbackSrc = current.url;
+                      }
+                    }
                     return (
                       <img
                         src={mediaSrc}
                         alt={project.name}
                         className="w-full h-full object-cover cursor-pointer"
                         onClick={() => goToProject(project.id)}
-                        onError={(ev) => { (ev.target as HTMLImageElement).src = DEFAULT_COVER; }}
+                        onError={(ev) => {
+                          const img = ev.target as HTMLImageElement;
+                          if (fallbackSrc && img.src !== fallbackSrc && img.src !== DEFAULT_COVER) {
+                            img.src = fallbackSrc;
+                          } else if (img.src !== DEFAULT_COVER) {
+                            img.src = DEFAULT_COVER;
+                          }
+                        }}
                       />
                     );
                   })()}
@@ -699,13 +937,12 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                     onClick={() => goToProject(project.id)}
                   />
 
-                  {/* 视频条目：点击播放按钮后弹窗播放视频 */}
-                  {current && current.type === 'video' && (
+                  {/* 视频条目：点击播放按钮在卡片内播放视频 */}
+                  {current && current.type === 'video' && cardPlayingProjectId !== project.id && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setFullscreenItem(current);
-                        setFullscreenTitle(project.name);
+                        setCardPlayingProjectId(project.id);
                       }}
                       className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20"
                     >
@@ -741,6 +978,10 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                           key={i}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (cardVideoRef.current) {
+                              cardVideoRef.current.pause();
+                            }
+                            setCardPlayingProjectId(null);
                             setCarouselIndex(prev => ({ ...prev, [project.id]: i }));
                           }}
                           className={`rounded-full transition-all ${i === currentIdx ? 'w-4 h-1.5 bg-white' : 'w-1.5 h-1.5 bg-white/40 hover:bg-white/70'}`}
@@ -749,18 +990,19 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                     </div>
                   )}
 
-                  {/* 右下：全屏预览（避免与右上分享/删除按钮重叠） */}
-                  {current && current.type !== 'video' && (
+                  {/* 右下：全屏预览（有封面或参考视频时显示） */}
+                  {mediaList.length > 0 && current && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         setFullscreenItem(current);
+                        setFullscreenProjectId(project.id);
                         setFullscreenTitle(project.name);
                       }}
-                      className="absolute bottom-3 right-3 z-20 w-9 h-9 rounded-full border border-white/20 bg-black/50 backdrop-blur hover:bg-white/15 flex items-center justify-center transition"
+                      className="absolute bottom-3 right-3 z-30 w-9 h-9 rounded-full border border-white/25 bg-black/50 backdrop-blur hover:bg-white/15 flex items-center justify-center transition"
                       title="全屏预览"
                     >
-                      <Maximize2 className="w-4 h-4 text-white/80" />
+                      <Maximize2 className="w-4 h-4 text-white/90" />
                     </button>
                   )}
                 </div>
@@ -952,109 +1194,164 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       {/* 上传参考文件对话框 */}
       {uploadDialogProject && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !uploadDialogLoading && setUploadDialogProject(null)}>
-          <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
+          <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
               <div>
-                <h2 className="text-lg font-semibold">上传图片或视频作为封面 / 参考</h2>
-                <p className="text-xs text-slate-400 mt-0.5">「{uploadDialogProject.name}」 — 第一张会自动设为封面</p>
+                <h2 className="text-lg font-semibold">项目封面与参考视频</h2>
+                <p className="text-xs text-slate-400 mt-0.5">「{uploadDialogProject.name}」</p>
               </div>
               <button onClick={() => !uploadDialogLoading && setUploadDialogProject(null)} className="w-9 h-9 rounded-full hover:bg-white/10 flex items-center justify-center">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="flex gap-2 mb-4 bg-white/5 p-1 rounded-2xl">
-              <button
-                onClick={() => setUploadDialogTab('file')}
-                className={`flex-1 py-2 text-sm rounded-xl transition ${uploadDialogTab === 'file' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                <Upload className="w-4 h-4 inline mr-1.5" />选择文件
-              </button>
-              <button
-                onClick={() => setUploadDialogTab('url')}
-                className={`flex-1 py-2 text-sm rounded-xl transition ${uploadDialogTab === 'url' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                <Link2 className="w-4 h-4 inline mr-1.5" />网络 URL
-              </button>
+            {/* 封面设置区 */}
+            <div className="mb-6 p-4 rounded-2xl bg-white/[0.03] border border-white/10">
+              <h3 className="text-sm font-medium mb-3 text-slate-200 flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-violet-400" />
+                项目封面
+              </h3>
+              
+              <div className="flex gap-4 items-start">
+                {/* 封面预览 */}
+                <div className="w-32 h-20 rounded-xl overflow-hidden border border-white/10 bg-black/30 flex-shrink-0">
+                  {!isDefaultCover(uploadDialogProject.coverUrl) ? (
+                    <img 
+                      src={signedMediaUrls[uploadDialogProject.coverUrl] || uploadDialogProject.coverUrl} 
+                      alt="封面" 
+                      className="w-full h-full object-cover" 
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-slate-500">
+                      <ImageIcon className="w-8 h-8" />
+                    </div>
+                  )}
+                </div>
+                
+                {/* 操作按钮 */}
+                <div className="flex-1 space-y-2">
+                  <label className="block w-full">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleCoverImageUpload}
+                      disabled={uploadDialogLoading}
+                    />
+                    <div className={`w-full py-2 text-center text-sm rounded-xl cursor-pointer transition ${uploadDialogLoading ? 'bg-white/5 text-slate-500 cursor-not-allowed' : 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white hover:opacity-90'}`}>
+                      <Upload className="w-4 h-4 inline mr-1.5" />
+                      {!isDefaultCover(uploadDialogProject.coverUrl) ? '更换封面' : '上传封面'}
+                    </div>
+                  </label>
+                  {!isDefaultCover(uploadDialogProject.coverUrl) && (
+                    <button
+                      onClick={() => deleteProjectCover(uploadDialogProject.id)}
+                      disabled={uploadDialogLoading}
+                      className="w-full py-2 text-sm rounded-xl bg-white/5 text-slate-300 hover:bg-white/10 hover:text-red-400 transition disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4 inline mr-1.5" />
+                      删除封面
+                    </button>
+                  )}
+                  <p className="text-xs text-slate-500 mt-1">
+                    仅支持单张图片 (jpg, png, webp, gif)
+                  </p>
+                </div>
+              </div>
             </div>
 
-            {uploadDialogTab === 'file' ? (
-              <div>
-                <label className="block border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-2xl p-8 text-center cursor-pointer transition bg-white/[0.02]">
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/*,video/*"
-                    className="hidden"
-                    onChange={handleFileUploadToProject}
-                    disabled={uploadDialogLoading}
-                  />
-                  <ImageIcon className="w-10 h-10 mx-auto mb-3 text-violet-300/60" />
-                  <p className="text-sm font-medium mb-1">点击选择文件</p>
-                  <p className="text-xs text-slate-500">支持图片 (jpg, png, webp, gif) 和视频 (mp4, webm)</p>
-                </label>
-                <p className="text-xs text-slate-500 mt-3">
-                  提示：视频会在服务端自动压缩；非图片/视频文件会被忽略
-                </p>
+            {/* 参考视频区 */}
+            <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10">
+              <h3 className="text-sm font-medium mb-3 text-slate-200 flex items-center gap-2">
+                <Video className="w-4 h-4 text-violet-400" />
+                参考视频
+              </h3>
+
+              {/* 上传方式切换 */}
+              <div className="flex gap-2 mb-3 bg-white/5 p-1 rounded-xl">
+                <button
+                  onClick={() => setUploadDialogTab('file')}
+                  className={`flex-1 py-1.5 text-xs rounded-lg transition ${uploadDialogTab === 'file' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Upload className="w-3.5 h-3.5 inline mr-1" />选择文件
+                </button>
+                <button
+                  onClick={() => setUploadDialogTab('url')}
+                  className={`flex-1 py-1.5 text-xs rounded-lg transition ${uploadDialogTab === 'url' ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Link2 className="w-3.5 h-3.5 inline mr-1" />网络 URL
+                </button>
               </div>
-            ) : (
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <input
-                    type="text"
-                    value={uploadDialogUrl}
-                    onChange={e => setUploadDialogUrl(e.target.value)}
-                    placeholder="https://example.com/image.jpg 或 https://example.com/video.mp4"
-                    className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm transition"
-                    onKeyDown={e => e.key === 'Enter' && handleUrlUploadToProject()}
-                    disabled={uploadDialogLoading}
-                  />
-                  <button
-                    onClick={handleUrlUploadToProject}
-                    disabled={!uploadDialogUrl.trim() || uploadDialogLoading}
-                    className="px-4 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
-                  >转存</button>
+
+              {uploadDialogTab === 'file' ? (
+                <div>
+                  <label className="block border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-xl p-5 text-center cursor-pointer transition bg-white/[0.02]">
+                    <input
+                      type="file"
+                      multiple
+                      accept="video/*"
+                      className="hidden"
+                      onChange={handleReferenceVideoUpload}
+                      disabled={uploadDialogLoading}
+                    />
+                    <Video className="w-8 h-8 mx-auto mb-2 text-violet-300/60" />
+                    <p className="text-sm font-medium mb-1">点击选择视频文件</p>
+                    <p className="text-xs text-slate-500">支持 mp4, webm 等视频格式</p>
+                  </label>
+                  <p className="text-xs text-slate-500 mt-2">
+                    提示：高码率视频需选择压缩方式
+                  </p>
                 </div>
-                <p className="text-xs text-slate-500">链接必须是公开可访问资源地址</p>
-              </div>
-            )}
+              ) : (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      type="text"
+                      value={uploadDialogUrl}
+                      onChange={e => setUploadDialogUrl(e.target.value)}
+                      placeholder="https://example.com/video.mp4"
+                      className="flex-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm transition"
+                      onKeyDown={e => e.key === 'Enter' && handleReferenceUrlUpload()}
+                      disabled={uploadDialogLoading}
+                    />
+                    <button
+                      onClick={handleReferenceUrlUpload}
+                      disabled={!uploadDialogUrl.trim() || uploadDialogLoading}
+                      className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
+                    >转存</button>
+                  </div>
+                  <p className="text-xs text-slate-500">链接必须是公开可访问的视频地址</p>
+                </div>
+              )}
+
+              {/* 已上传参考视频列表 */}
+              {referencesCache[uploadDialogProject.id] && referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').length > 0 && (
+                <div className="mt-4">
+                  <h4 className="text-xs font-medium mb-2 text-slate-400">已上传视频（{referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').length}）</h4>
+                  <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
+                    {referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').map(item => (
+                      <div key={item.id} className="relative aspect-video rounded-lg overflow-hidden border border-white/10 bg-black/30 group">
+                        <img src={signedMediaUrls[getVideoPoster(item.url)] || getVideoPoster(item.url) || item.url} alt={item.title} className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <Play className="w-5 h-5 text-white drop-shadow-lg" />
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteReference(uploadDialogProject.id, item.id); }}
+                          className="absolute top-1 right-1 w-5 h-5 rounded-full bg-red-500/80 hover:bg-red-500 flex items-center justify-center opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
+                          title="删除"
+                        >
+                          <X className="w-3 h-3 text-white" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {uploadDialogMessage && (
               <div className="mt-4 text-sm text-center text-violet-200 bg-violet-500/10 border border-violet-400/20 rounded-xl py-2.5">
                 {uploadDialogMessage}
-              </div>
-            )}
-
-            {/* 已有参考素材展示 */}
-            {referencesCache[uploadDialogProject.id] && referencesCache[uploadDialogProject.id]!.length > 0 && (
-              <div className="mt-5">
-                <h3 className="text-sm font-medium mb-3 text-slate-300">已上传的素材（{referencesCache[uploadDialogProject.id]!.length}）</h3>
-                <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
-                  {referencesCache[uploadDialogProject.id]!.map(item => (
-                    <div key={item.id} className="relative aspect-video rounded-xl overflow-hidden border border-white/10 bg-black/30 group">
-                      {item.type === 'image' ? (
-                        <img src={item.url} alt={item.title} className="w-full h-full object-cover" />
-                      ) : (
-                        <>
-                          <img src={getVideoPoster(item.url)} alt={item.title} className="w-full h-full object-cover" />
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <Play className="w-6 h-6 text-white drop-shadow-lg" />
-                          </div>
-                        </>
-                      )}
-                      <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-[10px] uppercase">
-                        {item.type}
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteReference(uploadDialogProject.id, item.id); }}
-                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-red-500/80 hover:bg-red-500 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="删除"
-                      >
-                        <X className="w-3 h-3 text-white" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
           </div>
@@ -1062,31 +1359,29 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       )}
 
       {/* 全屏预览弹窗 */}
-      {fullscreenItem && (
-        <div className="fixed inset-0 z-[80] bg-black/95 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setFullscreenItem(null)}>
-          <button
-            onClick={() => setFullscreenItem(null)}
-            className="absolute top-4 right-4 w-10 h-10 rounded-full border border-white/25 bg-white/5 hover:bg-white/15 flex items-center justify-center text-white z-10"
-          >
-            <X className="w-5 h-5" />
-          </button>
-          <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
-            {fullscreenItem.type === 'image' ? (
-              <img src={signedFullscreenUrl} alt={fullscreenTitle || fullscreenItem.title} className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl" />
-            ) : (
-              <video
-                ref={fullscreenVideoRef}
-                src={signedFullscreenUrl}
-                poster={signedFullscreenPoster}
-                controls
-                playsInline
-                className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"
-              />
-            )}
-            <p className="text-center text-sm text-slate-300 mt-4">{fullscreenTitle || fullscreenItem.title}</p>
-          </div>
-        </div>
-      )}
+      <MediaFullscreen
+        isOpen={fullscreenItem !== null}
+        onClose={() => {
+          setFullscreenItem(null);
+          setFullscreenProjectId(null);
+        }}
+        mediaType={fullscreenItem?.type || 'image'}
+        mediaUrl={fullscreenItem?.url || ''}
+        filename={fullscreenTitle || fullscreenItem?.title}
+        mediaList={fullscreenProjectId ? (buildMediaList(projects.find(p => p.id === fullscreenProjectId) || { id: fullscreenProjectId } as Project).map((ref: ReferenceItem): ShotMedia => ({
+          id: ref.id,
+          shotId: 0,
+          url: ref.url,
+          type: ref.type,
+          filename: ref.title,
+          size: 0,
+          createdAt: '',
+          updatedAt: '',
+        }))) : undefined}
+        currentIndex={fullscreenProjectId ? carouselIndex[fullscreenProjectId] || 0 : undefined}
+        onIndexChange={fullscreenProjectId ? (index: number) => setCarouselIndex(prev => ({ ...prev, [fullscreenProjectId]: index })) : undefined}
+        videoRefCallback={(ref) => { fullscreenVideoRef.current = ref; }}
+      />
 
       {/* 微信分享提示 */}
       <ShareHint

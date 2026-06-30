@@ -2998,18 +2998,32 @@ app.get('/api/video2/oss-sign-url', async (req, res) => {
 
     let ossKey = key;
     let urlBucket = null;
+    let queryParams = null;
 
-    // 从 URL 中提取 key
+    // 从 URL 中提取 key 和 query 参数
     if (!ossKey && url) {
       const urlStr = String(url);
       const match = urlStr.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
       if (match) {
         urlBucket = match[1];
         ossKey = decodeURIComponent(match[2]);
+        if (match[3]) {
+          try {
+            const u = new URL(urlStr);
+            queryParams = {};
+            u.searchParams.forEach((value, key) => {
+              queryParams[key] = value;
+            });
+          } catch (e) {}
+        }
       } else {
         try {
           const urlObj = new URL(urlStr);
           ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
+          queryParams = {};
+          urlObj.searchParams.forEach((value, key) => {
+            queryParams[key] = value;
+          });
         } catch (e) {
           if (urlStr.startsWith('/')) ossKey = decodeURIComponent(urlStr.slice(1));
         }
@@ -3040,7 +3054,21 @@ app.get('/api/video2/oss-sign-url', async (req, res) => {
     }
 
     // 生成签名 URL（1小时有效期）
-    const signedUrl = targetClient.signatureUrl(ossKey, { expires: 3600 });
+    // x-oss-process 需要通过 process 选项传递，而非 query
+    const signOptions = { expires: 3600 };
+    if (queryParams && Object.keys(queryParams).length > 0) {
+      if (queryParams['x-oss-process']) {
+        signOptions.process = queryParams['x-oss-process'];
+        const otherParams = { ...queryParams };
+        delete otherParams['x-oss-process'];
+        if (Object.keys(otherParams).length > 0) {
+          signOptions.query = otherParams;
+        }
+      } else {
+        signOptions.query = queryParams;
+      }
+    }
+    const signedUrl = targetClient.signatureUrl(ossKey, signOptions);
     res.json({ signedUrl, key: ossKey, bucket: finalBucket });
   } catch (error) {
     console.error('[oss-sign-url] 生成签名失败:', error.message);
@@ -3066,15 +3094,29 @@ app.get('/api/video2/oss-sign-urls', async (req, res) => {
       const str = String(urlStr);
       let ossKey = '';
       let urlBucket = null;
+      let queryParams = null;
 
       const match = str.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
       if (match) {
         urlBucket = match[1];
         ossKey = decodeURIComponent(match[2]);
+        if (match[3]) {
+          try {
+            const u = new URL(str);
+            queryParams = {};
+            u.searchParams.forEach((value, key) => {
+              queryParams[key] = value;
+            });
+          } catch (e) {}
+        }
       } else {
         try {
           const urlObj = new URL(str);
           ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
+          queryParams = {};
+          urlObj.searchParams.forEach((value, key) => {
+            queryParams[key] = value;
+          });
         } catch (e) {
           if (str.startsWith('/')) ossKey = decodeURIComponent(str.slice(1));
         }
@@ -3097,7 +3139,20 @@ app.get('/api/video2/oss-sign-urls', async (req, res) => {
           }
         }
         try {
-          results[str] = targetClient.signatureUrl(ossKey, { expires: 3600 });
+          const signOptions = { expires: 3600 };
+          if (queryParams && Object.keys(queryParams).length > 0) {
+            if (queryParams['x-oss-process']) {
+              signOptions.process = queryParams['x-oss-process'];
+              const otherParams = { ...queryParams };
+              delete otherParams['x-oss-process'];
+              if (Object.keys(otherParams).length > 0) {
+                signOptions.query = otherParams;
+              }
+            } else {
+              signOptions.query = queryParams;
+            }
+          }
+          results[str] = targetClient.signatureUrl(ossKey, signOptions);
         } catch (e) {
           results[str] = str;
         }
@@ -3437,6 +3492,43 @@ app.get('/api/video2/projects/:id/references', async (req, res) => {
     res.json({ success: true, data: items });
   } catch (error) {
     console.error('[video2] 获取参考文件失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// 批量获取多个项目的参考文件（一次请求获取所有项目的参考）
+app.get('/api/video2/projects/references/batch', async (req, res) => {
+  try {
+    const { ids } = req.query;
+    if (!ids) {
+      return res.json({ success: true, data: {} });
+    }
+    const projectIds = Array.isArray(ids) ? ids.map(Number).filter(Boolean) : [Number(ids)].filter(Boolean);
+    if (projectIds.length === 0) {
+      return res.json({ success: true, data: {} });
+    }
+    
+    // 使用 IN 子句一次性查询所有项目的参考文件
+    const placeholders = projectIds.map(() => '?').join(',');
+    const rows = await db.video2Async.all(
+      `SELECT * FROM videos WHERE projectId IN (${placeholders}) AND deleted = 0 AND reference = 1 ORDER BY projectId, sortOrder ASC, id ASC`,
+      projectIds
+    );
+    
+    // 按项目ID分组
+    const result = {};
+    for (const id of projectIds) {
+      result[id] = [];
+    }
+    for (const row of rows) {
+      if (result[row.projectId]) {
+        result[row.projectId].push(row);
+      }
+    }
+    
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[video2] 批量获取参考文件失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 });

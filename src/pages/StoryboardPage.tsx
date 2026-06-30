@@ -758,22 +758,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }
   };
 
-  // ============ 渲染 ============
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white flex flex-col items-center justify-center">
-        <div className="relative">
-          <div className="w-16 h-16 rounded-full border-4 border-violet-500/20 border-t-violet-500 animate-spin" />
-          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 blur-xl -z-10" />
-        </div>
-        <div className="mt-6 text-slate-300 text-sm">加载中...</div>
-        {project && (
-          <div className="mt-2 text-slate-500 text-xs">{project.name}</div>
-        )}
-      </div>
-    );
-  }
-
   // ============ 分镜渲染 ============
   const renderShotCard = (shot: Shot, index: number, total: number) => {
     const isSelected = selectedIds.has(shot.id);
@@ -929,11 +913,25 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // 上传按钮是否可用
   const uploadAvailable = currentTab === 'pending';
 
+  // ============ 渲染 ============
   return (
     <div
       className="min-h-screen bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white pb-28"
     >
-      {/* 顶部栏 */}
+      {loading ? (
+        <div className="min-h-screen flex flex-col items-center justify-center">
+          <div className="relative">
+            <div className="w-16 h-16 rounded-full border-4 border-violet-500/20 border-t-violet-500 animate-spin" />
+            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 blur-xl -z-10" />
+          </div>
+          <div className="mt-6 text-slate-300 text-sm">加载中...</div>
+          {project && (
+            <div className="mt-2 text-slate-500 text-xs">{project.name}</div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* 顶部栏 */}
       <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/80 border-b border-white/10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center gap-3">
           <button
@@ -1200,6 +1198,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             </div>
           </div>
         )}
+      </div>
 
       {/* 主体内容 */}
       <div
@@ -1670,7 +1669,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           {toast.message}
         </div>
       )}
-    </div>
+        </>
+      )}
     </div>
   );
 }
