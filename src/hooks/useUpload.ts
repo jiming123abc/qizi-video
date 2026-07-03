@@ -15,6 +15,7 @@ export interface UploadingFile {
   progress: number;
   status: 'uploading' | 'done' | 'error' | 'cancelled' | 'pending';
   message?: string;
+  retryCount: number;
 }
 
 export interface UseUploadOptions {
@@ -41,6 +42,9 @@ export function useUpload(options: UseUploadOptions) {
   const pendingValidFilesRef = useRef<File[]>([]);
   const uploadCancelledRef = useRef(false);
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
+  const concurrentCountRef = useRef(0);
+  const maxConcurrent = 5;
+  const maxRetries = 2;
 
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
@@ -58,6 +62,80 @@ export function useUpload(options: UseUploadOptions) {
     onUploadComplete?.();
   }, [loadShots, loadStats, loadProject, onUploadComplete]);
 
+  const uploadSingleFile = useCallback(async (file: File, index: number, retry: number = 0) => {
+    if (uploadCancelledRef.current) {
+      setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
+      return;
+    }
+
+    const detected = detectFileType(file);
+
+    try {
+      if (detected.type === 'video') {
+        setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: 5, message: '检测视频信息...' } : uf));
+        const decision = await checkVideoBitrate(file);
+        if (decision.decision === 'must_compress') {
+          setUploadingFiles(prev => prev.map((uf, idx) => {
+            if (idx === index) {
+              return { ...uf, status: 'error', progress: 0, message: '需选择压缩方式' };
+            } else if (uf.status === 'pending') {
+              return { ...uf, status: 'pending', progress: 0, message: '等待中' };
+            }
+            return uf;
+          }));
+          setPendingCompressionVideo(file);
+          setPendingCompressionDecision(decision);
+          setPendingUploadIndex(index);
+          return;
+        }
+      }
+
+      setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'uploading', progress: 5 } : uf));
+
+      if (detected.type === 'image') {
+        await uploadVideo2Image(file, {
+          projectId,
+          sceneId: currentSceneId !== null ? currentSceneId : undefined,
+          title: file.name,
+          createShot: true,
+          signal: uploadAbortControllerRef.current?.signal
+        });
+        setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
+      } else {
+        await uploadVideo2Video(file, {
+          projectId,
+          sceneId: currentSceneId !== null ? currentSceneId : undefined,
+          title: file.name,
+          createShot: true,
+          compressionMethod: 'none',
+          skipBitrateCheck: true,
+          signal: uploadAbortControllerRef.current?.signal,
+          onProgress: p => {
+            setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: p.progress, message: p.message } : uf));
+          }
+        });
+        setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
+      }
+    } catch (e) {
+      if (uploadCancelledRef.current) {
+        setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
+        return;
+      }
+      console.error('上传失败:', file.name, e);
+      
+      if (retry < maxRetries) {
+        const nextRetry = retry + 1;
+        setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, retryCount: nextRetry, progress: 0, status: 'pending', message: `准备重试 ${nextRetry}/${maxRetries}` } : uf));
+        setTimeout(() => {
+          uploadSingleFile(file, index, nextRetry);
+        }, 1000 * nextRetry);
+        return;
+      }
+      
+      setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'error', message: (e as Error).message } : uf));
+    }
+  }, [projectId, currentSceneId]);
+
   const handleUploadFiles = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (list.length === 0) return;
@@ -73,85 +151,79 @@ export function useUpload(options: UseUploadOptions) {
 
     const initial: UploadingFile[] = valid.map(f => ({
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`,
-      name: f.name, size: f.size, progress: 5, status: 'uploading'
+      name: f.name, size: f.size, progress: 0, status: 'pending',
+      retryCount: 0
     }));
     setUploadingFiles(initial);
     pendingValidFilesRef.current = valid;
     uploadCancelledRef.current = false;
     uploadAbortControllerRef.current = new AbortController();
+    concurrentCountRef.current = 0;
 
-    let stopped = false;
-    for (let i = 0; i < valid.length; i++) {
-      if (uploadCancelledRef.current) {
-        setUploadingFiles(prev => prev.map((uf, idx) => idx >= i ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
-        break;
-      }
+    const runUploadQueue = () => {
+      if (uploadCancelledRef.current) return;
 
-      const file = valid[i];
-      const detected = detectFileType(file);
-
-      if (detected.type === 'video') {
-        setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 5, message: '检测视频信息...' } : uf));
-        const decision = await checkVideoBitrate(file);
-        if (decision.decision === 'must_compress') {
-          setUploadingFiles(prev => prev.map((uf, idx) => {
-            if (idx === i) {
-              return { ...uf, status: 'error', progress: 0, message: '需选择压缩方式' };
-            } else if (idx > i) {
-              return { ...uf, status: 'pending', progress: 0, message: '等待中' };
-            }
-            return uf;
-          }));
-          setPendingCompressionVideo(file);
-          setPendingCompressionDecision(decision);
-          setPendingUploadIndex(i);
-          stopped = true;
-          break;
-        }
-      }
-
-      try {
-        if (detected.type === 'image') {
-          await uploadVideo2Image(file, {
-            projectId,
-            sceneId: currentSceneId !== null ? currentSceneId : undefined,
-            title: file.name,
-            createShot: true,
-            signal: uploadAbortControllerRef.current?.signal
+      setUploadingFiles(current => {
+        const pendingFiles = valid.map((f, i) => ({ file: f, index: i }))
+          .filter((_, i) => {
+            const uf = current[i];
+            return uf && uf.status === 'pending';
           });
-          setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
-        } else {
-          await uploadVideo2Video(file, {
-            projectId,
-            sceneId: currentSceneId !== null ? currentSceneId : undefined,
-            title: file.name,
-            createShot: true,
-            compressionMethod: 'none',
-            skipBitrateCheck: true,
-            signal: uploadAbortControllerRef.current?.signal,
-            onProgress: p => {
-              setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: p.progress, message: p.message } : uf));
-            }
+
+        const canStart = maxConcurrent - concurrentCountRef.current;
+        if (canStart <= 0 || pendingFiles.length === 0) return current;
+
+        const toStart = pendingFiles.slice(0, canStart);
+        toStart.forEach(({ file, index }) => {
+          concurrentCountRef.current++;
+          uploadSingleFile(file, index, 0).then(() => {
+            concurrentCountRef.current--;
+            runUploadQueue();
           });
-          setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
-        }
-      } catch (e) {
-        if (uploadCancelledRef.current) {
-          setUploadingFiles(prev => prev.map((uf, idx) => idx >= i ? { ...uf, status: 'cancelled', progress: 0, message: '已取消' } : uf));
-          break;
-        }
-        console.error('上传失败:', file.name, e);
-        setUploadingFiles(prev => prev.map((uf, idx) => idx === i ? { ...uf, status: 'error', message: (e as Error).message } : uf));
-      }
+        });
+
+        return current.map((uf, idx) => {
+          if (toStart.some(p => p.index === idx)) {
+            return { ...uf, status: 'uploading' as const, progress: 5 };
+          }
+          return uf;
+        });
+      });
+    };
+
+    setUploadingFiles(prev => prev.map((uf, idx) => idx < maxConcurrent ? { ...uf, status: 'uploading', progress: 5 } : uf));
+    
+    for (let i = 0; i < Math.min(maxConcurrent, valid.length); i++) {
+      concurrentCountRef.current++;
+      uploadSingleFile(valid[i], i, 0).then(() => {
+        concurrentCountRef.current--;
+        runUploadQueue();
+      });
     }
 
-    if (!stopped && !uploadCancelledRef.current) {
-      await refreshAfterUpload();
-      showToast(`上传完成（${valid.length} 项）`);
-    }
+    const checkComplete = setInterval(() => {
+      setUploadingFiles(current => {
+        const isAllDone = current.every(f => f.status === 'done' || f.status === 'error' || f.status === 'cancelled');
+        const isCompressionPending = pendingCompressionVideo !== null;
+        if (isAllDone && !isCompressionPending && concurrentCountRef.current === 0) {
+          clearInterval(checkComplete);
+          setTimeout(() => {
+            refreshAfterUpload();
+            const successCount = current.filter(f => f.status === 'done').length;
+            const errorCount = current.filter(f => f.status === 'error').length;
+            if (errorCount === 0) {
+              showToast(`上传完成（${successCount} 项）`);
+            } else {
+              showToast(`上传完成（成功 ${successCount} 项，失败 ${errorCount} 项）`);
+            }
+          }, 0);
+        }
+        return current;
+      });
+    }, 500);
 
     uploadAbortControllerRef.current = null;
-  }, [projectId, currentSceneId, showToast, refreshAfterUpload]);
+  }, [projectId, currentSceneId, showToast, refreshAfterUpload, uploadSingleFile, pendingCompressionVideo]);
 
   const cancelUpload = useCallback(() => {
     uploadCancelledRef.current = true;
@@ -211,7 +283,8 @@ export function useUpload(options: UseUploadOptions) {
       name: url.substring(0, 50) + '...',
       size: 0,
       progress: 20,
-      status: 'uploading'
+      status: 'uploading',
+      retryCount: 0
     };
     setUploadingFiles(prev => [...prev, newItem]);
     try {
@@ -232,6 +305,34 @@ export function useUpload(options: UseUploadOptions) {
     setUploadingFiles([]);
   }, []);
 
+  const retryFailedFiles = useCallback(() => {
+    setUploadingFiles(current => {
+      const failedIndices = current
+        .map((uf, idx) => ({ uf, idx }))
+        .filter(({ uf }) => uf.status === 'error')
+        .map(({ idx }) => idx);
+
+      if (failedIndices.length === 0) return current;
+
+      failedIndices.forEach(index => {
+        const file = pendingValidFilesRef.current[index];
+        if (file) {
+          concurrentCountRef.current++;
+          uploadSingleFile(file, index, 0).then(() => {
+            concurrentCountRef.current--;
+          });
+        }
+      });
+
+      return current.map((uf, idx) => {
+        if (failedIndices.includes(idx)) {
+          return { ...uf, status: 'uploading' as const, progress: 5, retryCount: 0, message: '重试中...' };
+        }
+        return uf;
+      });
+    });
+  }, [uploadSingleFile]);
+
   return {
     uploadingFiles,
     setUploadingFiles,
@@ -249,5 +350,6 @@ export function useUpload(options: UseUploadOptions) {
     handleCompressionDecision,
     aliyunConfigured,
     clearUploadingFiles,
+    retryFailedFiles,
   };
 }

@@ -5,6 +5,8 @@ server/node_modules/
 # Build outputs
 dist/
 server/dist/
+dist.tar.gz
+*.tar.gz
 
 # Environment variables
 .env

@@ -1,6 +1,11 @@
 export function timeAgo(dateStr: string): string {
   if (!dateStr) return '';
-  const date = new Date(dateStr);
+  let date: Date;
+  if (dateStr.includes('T') || dateStr.endsWith('Z')) {
+    date = new Date(dateStr);
+  } else {
+    date = new Date(dateStr + 'Z');
+  }
   const diff = (Date.now() - date.getTime()) / 1000;
   if (diff < 60) return '刚刚';
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;

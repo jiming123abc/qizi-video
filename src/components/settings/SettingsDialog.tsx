@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback, DragEvent, useRef } from 'react';
-import { X, Eye, EyeOff, Plus, GripVertical, Trash2, ChevronDown, Loader2, Download, Upload, AlertTriangle, LogIn, LogOut, Lock } from 'lucide-react';
-import type { ModelConfig, Settings } from '../../lib/types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { X, Eye, EyeOff, ChevronDown, Loader2, Download, Upload, AlertTriangle, LogIn, LogOut, Lock, Plus, Edit, Info } from 'lucide-react';
+import type { Settings, AiPlatform } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
-import { getAdminToken, setAdminToken, clearAdminToken, checkAuth, loginWithToken } from '../../lib/auth';
+import { clearAdminToken, checkAuth, loginWithToken } from '../../lib/auth';
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -10,44 +10,12 @@ interface SettingsDialogProps {
   projectId?: number;
 }
 
-// 可用的模型列表
-const LLM_MODELS = [
-  { model: 'DeepSeek V3', provider: 'geekai' as const, cost: 'low' as const },
-  { model: 'DeepSeek V3', provider: 'siliconflow' as const, cost: 'low' as const },
-  { model: 'GPT-4o-mini', provider: 'geekai' as const, cost: 'low' as const },
-  { model: 'GLM-4-Flash', provider: 'geekai' as const, cost: 'free' as const },
-];
-
-const IMAGE_MODELS = [
-  { model: 'GPT-Image-2', quality: 'medium', provider: 'geekai' as const, cost: 'mid_high' as const },
-  { model: 'GPT-Image-2', quality: 'medium', provider: 'siliconflow' as const, cost: 'mid_high' as const },
-  { model: 'Z-Image-Turbo', quality: 'standard' as const, provider: 'geekai' as const, cost: 'low' as const },
-  { model: 'Z-Image-Turbo', quality: 'standard' as const, provider: 'siliconflow' as const, cost: 'low' as const },
-  { model: 'Nano Banana 2', quality: 'standard' as const, provider: 'geekai' as const, cost: 'mid' as const },
-  { model: 'Nano Banana 2', quality: 'standard' as const, provider: 'siliconflow' as const, cost: 'mid' as const },
-  { model: 'CogView-4', quality: 'standard' as const, provider: 'geekai' as const, cost: 'mid' as const },
-  { model: 'CogView-4', quality: 'standard' as const, provider: 'siliconflow' as const, cost: 'mid' as const },
-];
-
 const IMAGE_SIZES = [
   '1024×576 (16:9)',
   '576×1024 (9:16)',
-  '1024×1024 (1:1)',
   '768×768 (1:1)',
+  '1536×1024 (3:2)',
 ];
-
-const COST_LABELS: Record<ModelConfig['cost'], string> = {
-  free: '免费',
-  low: '低',
-  mid: '中',
-  mid_high: '中高',
-  high: '高',
-};
-
-function maskApiKey(key: string): string {
-  if (key.length <= 12) return '••••••••';
-  return key.slice(0, 8) + '••••••••••••••••••' + key.slice(-6);
-}
 
 export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsDialogProps) {
   const [loading, setLoading] = useState(false);
@@ -65,36 +33,17 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
   const [loginLoading, setLoginLoading] = useState(false);
   const [showToken, setShowToken] = useState(false);
 
-  // API Key 显示/隐藏状态
-  const [showGeekaiKey, setShowGeekaiKey] = useState(false);
-  const [showSiliconflowKey, setShowSiliconflowKey] = useState(false);
-
-  // 拖拽状态
-  const [draggedLLMIndex, setDraggedLLMIndex] = useState<number | null>(null);
-  const [draggedImageIndex, setDraggedImageIndex] = useState<number | null>(null);
-
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
 
   // 设置表单状态
   const [settings, setSettings] = useState<Settings>({
-    llm_provider: 'geekai',
-    llm_model: 'DeepSeek V3',
-    llm_fallback_chain: [],
-    image_provider: 'geekai',
-    image_model: 'GPT-Image-2',
-    image_quality: 'medium',
-    image_fallback_chain: [],
-    geekai_api_key: '',
-    siliconflow_api_key: '',
     default_image_size: '1024×576 (16:9)',
-    export_include_images: true,
-    export_format: 'docx',
     video_target_bitrate_1080p: 3000,
     video_target_bitrate_720p: 2000,
     video_target_bitrate_480p: 1000,
-    model_prices: {},
-  });
+    image_compress_threshold_kb: 300,
+  } as Settings);
 
   // 加载设置
   const loadSettings = useCallback(async () => {
@@ -107,7 +56,9 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
       ]);
       if (settingsRes.ok) {
         const data = await settingsRes.json();
-        setSettings(prev => ({ ...prev, ...data }));
+        if (data.success && data.data) {
+          setSettings(prev => ({ ...prev, ...data.data }));
+        }
       }
       setAuthEnabled(authRes.enabled);
       setAuthenticated(authRes.authenticated);
@@ -132,11 +83,11 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     try {
       // 保存每个设置项
       const keys = [
-        'llm_provider', 'llm_model', 'llm_fallback_chain',
-        'image_provider', 'image_model', 'image_quality', 'image_fallback_chain',
-        'geekai_api_key', 'siliconflow_api_key',
-        'default_image_size', 'export_include_images', 'export_format',
+        'default_image_size',
         'video_target_bitrate_1080p', 'video_target_bitrate_720p', 'video_target_bitrate_480p',
+        'image_compress_threshold_kb',
+        'llm_fallback_chain', 'image_fallback_chain',
+        'ai_platforms',
       ] as const;
 
       for (const key of keys) {
@@ -154,6 +105,96 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     } finally {
       setSaving(false);
     }
+  };
+
+  // 模型列表操作
+  const addModel = (type: 'llm' | 'image') => {
+    const defaultProvider = settings.ai_platforms?.[0]?.id || 'geekai';
+    const key = type === 'llm' ? 'llm_fallback_chain' : 'image_fallback_chain';
+    const newModel = type === 'llm'
+      ? { model: '', provider: defaultProvider, cost: 'low' as const, supportsVision: false }
+      : { model: '', provider: defaultProvider, quality: 'standard', cost: 'mid' as const, supportsImageRef: false };
+
+    setSettings(prev => ({
+      ...prev,
+      [key]: [...(prev[key] || []), newModel]
+    }));
+  };
+
+  const updateModel = (type: 'llm' | 'image', index: number, field: string, value: any) => {
+    const key = type === 'llm' ? 'llm_fallback_chain' : 'image_fallback_chain';
+    setSettings(prev => {
+      const list = [...(prev[key] || [])];
+      list[index] = { ...list[index], [field]: value };
+      return { ...prev, [key]: list };
+    });
+  };
+
+  const removeModel = (type: 'llm' | 'image', index: number) => {
+    const key = type === 'llm' ? 'llm_fallback_chain' : 'image_fallback_chain';
+    setSettings(prev => {
+      const list = [...(prev[key] || [])];
+      list.splice(index, 1);
+      return { ...prev, [key]: list };
+    });
+  };
+
+  // ===== AI 平台管理 =====
+  const [editingPlatformId, setEditingPlatformId] = useState<string | null>(null);
+  const [showPlatformForm, setShowPlatformForm] = useState(false);
+  const [platformForm, setPlatformForm] = useState<AiPlatform>({
+    id: '', name: '', baseUrl: '', apiKey: '', docsUrl: '', builtIn: false
+  });
+
+  const addPlatform = () => {
+    setPlatformForm({
+      id: 'custom_' + Date.now(),
+      name: '',
+      baseUrl: '',
+      apiKey: '',
+      docsUrl: '',
+      builtIn: false
+    });
+    setEditingPlatformId(null);
+    setShowPlatformForm(true);
+  };
+
+  const editPlatform = (platform: AiPlatform) => {
+    // 编辑时，若 apiKey 已脱敏则清空让用户重新输入；否则保留明文
+    setPlatformForm({
+      ...platform,
+      apiKey: platform.apiKey && platform.apiKey.includes('****') ? '' : platform.apiKey
+    });
+    setEditingPlatformId(platform.id);
+    setShowPlatformForm(true);
+  };
+
+  const savePlatform = () => {
+    if (!platformForm.name.trim() || !platformForm.baseUrl.trim()) return;
+
+    setSettings(prev => {
+      const platforms = [...(prev.ai_platforms || [])];
+      const idx = platforms.findIndex(p => p.id === platformForm.id);
+      if (idx >= 0) {
+        // 编辑：如果用户没输入新 apiKey（为空），保留原脱敏值（后端会还原真实值）
+        platforms[idx] = {
+          ...platformForm,
+          apiKey: platformForm.apiKey || platforms[idx].apiKey
+        };
+      } else {
+        platforms.push(platformForm);
+      }
+      return { ...prev, ai_platforms: platforms };
+    });
+    setShowPlatformForm(false);
+    setEditingPlatformId(null);
+  };
+
+  const removePlatform = (id: string) => {
+    setSettings(prev => ({
+      ...prev,
+      ai_platforms: (prev.ai_platforms || []).filter(p => p.id !== id)
+    }));
   };
 
   const handleBackup = async () => {
@@ -252,89 +293,6 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     setAuthenticated(false);
   };
 
-  // LLM 降级链操作
-  const addLLMModel = (model: typeof LLM_MODELS[number]) => {
-    const config: ModelConfig = {
-      model: model.model,
-      provider: model.provider,
-      cost: model.cost,
-    };
-    setSettings(prev => ({
-      ...prev,
-      llm_fallback_chain: [...prev.llm_fallback_chain, config],
-    }));
-  };
-
-  const removeLLMModel = (index: number) => {
-    setSettings(prev => ({
-      ...prev,
-      llm_fallback_chain: prev.llm_fallback_chain.filter((_, i) => i !== index),
-    }));
-  };
-
-  const handleLLMDragStart = (index: number) => {
-    setDraggedLLMIndex(index);
-  };
-
-  const handleLLMDragOver = (e: DragEvent<HTMLDivElement>, index: number) => {
-    e.preventDefault();
-    if (draggedLLMIndex === null || draggedLLMIndex === index) return;
-
-    setSettings(prev => {
-      const newChain = [...prev.llm_fallback_chain];
-      const [removed] = newChain.splice(draggedLLMIndex, 1);
-      newChain.splice(index, 0, removed);
-      return { ...prev, llm_fallback_chain: newChain };
-    });
-    setDraggedLLMIndex(index);
-  };
-
-  const handleLLMDragEnd = () => {
-    setDraggedLLMIndex(null);
-  };
-
-  // Image 降级链操作
-  const addImageModel = (model: typeof IMAGE_MODELS[number]) => {
-    const config: ModelConfig = {
-      model: model.model,
-      quality: model.quality,
-      provider: model.provider,
-      cost: model.cost,
-    };
-    setSettings(prev => ({
-      ...prev,
-      image_fallback_chain: [...prev.image_fallback_chain, config],
-    }));
-  };
-
-  const removeImageModel = (index: number) => {
-    setSettings(prev => ({
-      ...prev,
-      image_fallback_chain: prev.image_fallback_chain.filter((_, i) => i !== index),
-    }));
-  };
-
-  const handleImageDragStart = (index: number) => {
-    setDraggedImageIndex(index);
-  };
-
-  const handleImageDragOver = (e: DragEvent<HTMLDivElement>, index: number) => {
-    e.preventDefault();
-    if (draggedImageIndex === null || draggedImageIndex === index) return;
-
-    setSettings(prev => {
-      const newChain = [...prev.image_fallback_chain];
-      const [removed] = newChain.splice(draggedImageIndex, 1);
-      newChain.splice(index, 0, removed);
-      return { ...prev, image_fallback_chain: newChain };
-    });
-    setDraggedImageIndex(index);
-  };
-
-  const handleImageDragEnd = () => {
-    setDraggedImageIndex(null);
-  };
-
   if (!isOpen) return null;
 
   return (
@@ -360,236 +318,6 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
             </div>
           ) : (
             <>
-              {/* AI 模型配置 */}
-              <section>
-                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
-                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
-                  AI 模型配置
-                </h3>
-
-                {/* 大语言模型平台 */}
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">大语言模型平台：</label>
-                  <div className="relative">
-                    <select
-                      value={settings.llm_provider}
-                      onChange={(e) => setSettings(prev => ({ ...prev, llm_provider: e.target.value }))}
-                      className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 appearance-none cursor-pointer"
-                    >
-                      <option value="geekai">GeekAI</option>
-                      <option value="siliconflow">硅基流动</option>
-                    </select>
-                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  </div>
-                </div>
-
-                {/* API Key */}
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">API Key：</label>
-                  <div className="relative">
-                    <input
-                      type={showGeekaiKey ? 'text' : 'password'}
-                      value={settings.geekai_api_key}
-                      onChange={(e) => setSettings(prev => ({ ...prev, geekai_api_key: e.target.value }))}
-                      placeholder="sk-DbD0R7hJ••••••••••••••••••BGD29F"
-                      className="w-full px-4 py-2.5 pr-10 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 placeholder-slate-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowGeekaiKey(!showGeekaiKey)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition"
-                    >
-                      {showGeekaiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">API Key（硅基流动）：</label>
-                  <div className="relative">
-                    <input
-                      type={showSiliconflowKey ? 'text' : 'password'}
-                      value={settings.siliconflow_api_key}
-                      onChange={(e) => setSettings(prev => ({ ...prev, siliconflow_api_key: e.target.value }))}
-                      placeholder="sk-••••••••••••••••••••••••"
-                      className="w-full px-4 py-2.5 pr-10 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 placeholder-slate-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowSiliconflowKey(!showSiliconflowKey)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition"
-                    >
-                      {showSiliconflowKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* 首选文本模型 */}
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">首选文本模型：</label>
-                  <div className="flex items-center gap-3">
-                    <div className="relative flex-1">
-                      <select
-                        value={settings.llm_model}
-                        onChange={(e) => setSettings(prev => ({ ...prev, llm_model: e.target.value }))}
-                        className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 appearance-none cursor-pointer"
-                      >
-                        {LLM_MODELS.filter(m => m.provider === settings.llm_provider).map(m => (
-                          <option key={`${m.model}-${m.provider}`} value={m.model}>{m.model}</option>
-                        ))}
-                      </select>
-                      <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                    </div>
-                    <span className="text-sm text-slate-400 shrink-0">
-                      费用: ¥{COST_LABELS[LLM_MODELS.find(m => m.model === settings.llm_model && m.provider === settings.llm_provider)?.cost || 'low']}
-                    </span>
-                  </div>
-                </div>
-
-                {/* LLM 降级链 */}
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">降级链（首选失败时按顺序尝试）：</label>
-                  <div className="border border-white/10 rounded-xl p-3 bg-white/[0.02] min-h-[120px]">
-                    {settings.llm_fallback_chain.length === 0 ? (
-                      <p className="text-sm text-slate-500 text-center py-4">暂无可用降级模型</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {settings.llm_fallback_chain.map((model, index) => (
-                          <div
-                            key={`${model.model}-${model.provider}-${index}`}
-                            draggable
-                            onDragStart={() => handleLLMDragStart(index)}
-                            onDragOver={(e) => handleLLMDragOver(e, index)}
-                            onDragEnd={handleLLMDragEnd}
-                            className={`flex items-center gap-2 p-2 rounded-lg bg-white/[0.03] border border-white/5 ${
-                              draggedLLMIndex === index ? 'opacity-50' : ''
-                            }`}
-                          >
-                            <GripVertical className="w-4 h-4 text-slate-500 cursor-grab" />
-                            <span className="text-sm text-slate-300 w-5">{index + 1}.</span>
-                            <span className="text-sm text-white flex-1">{model.model}</span>
-                            <span className="text-xs text-slate-400">({model.provider === 'geekai' ? 'GeekAI' : '硅基流动'})</span>
-                            <span className="text-xs text-slate-400">¥{COST_LABELS[model.cost]}</span>
-                            <button
-                              onClick={() => removeLLMModel(index)}
-                              className="w-6 h-6 rounded hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-400 transition"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  {/* 添加按钮 */}
-                  <div className="mt-2 relative inline-block">
-                    <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-violet-400 hover:bg-violet-400/10 transition">
-                      <Plus className="w-4 h-4" />
-                      添加降级模型
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <div className="h-px bg-white/10" />
-
-              {/* 首选生图模型 */}
-              <section>
-                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
-                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
-                  图像生成配置
-                </h3>
-
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">生图平台：</label>
-                  <div className="relative">
-                    <select
-                      value={settings.image_provider}
-                      onChange={(e) => setSettings(prev => ({ ...prev, image_provider: e.target.value }))}
-                      className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 appearance-none cursor-pointer"
-                    >
-                      <option value="geekai">GeekAI</option>
-                      <option value="siliconflow">硅基流动</option>
-                    </select>
-                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  </div>
-                </div>
-
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">首选生图模型：</label>
-                  <div className="flex items-center gap-3">
-                    <div className="relative flex-1">
-                      <select
-                        value={`${settings.image_model}-${settings.image_quality}`}
-                        onChange={(e) => {
-                          const [model, quality] = e.target.value.split('-');
-                          setSettings(prev => ({ ...prev, image_model: model, image_quality: quality || 'medium' }));
-                        }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 appearance-none cursor-pointer"
-                      >
-                        {IMAGE_MODELS.filter(m => m.provider === settings.image_provider).map(m => (
-                          <option key={`${m.model}-${m.quality}`} value={`${m.model}-${m.quality || 'medium'}`}>
-                            {m.model}{m.quality ? ` (${m.quality})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                    </div>
-                    <span className="text-sm text-slate-400 shrink-0">
-                      费用: ¥{COST_LABELS[IMAGE_MODELS.find(m => m.model === settings.image_model && m.provider === settings.image_provider)?.cost || 'mid']}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Image 降级链 */}
-                <div className="mb-4">
-                  <label className="block text-sm text-slate-300 mb-2">降级链（首选失败时按顺序尝试）：</label>
-                  <div className="border border-white/10 rounded-xl p-3 bg-white/[0.02] min-h-[100px]">
-                    {settings.image_fallback_chain.length === 0 ? (
-                      <p className="text-sm text-slate-500 text-center py-4">暂无可用降级模型</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {settings.image_fallback_chain.map((model, index) => (
-                          <div
-                            key={`${model.model}-${model.provider || 'geekai'}-${model.quality || ''}-${index}`}
-                            draggable
-                            onDragStart={() => handleImageDragStart(index)}
-                            onDragOver={(e) => handleImageDragOver(e, index)}
-                            onDragEnd={handleImageDragEnd}
-                            className={`flex items-center gap-2 p-2 rounded-lg bg-white/[0.03] border border-white/5 ${
-                              draggedImageIndex === index ? 'opacity-50' : ''
-                            }`}
-                          >
-                            <GripVertical className="w-4 h-4 text-slate-500 cursor-grab" />
-                            <span className="text-sm text-slate-300 w-5">{index + 1}.</span>
-                            <span className="text-sm text-white flex-1">
-                              {model.model}{model.quality ? ` (${model.quality})` : ''}
-                            </span>
-                            <span className="text-xs text-slate-400">({model.provider === 'geekai' ? 'GeekAI' : '硅基流动'})</span>
-                            <span className="text-xs text-slate-400">¥{COST_LABELS[model.cost]}</span>
-                            <button
-                              onClick={() => removeImageModel(index)}
-                              className="w-6 h-6 rounded hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-400 transition"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  {/* 添加按钮 */}
-                  <div className="mt-2 relative inline-block">
-                    <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-violet-400 hover:bg-violet-400/10 transition">
-                      <Plus className="w-4 h-4" />
-                      添加降级模型
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <div className="h-px bg-white/10" />
-
               {/* 视频压缩设置 */}
               <section>
                 <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
@@ -598,7 +326,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                 </h3>
                 <div className="space-y-3">
                   <div className="flex items-center gap-3">
-                    <label className="text-sm text-slate-300 w-28">1080p 目标码率：</label>
+                    <label className="text-sm text-slate-300 w-28">1080P及以上：</label>
                     <input
                       type="number"
                       value={settings.video_target_bitrate_1080p}
@@ -608,7 +336,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                     <span className="text-sm text-slate-400">kbps</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    <label className="text-sm text-slate-300 w-28">720p 目标码率：</label>
+                    <label className="text-sm text-slate-300 w-28">720P及以上：</label>
                     <input
                       type="number"
                       value={settings.video_target_bitrate_720p}
@@ -618,7 +346,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                     <span className="text-sm text-slate-400">kbps</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    <label className="text-sm text-slate-300 w-28">480p 目标码率：</label>
+                    <label className="text-sm text-slate-300 w-28">480P及以上：</label>
                     <input
                       type="number"
                       value={settings.video_target_bitrate_480p}
@@ -626,6 +354,40 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                       className="flex-1 px-4 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200"
                     />
                     <span className="text-sm text-slate-400">kbps</span>
+                  </div>
+                  <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 mt-3">
+                    <AlertTriangle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <p className="text-xs text-blue-300">
+                      分辨率阶梯判断规则：≥1080P 使用 1080P 码率，≥720P 使用 720P 码率，≥480P 使用 480P 码率。码率值同时作为判断阈值和压缩目标。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              <div className="h-px bg-white/10" />
+
+              {/* 图片压缩设置 */}
+              <section>
+                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
+                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
+                  图片压缩设置
+                </h3>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm text-slate-300 w-28">压缩阈值：</label>
+                    <input
+                      type="number"
+                      value={settings.image_compress_threshold_kb}
+                      onChange={(e) => setSettings(prev => ({ ...prev, image_compress_threshold_kb: Number(e.target.value) }))}
+                      className="flex-1 px-4 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200"
+                    />
+                    <span className="text-sm text-slate-400">KB</span>
+                  </div>
+                  <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20">
+                    <AlertTriangle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <p className="text-xs text-blue-300">
+                      该值同时作为判断阈值和压缩目标：超过该大小的图片会被压缩，压缩目标大小也为该值。
+                    </p>
                   </div>
                 </div>
               </section>
@@ -642,13 +404,285 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                   <select
                     value={settings.default_image_size}
                     onChange={(e) => setSettings(prev => ({ ...prev, default_image_size: e.target.value }))}
-                    className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-slate-200 appearance-none cursor-pointer"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-white/10 focus:border-violet-400/50 outline-none text-white appearance-none cursor-pointer"
                   >
                     {IMAGE_SIZES.map(size => (
                       <option key={size} value={size}>{size}</option>
                     ))}
                   </select>
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                </div>
+              </section>
+
+              <div className="h-px bg-white/10" />
+
+              {/* AI 平台管理 */}
+              <section>
+                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
+                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
+                  AI 平台管理
+                </h3>
+                <div className="space-y-3">
+                  {/* 平台列表 */}
+                  {(settings.ai_platforms || []).map(platform => (
+                    <div key={platform.id} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-white">{platform.name}</span>
+                            {platform.builtIn && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">内置</span>}
+                          </div>
+                          <div className="text-xs text-slate-400 mt-1 truncate">{platform.baseUrl}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">API Key: {platform.apiKey || '未配置'}</div>
+                          {platform.docsUrl && (
+                            <a href={platform.docsUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-violet-400 hover:underline mt-0.5 inline-block">
+                              技术文档 →
+                            </a>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => editPlatform(platform)} className="p-1.5 rounded-lg text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition" title="编辑">
+                            <Edit className="w-4 h-4" />
+                          </button>
+                          <button onClick={() => removePlatform(platform.id)} className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition" title="删除">
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* 新增平台按钮 */}
+                  <button onClick={addPlatform} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/30 text-violet-200 text-sm font-medium transition">
+                    <Plus className="w-4 h-4" />
+                    新增 AI 平台
+                  </button>
+
+                  {/* 平台编辑/新增表单 */}
+                  {showPlatformForm && (
+                    <div className="p-4 rounded-xl bg-slate-800/50 border border-violet-500/30 space-y-3">
+                      <div className="text-sm font-medium text-violet-300">
+                        {editingPlatformId ? '编辑平台' : '新增平台'}
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">平台名称</label>
+                        <input type="text" value={platformForm.name} onChange={e => setPlatformForm({ ...platformForm, name: e.target.value })} placeholder="如：OpenAI、智谱AI" className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Base URL</label>
+                        <input type="text" value={platformForm.baseUrl} onChange={e => setPlatformForm({ ...platformForm, baseUrl: e.target.value })} placeholder="如：https://api.openai.com/v1" className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">API Key {editingPlatformId && <span className="text-slate-500">（留空则保留原值）</span>}</label>
+                        <input type="text" value={platformForm.apiKey} onChange={e => setPlatformForm({ ...platformForm, apiKey: e.target.value })} placeholder="sk-..." className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm font-mono focus:outline-none focus:border-violet-400/50" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">技术文档链接（可选）</label>
+                        <input type="text" value={platformForm.docsUrl || ''} onChange={e => setPlatformForm({ ...platformForm, docsUrl: e.target.value })} placeholder="https://..." className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50" />
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={savePlatform} className="flex-1 px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm">保存</button>
+                        <button onClick={() => setShowPlatformForm(false)} className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-slate-300 text-sm hover:bg-white/10">取消</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 安全提示 */}
+                  <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <p className="text-xs text-amber-300">
+                      API Key 在保存后将脱敏显示（如 sk-****abcd），编辑时可重新输入。内置平台的 API Key 首次从环境变量自动导入。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              <div className="h-px bg-white/10" />
+
+              {/* AI 模型配置 */}
+              <section>
+                <h3 className="text-sm font-medium text-violet-300 mb-4 flex items-center">
+                  <span className="w-1 h-4 bg-violet-400 rounded-full mr-2" />
+                  AI 模型配置
+                </h3>
+
+                <div className="space-y-5">
+                  <div className="h-px bg-white/10" />
+
+                  {/* 文本模型 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-slate-300">文本模型</h4>
+                      <button
+                        onClick={() => addModel('llm')}
+                        className="px-3 py-1 text-xs rounded-lg bg-violet-600 hover:bg-violet-500 text-white flex items-center gap-1 transition"
+                      >
+                        <Plus className="w-3 h-3" />
+                        新增模型
+                      </button>
+                    </div>
+                    {/* 模型添加指引 */}
+                    <div className="flex items-start gap-2 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 mb-3">
+                      <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                      <div className="text-xs text-blue-300 space-y-1">
+                        <div><b>模型添加指引：</b></div>
+                        <div>• <b>模型名</b>：填写平台 API 文档中的完整模型 ID，如 <code className="px-1 bg-blue-500/20 rounded">deepseek-chat</code>、<code className="px-1 bg-blue-500/20 rounded">gpt-4o-mini</code></div>
+                        <div>• <b>查询渠道</b>：在对应平台的控制台或模型广场查看可用模型列表</div>
+                        <div>• <b>技术文档</b>：参见各平台文档（上方"AI 平台管理"中的链接）</div>
+                        <div>• <b>费用</b>：参考平台定价页，选择对应费用等级</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {(settings.llm_fallback_chain || []).map((model, index) => (
+                        <div key={index} className="flex items-center gap-2 p-3 rounded-xl bg-white/5 border border-white/10">
+                          <span className="text-xs text-slate-500 w-6">{index + 1}.</span>
+                          <input
+                            type="text"
+                            value={model.model}
+                            onChange={(e) => updateModel('llm', index, 'model', e.target.value)}
+                            placeholder="模型名"
+                            className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50"
+                          />
+                          <div className="relative w-28">
+                            <select
+                              value={model.provider}
+                              onChange={(e) => updateModel('llm', index, 'provider', e.target.value)}
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
+                            >
+                              {(settings.ai_platforms || []).map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                              ))}
+                            </select>
+                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                          </div>
+                          <div className="relative w-24">
+                            <select
+                              value={model.cost || 'low'}
+                              onChange={(e) => updateModel('llm', index, 'cost', e.target.value)}
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
+                            >
+                              <option value="free">免费</option>
+                              <option value="low">低</option>
+                              <option value="mid">中</option>
+                              <option value="mid_high">中高</option>
+                              <option value="high">高</option>
+                            </select>
+                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                          </div>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={model.supportsVision || false}
+                              onChange={(e) => updateModel('llm', index, 'supportsVision', e.target.checked)}
+                              className="w-4 h-4 rounded border-white/20 bg-slate-800 text-violet-500 focus:ring-violet-500/50"
+                            />
+                            <span className="text-xs text-slate-400">视觉</span>
+                          </label>
+                          <button
+                            onClick={() => removeModel('llm', index)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition"
+                            title="删除"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                      {(!settings.llm_fallback_chain || settings.llm_fallback_chain.length === 0) && (
+                        <div className="text-center py-4 text-slate-500 text-sm">
+                          暂无文本模型，点击上方按钮添加
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="h-px bg-white/10" />
+
+                  {/* 图像模型 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-slate-300">图像模型</h4>
+                      <button
+                        onClick={() => addModel('image')}
+                        className="px-3 py-1 text-xs rounded-lg bg-violet-600 hover:bg-violet-500 text-white flex items-center gap-1 transition"
+                      >
+                        <Plus className="w-3 h-3" />
+                        新增模型
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {(settings.image_fallback_chain || []).map((model, index) => (
+                        <div key={index} className="flex items-center gap-2 p-3 rounded-xl bg-white/5 border border-white/10">
+                          <span className="text-xs text-slate-500 w-6">{index + 1}.</span>
+                          <input
+                            type="text"
+                            value={model.model}
+                            onChange={(e) => updateModel('image', index, 'model', e.target.value)}
+                            placeholder="模型名"
+                            className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50"
+                          />
+                          <div className="relative w-28">
+                            <select
+                              value={model.provider}
+                              onChange={(e) => updateModel('image', index, 'provider', e.target.value)}
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
+                            >
+                              {(settings.ai_platforms || []).map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                              ))}
+                            </select>
+                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                          </div>
+                          <div className="relative w-24">
+                            <select
+                              value={model.quality || 'standard'}
+                              onChange={(e) => updateModel('image', index, 'quality', e.target.value)}
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
+                            >
+                              <option value="standard">标准</option>
+                              <option value="hd">高清</option>
+                              <option value="ultra">超清</option>
+                            </select>
+                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                          </div>
+                          <div className="relative w-20">
+                            <select
+                              value={model.cost || 'mid'}
+                              onChange={(e) => updateModel('image', index, 'cost', e.target.value)}
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
+                            >
+                              <option value="free">免费</option>
+                              <option value="low">低</option>
+                              <option value="mid">中</option>
+                              <option value="mid_high">中高</option>
+                              <option value="high">高</option>
+                            </select>
+                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                          </div>
+                          <label className="flex items-center gap-1 cursor-pointer" title="支持图生图">
+                            <input
+                              type="checkbox"
+                              checked={model.supportsImageRef || false}
+                              onChange={(e) => updateModel('image', index, 'supportsImageRef', e.target.checked)}
+                              className="accent-violet-500"
+                            />
+                            <span className="text-xs text-slate-400">图生图</span>
+                          </label>
+                          <button
+                            onClick={() => removeModel('image', index)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition ml-auto"
+                            title="删除"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                      {(!settings.image_fallback_chain || settings.image_fallback_chain.length === 0) && (
+                        <div className="text-center py-4 text-slate-500 text-sm">
+                          暂无图像模型，点击上方按钮添加
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </section>
 

@@ -62,17 +62,17 @@ export function VideoCompressionDialog({
             <button
               onClick={() => onSelect('server')}
               disabled={!canServerCompress}
-              className={`w-full p-4 rounded-xl border text-left transition ${
+              className={`w-full p-3 rounded-xl border text-left transition ${
                 canServerCompress
                   ? 'border-green-400/30 bg-green-500/10 hover:bg-green-500/20 hover:border-green-400/50 cursor-pointer'
                   : 'border-white/10 bg-white/[0.02] opacity-50 cursor-not-allowed'
               }`}
             >
               <div className="flex items-start gap-3">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                   canServerCompress ? 'bg-green-500/20 text-green-300' : 'bg-white/5 text-white/30'
                 }`}>
-                  <Server className="w-5 h-5" />
+                  <Server className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
@@ -90,28 +90,12 @@ export function VideoCompressionDialog({
                       </span>
                     )}
                   </div>
-                  <div className={`mt-1 text-xs space-y-0.5 ${canServerCompress ? 'text-white/60' : 'text-white/30'}`}>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 速度快，约 30秒-2分钟</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 压缩质量好，ffmpeg 专业处理</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 无需等待浏览器加载组件</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 仅支持 ≤95MB 文件（服务器内存限制）</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 上传过程中占用服务器带宽</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>💰 免费，无额外费用</span>
-                    </div>
+                  <div className={`mt-0.5 text-xs ${canServerCompress ? 'text-white/60' : 'text-white/30'}`}>
+                    速度快 · ffmpeg 专业处理 · 免费
+                    {!canServerCompress && <span className="text-amber-300/70"> · 限 ≤95MB</span>}
                   </div>
                   {!canServerCompress && (
-                    <p className="mt-1.5 text-xs text-amber-300/70">
+                    <p className="mt-1 text-xs text-amber-300/70">
                       文件超过 95MB，服务端暂不支持
                     </p>
                   )}
@@ -121,38 +105,18 @@ export function VideoCompressionDialog({
 
             <button
               onClick={() => onSelect('browser')}
-              className="w-full p-4 rounded-xl border border-blue-400/30 bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/50 text-left transition cursor-pointer"
+              className="w-full p-3 rounded-xl border border-blue-400/30 bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/50 text-left transition cursor-pointer"
             >
               <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-xl bg-blue-500/20 text-blue-300 flex items-center justify-center shrink-0">
-                  <Monitor className="w-5 h-5" />
+                <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-300 flex items-center justify-center shrink-0">
+                  <Monitor className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white">浏览器压缩</span>
                   </div>
-                  <div className="mt-1 text-xs text-white/60 space-y-0.5">
-                    <div className="flex items-center gap-1">
-                      <span>✅ 无文件大小限制</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 完全本地处理，隐私性好</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 压缩过程可见，进度实时显示</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 速度较慢，约 5-15 分钟</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 占用浏览器资源，移动端耗电</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 需加载 WASM 组件（约 30MB）</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>💰 免费，无额外费用</span>
-                    </div>
+                  <div className="mt-0.5 text-xs text-white/60">
+                    无文件大小限制 · 本地处理 · 免费
                   </div>
                 </div>
               </div>
@@ -161,17 +125,17 @@ export function VideoCompressionDialog({
             <button
               onClick={() => onSelect('aliyun')}
               disabled={!canAliyunCompress}
-              className={`w-full p-4 rounded-xl border text-left transition ${
+              className={`w-full p-3 rounded-xl border text-left transition ${
                 canAliyunCompress
                   ? 'border-orange-400/30 bg-orange-500/10 hover:bg-orange-500/20 hover:border-orange-400/50 cursor-pointer'
                   : 'border-white/10 bg-white/[0.02] opacity-50 cursor-not-allowed'
               }`}
             >
               <div className="flex items-start gap-3">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                   canAliyunCompress ? 'bg-orange-500/20 text-orange-300' : 'bg-white/5 text-white/30'
                 }`}>
-                  <Cloud className="w-5 h-5" />
+                  <Cloud className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
@@ -184,31 +148,11 @@ export function VideoCompressionDialog({
                       </span>
                     )}
                   </div>
-                  <div className={`mt-1 text-xs space-y-0.5 ${canAliyunCompress ? 'text-white/60' : 'text-white/30'}`}>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 云端专业级压缩，质量高</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 支持多种编码格式</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 无文件大小限制</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 不占用本地资源</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 依赖网络，处理时间约 2-5 分钟</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 会产生阿里云费用</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>💰 约 ¥0.5-2.0 / 5分钟视频</span>
-                    </div>
+                  <div className={`mt-0.5 text-xs ${canAliyunCompress ? 'text-white/60' : 'text-white/30'}`}>
+                    云端专业压缩 · 无大小限制 · 约 ¥0.5-2/5分钟
                   </div>
                   {!canAliyunCompress && (
-                    <p className="mt-1.5 text-xs text-amber-300/70">
+                    <p className="mt-1 text-xs text-amber-300/70">
                       需配置阿里云 AccessKey
                     </p>
                   )}
@@ -218,34 +162,17 @@ export function VideoCompressionDialog({
 
             <button
               onClick={() => onSelect('cancel')}
-              className="w-full p-4 rounded-xl border border-dashed border-white/15 bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/25 text-left transition cursor-pointer"
+              className="w-full p-3 rounded-xl border border-dashed border-white/15 bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/25 text-left transition cursor-pointer"
             >
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-xl bg-white/5 text-white/50 flex items-center justify-center shrink-0">
-                  <Hand className="w-5 h-5" />
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-white/5 text-white/50 flex items-center justify-center shrink-0">
+                  <Hand className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <span className="text-sm font-medium text-white/80">手动压缩后再上传</span>
-                  <div className="mt-1 text-xs text-white/50 space-y-0.5">
-                    <div className="flex items-center gap-1">
-                      <span>✅ 完全自主控制压缩参数</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 可使用专业软件（如 HandBrake）</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>✅ 无需等待在线处理</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 需手动操作，额外步骤</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>❌ 需安装压缩软件</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span>💡 建议：使用 HandBrake 等工具压缩后再上传</span>
-                    </div>
-                  </div>
+                  <p className="mt-0.5 text-xs text-white/50">
+                    💡 使用 HandBrake 等工具压缩后重新上传
+                  </p>
                 </div>
               </div>
             </button>

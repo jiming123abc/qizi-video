@@ -454,6 +454,7 @@ function initVideo2Database() {
       'sceneContent TEXT DEFAULT \'\'',
       'actors TEXT DEFAULT \'\'',
       'props TEXT DEFAULT \'\'',
+      'costume TEXT DEFAULT \'\'',
       'location TEXT DEFAULT \'\'',
       'focalLength TEXT DEFAULT \'\'',
       'narration TEXT DEFAULT \'\'',
@@ -557,6 +558,47 @@ function initVideo2Database() {
     `);
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_status ON transcode_tasks(status)');
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_project ON transcode_tasks(projectId)');
+
+    // ========== digital_assets 表（数字资产：演员/道具/场景） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS digital_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        projectId INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        imagePrompt TEXT DEFAULT '',
+        imageUrl TEXT DEFAULT '',
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_project ON digital_assets(projectId)');
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_type ON digital_assets(type)');
+
+    // ========== digital_asset_images 表（数字资产图片） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS digital_asset_images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        assetId INTEGER NOT NULL,
+        imageUrl TEXT NOT NULL,
+        sortOrder INTEGER DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (assetId) REFERENCES digital_assets(id) ON DELETE CASCADE
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_asset_images_asset ON digital_asset_images(assetId)');
+
+    // 迁移旧数据：将 digital_assets.imageUrl 迁移到 digital_asset_images
+    video2Db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='digital_asset_images'", [], function(err, row) {
+      if (row) {
+        video2Db.run(`
+          INSERT OR IGNORE INTO digital_asset_images (assetId, imageUrl, sortOrder)
+          SELECT id, imageUrl, 0 FROM digital_assets
+          WHERE imageUrl IS NOT NULL AND imageUrl != ''
+          AND NOT EXISTS (SELECT 1 FROM digital_asset_images WHERE assetId = digital_assets.id)
+        `);
+      }
+    });
 
     // 2. 创建 projects 表
     video2Db.run(`
@@ -760,6 +802,7 @@ function initDefaultSettings(callback) {
     video_target_bitrate_1080p: '3000',
     video_target_bitrate_720p: '2000',
     video_target_bitrate_480p: '1000',
+    image_compress_threshold_kb: '300',
     model_prices: JSON.stringify({
       'deepseek-chat': { input: 0.001, output: 0.002 },
       'gpt-4o-mini': { input: 0.01, output: 0.03 },
@@ -881,7 +924,7 @@ const video2Projects = {
     const result = [];
     for (const p of projects) {
       const stats = await video2Async.get(
-        'SELECT COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize FROM videos WHERE projectId = ? AND deleted = 0',
+        'SELECT COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize FROM videos WHERE projectId = ? AND deleted = 0 AND reference = 0',
         [p.id]
       );
       result.push({
@@ -950,7 +993,7 @@ const video2Scenes = {
     const result = [];
     for (const s of scenes) {
       const stats = await video2Async.get(
-        'SELECT COUNT(*) as cnt FROM videos WHERE sceneId = ? AND deleted = 0',
+        'SELECT COUNT(*) as cnt FROM videos WHERE sceneId = ? AND deleted = 0 AND reference = 0',
         [s.id]
       );
       result.push({
@@ -1045,7 +1088,7 @@ const video2Items = {
     );
     return rows.map(formatShot);
   },
-  getStats: async ({ projectId, sceneId } = {}) => {
+  getStats: async ({ projectId, sceneId, reference } = {}) => {
     let whereClause = 'WHERE deleted = 0';
     const params = [];
     if (projectId !== undefined) { whereClause += ' AND projectId = ?'; params.push(projectId); }
@@ -1057,6 +1100,7 @@ const video2Items = {
         params.push(sceneId);
       }
     }
+    if (reference !== undefined) { whereClause += ' AND reference = ?'; params.push(reference); }
     const all = await video2Async.all(
       'SELECT status, COUNT(*) as cnt FROM videos ' + whereClause + ' GROUP BY status',
       params
@@ -1066,8 +1110,10 @@ const video2Items = {
       map[r.status] = r.cnt;
       map.total += r.cnt;
     });
-    const trashWhere = projectId !== undefined ? ' WHERE deleted = 1 AND projectId = ?' : ' WHERE deleted = 1';
-    const trashParams = projectId !== undefined ? [projectId] : [];
+    let trashWhere = ' WHERE deleted = 1';
+    const trashParams = [];
+    if (projectId !== undefined) { trashWhere += ' AND projectId = ?'; trashParams.push(projectId); }
+    if (reference !== undefined) { trashWhere += ' AND reference = ?'; trashParams.push(reference); }
     const trash = await video2Async.get(
       'SELECT COUNT(*) as cnt FROM videos' + trashWhere,
       trashParams
@@ -1076,6 +1122,7 @@ const video2Items = {
     let unclassifiedWhere = 'WHERE deleted = 0 AND sceneId IS NULL';
     const unclassifiedParams = [];
     if (projectId !== undefined) { unclassifiedWhere += ' AND projectId = ?'; unclassifiedParams.push(projectId); }
+    if (reference !== undefined) { unclassifiedWhere += ' AND reference = ?'; unclassifiedParams.push(reference); }
     const unclassified = await video2Async.get(
       'SELECT COUNT(*) as cnt FROM videos ' + unclassifiedWhere,
       unclassifiedParams
@@ -1088,7 +1135,7 @@ const video2Items = {
       `SELECT v.sceneId, s.name as sceneName, v.status, COUNT(*) as cnt
        FROM videos v
        LEFT JOIN scenes s ON v.sceneId = s.id
-       WHERE v.projectId = ? AND v.deleted = 0 AND v.status != 'trash'
+       WHERE v.projectId = ? AND v.deleted = 0 AND v.status != 'trash' AND v.reference = 0
        GROUP BY v.sceneId, v.status
        ORDER BY s.sortOrder IS NULL, s.sortOrder ASC, v.sceneId IS NULL, v.sceneId ASC`,
       [projectId]
@@ -1124,7 +1171,7 @@ const video2Items = {
     const shots = await video2Async.all(
       `SELECT id, title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
               narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
-              props, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
+              props, costume, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
               focalLength, lighting, estimatedDuration, aiStylePrompt, shotIndex
        FROM videos WHERE projectId = ? AND deleted = 0
        ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC`,
@@ -1194,16 +1241,16 @@ const video2Items = {
         const result = await video2Async.run(
           `INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
             narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
-            props, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
+            props, costume, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
             aiStylePrompt, shotIndex)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sh.title, sh.filename, sh.url, sh.status || 'pending', sh.size || 0, sh.duration || 0,
             sh.sortOrder ?? null, newProjectId, newSceneId, sh.type || 'video',
             sh.coverUrl || null, sh.reference || 0,
             sh.narration || null, sh.sceneContent || null, sh.actors || null, sh.location || null,
             sh.shotNo || null, sh.shotType || null, sh.cameraMovement || null, sh.shotAngle || null,
-            sh.durationSeconds || null, sh.props || null, sh.notes || null,
+            sh.durationSeconds || null, sh.props || null, sh.costume || null, sh.notes || null,
             sh.mergedFrom || null, sh.aiImageTaskId || null, sh.aiImagePrompt || null,
             sh.focalLength || null, sh.lighting || null, sh.estimatedDuration || null,
             sh.aiStylePrompt || null, sh.shotIndex || 0
@@ -1368,7 +1415,7 @@ const video2Items = {
   // 分镜升级：更新分镜字段（支持批量字段更新）
   updateShotFields: async (id, fields) => {
     const allowedFields = [
-      'sceneContent', 'actors', 'props', 'location', 'focalLength',
+      'sceneContent', 'actors', 'props', 'costume', 'location', 'focalLength',
       'narration', 'cameraMovement', 'shotType', 'shotAngle', 'lighting',
       'notes', 'estimatedDuration', 'aiImagePrompt', 'aiStylePrompt',
       'shotNo', 'status'
@@ -1399,10 +1446,10 @@ const video2Items = {
     const r = await video2Async.run(
       `INSERT INTO videos 
        (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, 
-        sceneContent, actors, props, location, focalLength, narration, 
+        sceneContent, actors, props, costume, location, focalLength, narration, 
         cameraMovement, shotType, shotAngle, lighting, notes, estimatedDuration,
         aiImagePrompt, aiStylePrompt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.sceneContent || item.title || '新分镜',
         item.filename || '',
@@ -1417,6 +1464,7 @@ const video2Items = {
         item.sceneContent || '',
         item.actors || '',
         item.props || '',
+        item.costume || '',
         item.location || '',
         item.focalLength || '',
         item.narration || '',
@@ -1576,6 +1624,19 @@ const video2ShotMedia = {
        WHERE v.sceneId = ? AND v.deleted = 0 AND sm.type = 'image'
        ORDER BY sm.id DESC`,
       [sceneId]
+    );
+  },
+
+  getByLocation: async (projectId, location) => {
+    if (!location || !location.trim()) return [];
+    const normalized = location.trim().toLowerCase();
+    return await video2Async.all(
+      `SELECT sm.* FROM shot_media sm
+       INNER JOIN videos v ON sm.shotId = v.id
+       WHERE v.projectId = ? AND v.deleted = 0 AND sm.type = 'image'
+         AND LOWER(TRIM(v.location)) = ?
+       ORDER BY sm.id DESC`,
+      [projectId, normalized]
     );
   }
 };
@@ -1820,6 +1881,145 @@ function recalcShotIndexPromise(projectId) {
   });
 }
 
+// ========== digital_assets（数字资产：演员/道具/场景） ==========
+const video2DigitalAssets = {
+  getByProjectId: async (projectId, type = null) => {
+    let sql = 'SELECT * FROM digital_assets WHERE projectId = ?';
+    const params = [projectId];
+    if (type) {
+      sql += ' AND type = ?';
+      params.push(type);
+    }
+    sql += ' ORDER BY createdAt DESC, id ASC';
+    const assets = await video2Async.all(sql, params);
+
+    // 为每个资产加载图片列表
+    for (const asset of assets) {
+      const images = await video2Async.all(
+        'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
+        [asset.id]
+      );
+      asset.images = images;
+      // 保持 imageUrl 兼容（取第一张）
+      if (images.length > 0 && !asset.imageUrl) {
+        asset.imageUrl = images[0].imageUrl;
+      }
+    }
+    return assets;
+  },
+
+  getById: async (id) => {
+    const asset = await video2Async.get('SELECT * FROM digital_assets WHERE id = ?', [id]);
+    if (asset) {
+      const images = await video2Async.all(
+        'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
+        [id]
+      );
+      asset.images = images;
+    }
+    return asset;
+  },
+
+  create: async ({ projectId, type, name, imagePrompt, imageUrl }) => {
+    const result = await video2Async.run(
+      'INSERT INTO digital_assets (projectId, type, name, imagePrompt, imageUrl) VALUES (?, ?, ?, ?, ?)',
+      [projectId, type, name, imagePrompt || '', imageUrl || '']
+    );
+    const newAsset = { id: result.lastID, projectId, type, name, imagePrompt: imagePrompt || '', imageUrl: imageUrl || '', createdAt: new Date().toISOString(), images: [] };
+
+    // 如果有 imageUrl，也添加到 images 表
+    if (imageUrl && imageUrl.trim()) {
+      await video2Async.run(
+        'INSERT INTO digital_asset_images (assetId, imageUrl, sortOrder) VALUES (?, ?, 0)',
+        [result.lastID, imageUrl]
+      );
+      newAsset.images = [{ id: 0, assetId: result.lastID, imageUrl, sortOrder: 0, createdAt: new Date().toISOString() }];
+    }
+    return newAsset;
+  },
+
+  update: async (id, { name, imagePrompt, imageUrl }) => {
+    const fields = [];
+    const vals = [];
+    if (name !== undefined) { fields.push('name=?'); vals.push(name); }
+    if (imagePrompt !== undefined) { fields.push('imagePrompt=?'); vals.push(imagePrompt); }
+    if (imageUrl !== undefined) { fields.push('imageUrl=?'); vals.push(imageUrl); }
+    if (fields.length === 0) return false;
+    vals.push(id);
+    const r = await video2Async.run('UPDATE digital_assets SET ' + fields.join(', ') + ' WHERE id = ?', vals);
+    return r.changes > 0;
+  },
+
+  delete: async (id) => {
+    const r = await video2Async.run('DELETE FROM digital_assets WHERE id = ?', [id]);
+    return r.changes > 0;
+  },
+
+  // ========== 图片管理 ==========
+  addImage: async (assetId, imageUrl) => {
+    // 检查是否超过 10 张限制
+    const countRow = await video2Async.get(
+      'SELECT COUNT(*) as cnt FROM digital_asset_images WHERE assetId = ?',
+      [assetId]
+    );
+    if (countRow?.cnt >= 10) {
+      throw new Error('最多只能添加 10 张图片');
+    }
+
+    // 先获取当前最大 sortOrder
+    const maxRow = await video2Async.get(
+      'SELECT MAX(sortOrder) as maxSort FROM digital_asset_images WHERE assetId = ?',
+      [assetId]
+    );
+    const sortOrder = (maxRow?.maxSort || 0) + 1;
+
+    const result = await video2Async.run(
+      'INSERT INTO digital_asset_images (assetId, imageUrl, sortOrder) VALUES (?, ?, ?)',
+      [assetId, imageUrl, sortOrder]
+    );
+
+    // 如果是第一张图，更新主表的 imageUrl
+    const newCountRow = await video2Async.get(
+      'SELECT COUNT(*) as cnt FROM digital_asset_images WHERE assetId = ?',
+      [assetId]
+    );
+    if (newCountRow?.cnt === 1) {
+      await video2Async.run(
+        'UPDATE digital_assets SET imageUrl = ? WHERE id = ?',
+        [imageUrl, assetId]
+      );
+    }
+
+    return { id: result.lastID, assetId, imageUrl, sortOrder, createdAt: new Date().toISOString() };
+  },
+
+  deleteImage: async (assetId, imageId) => {
+    const r = await video2Async.run(
+      'DELETE FROM digital_asset_images WHERE id = ? AND assetId = ?',
+      [imageId, assetId]
+    );
+    if (r.changes > 0) {
+      // 如果删完后还有图片，更新主表 imageUrl 为第一张
+      const firstImage = await video2Async.get(
+        'SELECT imageUrl FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC LIMIT 1',
+        [assetId]
+      );
+      await video2Async.run(
+        'UPDATE digital_assets SET imageUrl = ? WHERE id = ?',
+        [firstImage?.imageUrl || '', assetId]
+      );
+    }
+    return r.changes > 0;
+  },
+
+  getImages: async (assetId) => {
+    return await video2Async.all(
+      'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
+      [assetId]
+    );
+  }
+};
+
 module.exports = {
   // 以下为企业官网时代遗留模块，已废弃，仅供向后兼容
   // portfolioItems,
@@ -1836,5 +2036,7 @@ module.exports = {
   video2AiTasks,
   video2AiUsage,
   video2TranscodeTasks,
+  video2DigitalAssets,
+  video2Async,
   db
 };

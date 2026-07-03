@@ -1,17 +1,26 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload } from 'lucide-react';
+import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload, Video } from 'lucide-react';
 import { checkVideoBitrate, uploadVideo2Video } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 
+interface UploadedVideo {
+  id: string;
+  url: string;
+  name: string;
+  thumbnail?: string;
+}
+
 interface VideoSplitDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  videoUrl: string;
+  videoUrl?: string;
+  initialVideos?: UploadedVideo[];
   projectId: number;
   sceneId?: number | null;
-  onSplit?: (shots: any[]) => void;
+  onSplit?: (shots: any[], videoUrl: string) => void;
   onVideoUpload?: (file: File) => Promise<string>;
+  maxUploads?: number;
 }
 
 type SplitMode = 'manual' | 'ai_frame' | 'aliyun';
@@ -61,10 +70,12 @@ export default function VideoSplitDialog({
   isOpen,
   onClose,
   videoUrl: initialVideoUrl,
+  initialVideos,
   projectId,
   sceneId,
   onSplit,
-  onVideoUpload
+  onVideoUpload,
+  maxUploads = 5
 }: VideoSplitDialogProps) {
   const [mode, setMode] = useState<SplitMode>('manual');
   const [state, setState] = useState<DialogState>('initial');
@@ -91,18 +102,22 @@ export default function VideoSplitDialog({
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
   const [aiMode, setAiMode] = useState<'ai_frame' | 'aliyun'>('ai_frame');
 
-  // 本地视频上传相关状态
-  const [videoUrl, setVideoUrl] = useState(initialVideoUrl);
+  const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+  const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState('');
+  const [currentUploadIndex, setCurrentUploadIndex] = useState(0);
+  const [totalUploadCount, setTotalUploadCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 压缩选择对话框状态
   const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
   const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const pendingUploadRef = useRef<{ file: File } | null>(null);
-  
+  const pendingUploadRef = useRef<{ file: File; queue?: File[] } | null>(null);
+
+  const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
+  const currentVideoUrl = currentVideo?.url || '';
+
   useEffect(() => {
     fetch('/api/video2/aliyun/status')
       .then(res => res.json())
@@ -114,38 +129,87 @@ export default function VideoSplitDialog({
       .catch(() => {});
   }, []);
 
-  // 同步 videoUrl
   useEffect(() => {
-    setVideoUrl(initialVideoUrl);
-  }, [initialVideoUrl]);
+    if (!isOpen) return;
 
-  // 处理本地视频上传
-  const handleLocalVideoUpload = async (file: File) => {
-    if (!file.type.startsWith('video/')) {
-      setError('请选择视频文件');
-      return;
+    if (initialVideos && initialVideos.length > 0) {
+      setUploadedVideos(initialVideos);
+      setSelectedVideoId(initialVideos[0].id);
+    } else if (initialVideoUrl) {
+      const video: UploadedVideo = {
+        id: generateId(),
+        url: initialVideoUrl,
+        name: '视频'
+      };
+      setUploadedVideos([video]);
+      setSelectedVideoId(video.id);
+    } else {
+      setUploadedVideos([]);
+      setSelectedVideoId(null);
     }
+    resetSplitState();
+  }, [isOpen, initialVideos, initialVideoUrl]);
 
+  const generateVideoThumbnail = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.muted = true;
+      video.playsInline = true;
+      video.src = URL.createObjectURL(file);
+      video.onloadeddata = () => {
+        video.currentTime = 0.1;
+      };
+      video.onseeked = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 160;
+          canvas.height = 90;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, 160, 90);
+            resolve(canvas.toDataURL('image/jpeg', 0.6));
+          } else {
+            resolve('');
+          }
+        } catch {
+          resolve('');
+        } finally {
+          URL.revokeObjectURL(video.src);
+        }
+      };
+      video.onerror = () => {
+        resolve('');
+      };
+    });
+  };
+
+  const uploadSingleVideo = async (file: File): Promise<UploadedVideo | null> => {
     setError(null);
-    setIsUploading(true);
-    setUploadProgress(0);
-    setUploadMessage('正在检测视频信息...');
 
     try {
-      // 检测码率
       const decision = await checkVideoBitrate(file);
 
       if (decision.decision === 'must_compress') {
-        // 显示压缩选择对话框
-        pendingUploadRef.current = { file };
-        setPendingCompressionVideo(file);
-        setPendingCompressionDecision(decision);
-        setIsUploading(false);
-        return;
+        return new Promise((resolve) => {
+          pendingUploadRef.current = { file };
+          setPendingCompressionVideo(file);
+          setPendingCompressionDecision(decision);
+          setIsUploading(false);
+          const checkInterval = setInterval(() => {
+            if (!pendingCompressionVideo && !pendingUploadRef.current) {
+              clearInterval(checkInterval);
+              resolve(null);
+            }
+          }, 200);
+          setTimeout(() => {
+            clearInterval(checkInterval);
+            resolve(null);
+          }, 60000);
+        });
       }
 
-      // 低码率视频，直接上传
-      setUploadMessage('正在上传视频...');
+      setUploadMessage(`正在上传：${file.name}`);
       const videoUrlResult = await uploadVideo2Video(file, {
         projectId,
         sceneId,
@@ -157,20 +221,76 @@ export default function VideoSplitDialog({
         }
       });
 
-      setVideoUrl(videoUrlResult.url);
-      setIsUploading(false);
-      setUploadProgress(0);
-      setUploadMessage('');
+      const thumbnail = await generateVideoThumbnail(file);
+
+      return {
+        id: generateId(),
+        url: videoUrlResult.url,
+        name: file.name,
+        thumbnail
+      };
     } catch (err) {
       console.error('上传视频失败:', err);
       setError(err instanceof Error ? err.message : '上传失败');
-      setIsUploading(false);
-      setUploadProgress(0);
-      setUploadMessage('');
+      return null;
     }
   };
 
-  // 处理压缩方式选择
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const fileList = Array.from(files) as File[];
+    const remainingSlots = maxUploads - uploadedVideos.length;
+    if (remainingSlots <= 0) {
+      setError(`最多只能上传 ${maxUploads} 个视频`);
+      e.target.value = '';
+      return;
+    }
+
+    const filesToUpload = fileList.slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      setError(`最多只能上传 ${maxUploads} 个视频，已自动截取前 ${remainingSlots} 个`);
+    }
+
+    e.target.value = '';
+    uploadMultipleVideos(filesToUpload);
+  };
+
+  const uploadMultipleVideos = async (files: File[]) => {
+    setIsUploading(true);
+    setUploadProgress(0);
+    setTotalUploadCount(files.length);
+    setCurrentUploadIndex(0);
+    setError(null);
+
+    const newVideos: UploadedVideo[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      setCurrentUploadIndex(i + 1);
+      const result = await uploadSingleVideo(files[i]);
+      if (result) {
+        newVideos.push(result);
+      }
+    }
+
+    if (newVideos.length > 0) {
+      setUploadedVideos(prev => {
+        const updated = [...prev, ...newVideos];
+        return updated;
+      });
+      if (!selectedVideoId && newVideos.length > 0) {
+        setSelectedVideoId(newVideos[0].id);
+      }
+    }
+
+    setIsUploading(false);
+    setUploadProgress(0);
+    setUploadMessage('');
+    setCurrentUploadIndex(0);
+    setTotalUploadCount(0);
+  };
+
   const handleCompressionSelect = async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
     const pending = pendingUploadRef.current;
     const file = pendingCompressionVideo;
@@ -199,57 +319,44 @@ export default function VideoSplitDialog({
         }
       });
 
-      setVideoUrl(videoUrlResult.url);
-      setIsUploading(false);
-      setUploadProgress(0);
-      setUploadMessage('');
+      const thumbnail = await generateVideoThumbnail(file);
+      const newVideo: UploadedVideo = {
+        id: generateId(),
+        url: videoUrlResult.url,
+        name: file.name,
+        thumbnail
+      };
+
+      setUploadedVideos(prev => [...prev, newVideo]);
+      if (!selectedVideoId) {
+        setSelectedVideoId(newVideo.id);
+      }
     } catch (err) {
       console.error('上传视频失败:', err);
       setError(err instanceof Error ? err.message : '上传失败');
+    } finally {
       setIsUploading(false);
       setUploadProgress(0);
       setUploadMessage('');
     }
   };
 
-  // 触发文件选择
   const handleUploadClick = () => {
+    const remainingSlots = maxUploads - uploadedVideos.length;
+    if (remainingSlots <= 0) {
+      setError(`最多只能上传 ${maxUploads} 个视频`);
+      return;
+    }
     fileInputRef.current?.click();
   };
 
-  // 文件选择变化
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      handleLocalVideoUpload(file);
-    }
-    // 重置 input，允许重复选择同一文件
-    e.target.value = '';
+  const handleSelectVideo = (videoId: string) => {
+    if (videoId === selectedVideoId) return;
+    setSelectedVideoId(videoId);
+    resetSplitState();
   };
-  
-  const aiModeOptions: AIModeOption[] = [
-    {
-      id: 'ai_frame',
-      name: 'AI 抽帧分析',
-      description: '抽取视频关键帧，通过多模态大模型分析镜头切换点',
-      cost: '约 ¥0.3-0.8 / 5分钟',
-      accuracy: '⭐⭐⭐⭐ 较好',
-      speed: '约 30秒-2分钟',
-      available: true
-    },
-    {
-      id: 'aliyun',
-      name: '阿里云视频拆条',
-      description: '阿里云视觉智能平台专业视频分析，支持镜头转场和主题双维度拆分',
-      cost: '约 ¥0.5-2.5 / 5分钟',
-      accuracy: '⭐⭐⭐⭐⭐ 精准',
-      speed: '约 1-3分钟',
-      available: aliyunConfigured
-    }
-  ];
 
-  // 重置状态
-  const resetState = useCallback(() => {
+  const resetSplitState = useCallback(() => {
     setMode('manual');
     setState('initial');
     setProgress(0);
@@ -259,20 +366,16 @@ export default function VideoSplitDialog({
     setEstimatedCost(0);
     setError(null);
     setTaskId(null);
+    setShotThumbnails({});
+    setVideoDuration(0);
+    setCurrentTime(0);
+    setIsPlaying(false);
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
   }, []);
 
-  // 关闭弹窗时重置
-  useEffect(() => {
-    if (!isOpen) {
-      resetState();
-    }
-  }, [isOpen, resetState]);
-
-  // 键盘事件
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
@@ -283,7 +386,6 @@ export default function VideoSplitDialog({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // 视频事件处理
   const handleTimeUpdate = () => {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime);
@@ -316,7 +418,6 @@ export default function VideoSplitDialog({
     }
   };
 
-  // 添加分割点
   const addSplitPoint = () => {
     const newPoint: SplitPoint = {
       id: generateId(),
@@ -325,17 +426,14 @@ export default function VideoSplitDialog({
     setSplitPoints(prev => [...prev, newPoint].sort((a, b) => a.time - b.time));
   };
 
-  // 删除分割点
   const removeSplitPoint = (id: string) => {
     setSplitPoints(prev => prev.filter(p => p.id !== id));
   };
 
-  // 清除所有分割点
   const clearAllSplitPoints = () => {
     setSplitPoints([]);
   };
 
-  // 拖动分割点
   const handleTimelineMouseDown = (e: React.MouseEvent, pointId: string) => {
     e.preventDefault();
     setDraggingPoint(pointId);
@@ -368,7 +466,6 @@ export default function VideoSplitDialog({
     }
   }, [draggingPoint, handleTimelineMouseMove, handleTimelineMouseUp]);
 
-  // 点击时间轴添加分割点
   const handleTimelineClick = (e: React.MouseEvent) => {
     if (draggingPoint || !timelineRef.current || !videoDuration) return;
 
@@ -376,7 +473,6 @@ export default function VideoSplitDialog({
     const percentage = (e.clientX - rect.left) / rect.width;
     const clickTime = percentage * videoDuration;
 
-    // 检查是否点击了现有分割点附近
     const existingPoint = splitPoints.find(p => Math.abs(p.time - clickTime) < 0.5);
     if (existingPoint) return;
 
@@ -387,7 +483,6 @@ export default function VideoSplitDialog({
     setSplitPoints(prev => [...prev, newPoint].sort((a, b) => a.time - b.time));
   };
 
-  // 监听任务状态（优先 SSE，失败回退轮询）
   const pollTaskStatus = useCallback((tid: string) => {
     let sseFailed = false;
     let sseClosed = false;
@@ -542,8 +637,9 @@ export default function VideoSplitDialog({
     }
   }, []);
 
-  // 开始分割
   const handleStartSplit = async () => {
+    if (!currentVideoUrl) return;
+
     setError(null);
     setState('processing');
     setProgress(5);
@@ -553,7 +649,7 @@ export default function VideoSplitDialog({
       const actualMode = mode === 'manual' ? 'manual' : aiMode;
       
       const body: Record<string, any> = {
-        videoUrl,
+        videoUrl: currentVideoUrl,
         projectId,
         mode: actualMode
       };
@@ -649,35 +745,36 @@ export default function VideoSplitDialog({
     }
   }, [state, videoDuration, splitPoints, generateAllThumbnails]);
 
-  // 取消处理
   const handleCancel = () => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
-    resetState();
+    setState('initial');
+    setProgress(0);
   };
 
-  // 确认并添加
   const handleConfirm = () => {
-    if (onSplit && splitPoints.length > 0) {
-      const shots = splitPoints.map((point, idx) => ({
-        startTime: idx === 0 ? 0 : splitPoints[idx - 1].time,
-        endTime: point.time,
-        index: idx
-      }));
-      // 添加最后一个分镜到视频结尾
-      shots.push({
-        startTime: splitPoints[splitPoints.length - 1].time,
-        endTime: videoDuration,
-        index: splitPoints.length
-      });
-      onSplit(shots);
+    if (onSplit && currentVideoUrl) {
+      const shots = splitPoints.length > 0
+        ? (() => {
+            const result: any[] = [];
+            const times = [0, ...splitPoints.map(p => p.time), videoDuration];
+            for (let i = 0; i < times.length - 1; i++) {
+              result.push({
+                startTime: times[i],
+                endTime: times[i + 1],
+                index: i
+              });
+            }
+            return result;
+          })()
+        : [{ startTime: 0, endTime: videoDuration, index: 0 }];
+      onSplit(shots, currentVideoUrl);
     }
     onClose();
   };
 
-  // 计算将生成的分镜数量
   const getShotCount = () => {
     if (splitPoints.length === 0) return 1;
     return splitPoints.length + 1;
@@ -693,10 +790,9 @@ export default function VideoSplitDialog({
       onClick={onClose}
     >
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
           <h2 className="text-lg font-semibold">视频分割为分镜</h2>
           <button
@@ -707,476 +803,431 @@ export default function VideoSplitDialog({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-5">
-          {/* 本地视频上传区域 */}
-          {!videoUrl && state === 'initial' && (
-            <div className="space-y-3">
-              <div className="text-sm text-slate-300">上传视频：</div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="video/*"
-                onChange={handleFileChange}
-                className="hidden"
-              />
+        <div className="flex-1 overflow-hidden flex">
+          <div className="w-36 border-r border-white/10 p-3 space-y-2 overflow-y-auto flex-shrink-0">
+            <div className="text-xs text-slate-400 mb-2">
+              已上传 ({uploadedVideos.length}/{maxUploads})
+            </div>
+            <div className="space-y-2">
+              {uploadedVideos.map(video => (
+                <div
+                  key={video.id}
+                  onClick={() => handleSelectVideo(video.id)}
+                  className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all ${
+                    selectedVideoId === video.id
+                      ? 'border-violet-500 ring-1 ring-violet-500/30'
+                      : 'border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  <div className="aspect-video bg-black relative">
+                    {video.thumbnail ? (
+                      <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <Video className="w-6 h-6 text-slate-600" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="px-2 py-1 text-xs text-slate-400 truncate bg-white/5">
+                    {video.name}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {uploadedVideos.length < maxUploads && (
               <button
                 onClick={handleUploadClick}
                 disabled={isUploading}
-                className="w-full p-4 rounded-xl border-2 border-slate-700 bg-slate-800/50 hover:border-violet-500 hover:bg-violet-500/10 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full p-3 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50"
               >
-                <div className="flex items-center justify-center gap-3">
-                  <Upload className="w-5 h-5 text-violet-400" />
-                  <span className="text-sm font-medium text-white">
-                    {isUploading ? '正在上传...' : '上传本地视频'}
-                  </span>
-                </div>
-                <div className="text-xs text-slate-400 mt-2 text-center">
-                  支持 MP4、WebM、MOV 等格式，将自动检测码率
-                </div>
+                <Upload className="w-4 h-4 mx-auto text-slate-400 mb-1" />
+                <div className="text-xs text-slate-400">上传视频</div>
               </button>
+            )}
 
-              {/* 上传进度 */}
-              {isUploading && (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
-                    <span className="text-sm text-slate-300">{uploadMessage}</span>
-                    <span className="text-sm text-violet-400 font-medium">{uploadProgress}%</span>
-                  </div>
-                  <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
-                      style={{ width: `${uploadProgress}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 已上传视频预览 */}
-          {videoUrl && state === 'initial' && (
-            <div className="space-y-2">
-              <div className="text-sm text-slate-300">已上传视频：</div>
-              <div className="relative rounded-xl overflow-hidden bg-black aspect-video max-h-[200px]">
-                <video
-                  src={videoUrl}
-                  className="w-full h-full object-contain"
-                  controls
-                />
-              </div>
-            </div>
-          )}
-
-          {/* 模式选择 */}
-          <div className="space-y-3">
-            <div className="text-sm text-slate-300">选择分割方式：</div>
-            <div className="flex gap-3">
-              <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                mode === 'manual' 
-                  ? 'border-violet-500 bg-violet-500/10' 
-                  : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-              }`}>
-                <input
-                  type="radio"
-                  name="splitMode"
-                  value="manual"
-                  checked={mode === 'manual'}
-                  onChange={() => setMode('manual')}
-                  disabled={state === 'processing' || state === 'completed'}
-                  className="hidden"
-                />
-                <div className="text-sm font-medium text-white mb-1">手动标记分割</div>
-                <div className="text-xs text-slate-400">自己播放视频，在时间轴上标记分割点</div>
-              </label>
-              <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                mode !== 'manual' 
-                  ? 'border-violet-500 bg-violet-500/10' 
-                  : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-              }`}>
-                <input
-                  type="radio"
-                  name="splitMode"
-                  value="ai"
-                  checked={mode !== 'manual'}
-                  onChange={() => setMode(aliyunConfigured ? 'aliyun' : 'ai_frame')}
-                  disabled={state === 'processing' || state === 'completed'}
-                  className="hidden"
-                />
-                <div className="text-sm font-medium text-white mb-1">AI 自动分割</div>
-                <div className="text-xs text-slate-400">人工智能自动识别镜头切换点</div>
-              </label>
-            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/*"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+            />
           </div>
-          
-          {/* AI 模式子选项 */}
-          {mode !== 'manual' && state === 'initial' && (
-            <div className="space-y-3 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
-              <div className="text-sm font-medium text-white">选择 AI 分析方式：</div>
-              <div className="space-y-2">
-                {aiModeOptions.map(option => (
-                  <label 
-                    key={option.id}
-                    className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                      !option.available 
-                        ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed' 
-                        : aiMode === option.id
-                          ? 'border-violet-500 bg-violet-500/10'
-                          : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="aiMode"
-                      value={option.id}
-                      checked={aiMode === option.id}
-                      onChange={() => option.available && setAiMode(option.id)}
-                      disabled={!option.available || state === 'processing'}
-                      className="hidden"
-                    />
-                    <div className="flex items-start gap-3">
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-white">{option.name}</div>
-                        <div className="text-xs text-slate-400 mt-1">{option.description}</div>
-                        <div className="flex gap-4 mt-2 text-xs">
-                          <span className="text-amber-400">费用：{option.cost}</span>
-                          <span className="text-emerald-400">精度：{option.accuracy}</span>
-                          <span className="text-sky-400">速度：{option.speed}</span>
-                        </div>
-                        {!option.available && (
-                          <div className="text-xs text-orange-400 mt-2">
-                            ⚠️ 未配置阿里云 AccessKey，请在设置中配置
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </label>
-                ))}
+
+          <div className="flex-1 overflow-y-auto p-6 space-y-5">
+            {error && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {error}
               </div>
-            </div>
-          )}
+            )}
 
-          {/* 错误提示 */}
-          {error && (
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              {error}
-            </div>
-          )}
-
-          {/* 手动标记模式 */}
-          {mode === 'manual' && state === 'initial' && (
-            <div className="space-y-5">
-              {/* 视频播放器 */}
-              <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
-                <video
-                  ref={videoRef}
-                  src={videoUrl}
-                  className="w-full h-full object-contain"
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={handleLoadedMetadata}
-                  onPlay={handlePlay}
-                  onPause={handlePause}
-                />
-                <button
-                  onClick={togglePlay}
-                  className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
-                >
-                  {isPlaying ? (
-                    <Pause className="w-12 h-12 text-white/80" />
-                  ) : (
-                    <Play className="w-12 h-12 text-white/80" />
-                  )}
-                </button>
-              </div>
-
-              {/* 时间轴 */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-slate-300">时间轴：</span>
-                  <span className="text-sm text-slate-400">
-                    {formatTime(currentTime)} / {formatTime(videoDuration)}
+            {isUploading && (
+              <div className="space-y-2 p-4 rounded-xl bg-violet-500/10 border border-violet-500/30">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+                  <span className="text-sm text-slate-300">
+                    {totalUploadCount > 1 ? `上传中 (${currentUploadIndex}/${totalUploadCount})：` : ''}
+                    {uploadMessage}
                   </span>
+                  <span className="text-sm text-violet-400 font-medium ml-auto">{uploadProgress}%</span>
                 </div>
-                <div
-                  ref={timelineRef}
-                  className="relative h-12 bg-white/10 rounded-lg cursor-pointer"
-                  onClick={handleTimelineClick}
-                >
-                  {/* 进度条 */}
+                <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                   <div
-                    className="absolute top-0 left-0 h-full bg-violet-500/20 rounded-lg"
-                    style={{ width: `${(currentTime / videoDuration) * 100}%` }}
-                  />
-                  {/* 分割点 */}
-                  {splitPoints.map(point => (
-                    <div
-                      key={point.id}
-                      className="absolute top-0 w-1 h-full bg-violet-500 cursor-ew-resize z-10"
-                      style={{ left: `${(point.time / videoDuration) * 100}%` }}
-                      onMouseDown={e => handleTimelineMouseDown(e, point.id)}
-                    >
-                      <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-4 h-4 bg-violet-500 rounded-full border-2 border-white shadow-lg" />
-                    </div>
-                  ))}
-                  {/* 当前播放位置 */}
-                  <div
-                    className="absolute top-0 w-0.5 h-full bg-white z-20"
-                    style={{ left: `${(currentTime / videoDuration) * 100}%` }}
+                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+                    style={{ width: `${uploadProgress}%` }}
                   />
                 </div>
               </div>
+            )}
 
-              {/* 操作按钮 */}
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={addSplitPoint}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 text-sm transition"
-                >
-                  <Plus className="w-4 h-4" />
-                  添加分割点
-                </button>
-                <button
-                  onClick={clearAllSplitPoints}
-                  disabled={splitPoints.length === 0}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  清除全部
-                </button>
+            {!currentVideoUrl && !isUploading && (
+              <div className="text-center py-12 text-slate-500">
+                <Video className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                <p className="text-sm">请从左侧上传视频，或选择已上传的视频</p>
               </div>
+            )}
 
-              {/* 分割点信息 */}
-              <div className="text-sm text-slate-400">
-                已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
-                <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
-              </div>
-
-              {/* 分割点列表 */}
-              {splitPoints.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {splitPoints.map((point, idx) => (
-                    <div
-                      key={point.id}
-                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
-                    >
-                      <span className="text-slate-400">#{idx + 1}</span>
-                      <span className="text-white">{formatTime(point.time)}</span>
-                      <button
-                        onClick={() => removeSplitPoint(point.id)}
-                        className="text-slate-500 hover:text-red-400 transition"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* AI 自动分割模式 - 初始状态 */}
-          {mode !== 'manual' && state === 'initial' && (
-            <div className="py-4">
-              {/* 警告提示 */}
-              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3">
-                <div className="flex items-center gap-2 text-amber-300 font-medium">
-                  <AlertTriangle className="w-5 h-5" />
-                  <span>AI自动分割提示</span>
-                </div>
-                <ul className="space-y-2 text-sm text-amber-200/80 list-disc list-inside">
-                  <li>处理时间根据视频时长约 30秒 ~ 5分钟</li>
-                  <li>根据选择的模型不同，费用有所差异</li>
-                  <li>分割结果可能需要手动调整</li>
-                  <li className="text-amber-100">
-                    <span className="font-medium">建议</span>先使用 AI 自动分割获得初步结果，再手动微调以提高效率
-                  </li>
-                </ul>
-              </div>
-
-              {/* 附加信息 */}
-              <div className="flex items-start gap-2 mt-4 text-xs text-slate-500">
-                <Info className="w-4 h-4 mt-0.5 shrink-0" />
-                <span>AI会自动分析视频的关键帧和场景转换，识别可能的镜头边界</span>
-              </div>
-            </div>
-          )}
-
-          {/* 处理中状态 */}
-          {state === 'processing' && (
-            <div className="py-8 text-center">
-              <div className="flex items-center justify-center gap-3 mb-6">
-                <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
-                <span className="text-base text-slate-200">正在分割视频...</span>
-                <span className="text-base text-violet-400 font-medium">{progress}%</span>
-              </div>
-
-              {/* 进度条 */}
-              <div className="h-2 rounded-full bg-white/10 overflow-hidden mb-4">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-
-              <p className="text-sm text-slate-400 mb-2">当前阶段：{currentPhase}</p>
-              {detectedShots > 0 && (
-                <p className="text-sm text-slate-400 mb-6">已识别 {detectedShots} 个镜头</p>
-              )}
-
-              <p className="text-xs text-slate-500 mb-8">请勿关闭页面</p>
-
-              <button
-                onClick={handleCancel}
-                className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
-              >
-                取消处理
-              </button>
-            </div>
-          )}
-
-          {/* 完成状态 */}
-          {state === 'completed' && (
-            <div className="py-4 space-y-5">
-              {/* 成功提示 */}
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="w-6 h-6 text-green-400" />
-                <div>
-                  <h3 className="text-base font-semibold text-white">分割完成！</h3>
-                  <p className="text-sm text-slate-400">
-                    已生成 {sceneCount} 个分镜片段
-                  </p>
-                </div>
-              </div>
-
-              {/* 费用信息 */}
-              {estimatedCost > 0 && (
-                <div className="flex items-center justify-between p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                  <span className="text-sm text-slate-300">预估费用：</span>
-                  <span className="text-base font-semibold text-green-400">¥{estimatedCost.toFixed(2)}</span>
-                </div>
-              )}
-
-              {/* 提示 */}
-              <p className="text-sm text-slate-400">可拖动调整分割点，点击缩略图跳转到对应位置</p>
-
-              {/* 分镜缩略图预览 */}
-              {videoDuration > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-400">分镜预览</span>
-                    {generatingThumbs && (
-                      <span className="text-slate-500 flex items-center gap-1">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        生成缩略图中...
-                      </span>
-                    )}
+            {currentVideoUrl && (
+              <>
+                <div className="space-y-3">
+                  <div className="text-sm text-slate-300">选择分割方式：</div>
+                  <div className="flex gap-3">
+                    <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                      mode === 'manual' 
+                        ? 'border-violet-500 bg-violet-500/10' 
+                        : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="splitMode"
+                        value="manual"
+                        checked={mode === 'manual'}
+                        onChange={() => setMode('manual')}
+                        disabled={state === 'processing' || state === 'completed'}
+                        className="hidden"
+                      />
+                      <div className="text-sm font-medium text-white mb-1">手动标记分割</div>
+                      <div className="text-xs text-slate-400">自己播放视频，在时间轴上标记分割点</div>
+                    </label>
+                    <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                      mode !== 'manual' 
+                        ? 'border-violet-500 bg-violet-500/10' 
+                        : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="splitMode"
+                        value="ai"
+                        checked={mode !== 'manual'}
+                        onChange={() => setMode(aliyunConfigured ? 'aliyun' : 'ai_frame')}
+                        disabled={state === 'processing' || state === 'completed'}
+                        className="hidden"
+                      />
+                      <div className="text-sm font-medium text-white mb-1">AI 自动分割</div>
+                      <div className="text-xs text-slate-400">人工智能自动识别镜头切换点</div>
+                    </label>
                   </div>
-                  <div className="flex gap-2 overflow-x-auto pb-2">
-                    {(() => {
-                      const shotTimes = [0, ...splitPoints.map(p => p.time)];
-                      return shotTimes.map((time, idx) => {
-                        const endTime = idx < splitPoints.length ? splitPoints[idx].time : videoDuration;
-                        const thumbKey = `shot_${idx}`;
-                        return (
-                          <div
-                            key={idx}
-                            className="shrink-0 w-36 space-y-1 cursor-pointer group"
-                            onClick={() => {
-                              if (videoRef.current) {
-                                videoRef.current.currentTime = time;
-                              }
-                            }}
-                          >
-                            <div className="relative aspect-video rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-violet-400/50 transition">
-                              {shotThumbnails[thumbKey] ? (
-                                <img
-                                  src={shotThumbnails[thumbKey]}
-                                  alt={`分镜 ${idx + 1}`}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                  <Loader2 className="w-5 h-5 text-slate-500 animate-spin" />
-                                </div>
-                              )}
-                              <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-xs text-white">
-                                #{idx + 1}
+                </div>
+
+                {mode !== 'manual' && state === 'initial' && (
+                  <div className="space-y-3 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
+                    <div className="text-sm font-medium text-white">选择 AI 分析方式：</div>
+                    <div className="space-y-2">
+                      {[
+                        {
+                          id: 'ai_frame' as const,
+                          name: 'AI 抽帧分析',
+                          description: '抽取视频关键帧，通过多模态大模型分析镜头切换点',
+                          cost: '约 ¥0.3-0.8 / 5分钟',
+                          accuracy: '⭐⭐⭐⭐ 较好',
+                          speed: '约 30秒-2分钟',
+                          available: true
+                        },
+                        {
+                          id: 'aliyun' as const,
+                          name: '阿里云视频拆条',
+                          description: '阿里云视觉智能平台专业视频分析',
+                          cost: '约 ¥0.5-2.5 / 5分钟',
+                          accuracy: '⭐⭐⭐⭐⭐ 精准',
+                          speed: '约 1-3分钟',
+                          available: aliyunConfigured
+                        }
+                      ].map(option => (
+                        <label 
+                          key={option.id}
+                          className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
+                            !option.available 
+                              ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed' 
+                              : aiMode === option.id
+                                ? 'border-violet-500 bg-violet-500/10'
+                                : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="aiMode"
+                            value={option.id}
+                            checked={aiMode === option.id}
+                            onChange={() => option.available && setAiMode(option.id)}
+                            disabled={!option.available || state === 'processing'}
+                            className="hidden"
+                          />
+                          <div className="flex items-start gap-3">
+                            <div className="flex-1">
+                              <div className="text-sm font-medium text-white">{option.name}</div>
+                              <div className="text-xs text-slate-400 mt-1">{option.description}</div>
+                              <div className="flex gap-4 mt-2 text-xs">
+                                <span className="text-amber-400">费用：{option.cost}</span>
+                                <span className="text-emerald-400">精度：{option.accuracy}</span>
+                                <span className="text-sky-400">速度：{option.speed}</span>
                               </div>
                             </div>
-                            <div className="text-xs text-slate-400 text-center">
-                              {formatTime(time)} - {formatTime(endTime)}
-                            </div>
                           </div>
-                        );
-                      });
-                    })()}
-                  </div>
-                </div>
-              )}
-
-              {/* 时间轴预览 */}
-              {videoDuration > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-400">时间轴预览</span>
-                    <span className="text-slate-500">{formatTime(videoDuration)}</span>
-                  </div>
-                  <div className="relative h-8 bg-white/10 rounded-lg">
-                    {/* 分割点 */}
-                    {splitPoints.map(point => (
-                      <div
-                        key={point.id}
-                        className="absolute top-0 w-1 h-full bg-violet-500 cursor-ew-resize z-10"
-                        style={{ left: `${(point.time / videoDuration) * 100}%` }}
-                        onMouseDown={e => handleTimelineMouseDown(e, point.id)}
-                      >
-                        <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-violet-500 rounded-full border-2 border-white shadow-lg" />
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* 分割点列表（可删除） */}
-                  {splitPoints.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                      {splitPoints.map((point, idx) => (
-                        <div
-                          key={point.id}
-                          className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
-                        >
-                          <span className="text-slate-400">#{idx + 1}</span>
-                          <span className="text-white">{formatTime(point.time)}</span>
-                          <button
-                            onClick={() => removeSplitPoint(point.id)}
-                            className="text-slate-500 hover:text-red-400 transition"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                        </label>
                       ))}
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          {/* 隐藏的 video 和 canvas，用于生成缩略图 */}
-          {videoUrl && (
-            <div className="hidden">
-              <video
-                ref={thumbVideoRef}
-                src={videoUrl}
-                crossOrigin="anonymous"
-                muted
-                playsInline
-              />
-              <canvas ref={thumbCanvasRef} />
-            </div>
-          )}
+                  </div>
+                )}
+
+                {mode === 'manual' && state === 'initial' && (
+                  <div className="space-y-5">
+                    <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
+                      <video
+                        ref={videoRef}
+                        src={currentVideoUrl}
+                        className="w-full h-full object-contain"
+                        onTimeUpdate={handleTimeUpdate}
+                        onLoadedMetadata={handleLoadedMetadata}
+                        onPlay={handlePlay}
+                        onPause={handlePause}
+                      />
+                      <button
+                        onClick={togglePlay}
+                        className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
+                      >
+                        {isPlaying ? (
+                          <Pause className="w-12 h-12 text-white/80" />
+                        ) : (
+                          <Play className="w-12 h-12 text-white/80" />
+                        )}
+                      </button>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm text-slate-300">时间轴：</span>
+                        <span className="text-sm text-slate-400">
+                          {formatTime(currentTime)} / {formatTime(videoDuration)}
+                        </span>
+                      </div>
+                      <div
+                        ref={timelineRef}
+                        className="relative h-12 bg-white/10 rounded-lg cursor-pointer"
+                        onClick={handleTimelineClick}
+                      >
+                        <div
+                          className="absolute top-0 left-0 h-full bg-violet-500/20 rounded-lg"
+                          style={{ width: `${(currentTime / videoDuration) * 100}%` }}
+                        />
+                        {splitPoints.map(point => (
+                          <div
+                            key={point.id}
+                            className="absolute top-0 w-1 h-full bg-violet-500 cursor-ew-resize z-10"
+                            style={{ left: `${(point.time / videoDuration) * 100}%` }}
+                            onMouseDown={e => handleTimelineMouseDown(e, point.id)}
+                          >
+                            <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-4 h-4 bg-violet-500 rounded-full border-2 border-white shadow-lg" />
+                          </div>
+                        ))}
+                        <div
+                          className="absolute top-0 w-0.5 h-full bg-white z-20"
+                          style={{ left: `${(currentTime / videoDuration) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={addSplitPoint}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 text-sm transition"
+                      >
+                        <Plus className="w-4 h-4" />
+                        添加分割点
+                      </button>
+                      <button
+                        onClick={clearAllSplitPoints}
+                        disabled={splitPoints.length === 0}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        清除全部
+                      </button>
+                    </div>
+
+                    <div className="text-sm text-slate-400">
+                      已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
+                      <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
+                    </div>
+
+                    {splitPoints.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {splitPoints.map((point, idx) => (
+                          <div
+                            key={point.id}
+                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
+                          >
+                            <span className="text-slate-400">#{idx + 1}</span>
+                            <span className="text-white">{formatTime(point.time)}</span>
+                            <button
+                              onClick={() => removeSplitPoint(point.id)}
+                              className="text-slate-500 hover:text-red-400 transition"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {mode !== 'manual' && state === 'initial' && (
+                  <div className="py-4">
+                    <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3">
+                      <div className="flex items-center gap-2 text-amber-300 font-medium">
+                        <AlertTriangle className="w-5 h-5" />
+                        <span>AI自动分割提示</span>
+                      </div>
+                      <ul className="space-y-2 text-sm text-amber-200/80 list-disc list-inside">
+                        <li>处理时间根据视频时长约 30秒 ~ 5分钟</li>
+                        <li>根据选择的模型不同，费用有所差异</li>
+                        <li>分割结果可能需要手动调整</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                {state === 'processing' && (
+                  <div className="py-8 text-center">
+                    <div className="flex items-center justify-center gap-3 mb-6">
+                      <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
+                      <span className="text-base text-slate-200">正在分割视频...</span>
+                      <span className="text-base text-violet-400 font-medium">{progress}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-white/10 overflow-hidden mb-4">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-500"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                    <p className="text-sm text-slate-400 mb-2">当前阶段：{currentPhase}</p>
+                    {detectedShots > 0 && (
+                      <p className="text-sm text-slate-400 mb-6">已识别 {detectedShots} 个镜头</p>
+                    )}
+                    <button
+                      onClick={handleCancel}
+                      className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
+                    >
+                      取消处理
+                    </button>
+                  </div>
+                )}
+
+                {state === 'completed' && (
+                  <div className="py-4 space-y-5">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle2 className="w-6 h-6 text-green-400" />
+                      <div>
+                        <h3 className="text-base font-semibold text-white">分割完成！</h3>
+                        <p className="text-sm text-slate-400">
+                          已生成 {sceneCount} 个分镜片段
+                        </p>
+                      </div>
+                    </div>
+
+                    {estimatedCost > 0 && (
+                      <div className="flex items-center justify-between p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                        <span className="text-sm text-slate-300">预估费用：</span>
+                        <span className="text-base font-semibold text-green-400">¥{estimatedCost.toFixed(2)}</span>
+                      </div>
+                    )}
+
+                    {videoDuration > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-slate-400">分镜预览</span>
+                          {generatingThumbs && (
+                            <span className="text-slate-500 flex items-center gap-1">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              生成缩略图中...
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex gap-2 overflow-x-auto pb-2">
+                          {(() => {
+                            const shotTimes = [0, ...splitPoints.map(p => p.time)];
+                            return shotTimes.map((time, idx) => {
+                              const endTime = idx < splitPoints.length ? splitPoints[idx].time : videoDuration;
+                              const thumbKey = `shot_${idx}`;
+                              return (
+                                <div
+                                  key={idx}
+                                  className="shrink-0 w-36 space-y-1 cursor-pointer group"
+                                  onClick={() => {
+                                    if (videoRef.current) {
+                                      videoRef.current.currentTime = time;
+                                    }
+                                  }}
+                                >
+                                  <div className="relative aspect-video rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-violet-400/50 transition">
+                                    {shotThumbnails[thumbKey] ? (
+                                      <img
+                                        src={shotThumbnails[thumbKey]}
+                                        alt={`分镜 ${idx + 1}`}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center">
+                                        <Loader2 className="w-5 h-5 text-slate-500 animate-spin" />
+                                      </div>
+                                    )}
+                                    <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-xs text-white">
+                                      #{idx + 1}
+                                    </div>
+                                  </div>
+                                  <div className="text-xs text-slate-400 text-center">
+                                    {formatTime(time)} - {formatTime(endTime)}
+                                  </div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {currentVideoUrl && (
+                  <div className="hidden">
+                    <video
+                      ref={thumbVideoRef}
+                      src={currentVideoUrl}
+                      crossOrigin="anonymous"
+                      muted
+                      playsInline
+                    />
+                    <canvas ref={thumbCanvasRef} />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
-        {/* Footer */}
         <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
           <button
             onClick={onClose}
@@ -1184,10 +1235,10 @@ export default function VideoSplitDialog({
           >
             取消
           </button>
-          {state === 'initial' && (
+          {state === 'initial' && currentVideoUrl && (
             <button
               onClick={handleStartSplit}
-              disabled={!videoUrl || (mode === 'manual' && splitPoints.length === 0)}
+              disabled={!currentVideoUrl || (mode === 'manual' && splitPoints.length === 0)}
               className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               开始分割
@@ -1204,7 +1255,6 @@ export default function VideoSplitDialog({
         </div>
       </div>
 
-      {/* 压缩选择对话框 */}
       <VideoCompressionDialog
         isOpen={pendingCompressionVideo !== null}
         onClose={() => {

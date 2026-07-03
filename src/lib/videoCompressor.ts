@@ -21,19 +21,60 @@ export type VideoBitrateInfo = {
   duration: number | null;
   width?: number;
   height?: number;
-  resolution?: '1080p' | '720p' | '480p' | 'other';
+  resolution?: '1080p' | '720p' | '480p';
 };
 
-// 动态目标码率配置
-const TARGET_BITRATE_CONFIG = {
+// 默认码率配置（作为备用）
+const DEFAULT_BITRATE_CONFIG = {
   '1080p': 3000,  // 1080p 及以上
-  '720p': 2000,    // 720p
-  '480p': 1000,    // 480p
-  'other': 1500    // 其他分辨率
+  '720p': 2000,    // 720p 及以上
+  '480p': 1000     // 480p 及以上
 };
 
-// 默认码率（兼容旧配置）
-const DEFAULT_TARGET_BITRATE_KBPS = 3000;
+// 缓存的码率配置（从 API 获取）
+let cachedBitrateConfig: Record<string, number> | null = null;
+let configFetchPromise: Promise<Record<string, number>> | null = null;
+
+/**
+ * 从 API 获取码率配置
+ */
+async function fetchBitrateConfig(): Promise<Record<string, number>> {
+  if (cachedBitrateConfig) {
+    return cachedBitrateConfig;
+  }
+
+  if (configFetchPromise) {
+    return configFetchPromise;
+  }
+
+  configFetchPromise = (async () => {
+    try {
+      const API_BASE_URL = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_URL || '');
+      const res = await fetch(`${API_BASE_URL}/api/video2/settings`);
+      if (!res.ok) {
+        console.warn('[videoCompressor] 获取码率配置失败，使用默认配置');
+        return DEFAULT_BITRATE_CONFIG;
+      }
+
+      const data = await res.json();
+      const config = {
+        '1080p': data.video_target_bitrate_1080p || DEFAULT_BITRATE_CONFIG['1080p'],
+        '720p': data.video_target_bitrate_720p || DEFAULT_BITRATE_CONFIG['720p'],
+        '480p': data.video_target_bitrate_480p || DEFAULT_BITRATE_CONFIG['480p']
+      };
+
+      cachedBitrateConfig = config;
+      return config;
+    } catch (err) {
+      console.warn('[videoCompressor] 获取码率配置失败，使用默认配置:', err);
+      return DEFAULT_BITRATE_CONFIG;
+    } finally {
+      configFetchPromise = null;
+    }
+  })();
+
+  return configFetchPromise;
+}
 
 const FFMPEG_BASE = '/ffmpeg';
 const UMD_SCRIPT_URL = `${FFMPEG_BASE}/ffmpeg.umd.js`;
@@ -44,18 +85,55 @@ let ffmpegWasmLoaded = false;
 let ffmpegWasmLoading: Promise<boolean> | null = null;
 
 /**
- * 根据分辨率获取目标码率
+ * 根据分辨率阶梯判断获取分辨率类型
+ * 规则：≥1080P 为 1080p，≥720P 为 720p，≥480P 为 480p
  */
-export function getTargetBitrate(resolution: string | undefined): number {
-  const res = resolution || 'other';
-  return TARGET_BITRATE_CONFIG[res as keyof typeof TARGET_BITRATE_CONFIG] || DEFAULT_TARGET_BITRATE_KBPS;
+export function getResolutionTier(height: number | undefined): '1080p' | '720p' | '480p' {
+  if (!height) return '480p'; // 默认最低阶梯
+  if (height >= 1080) return '1080p';
+  if (height >= 720) return '720p';
+  return '480p';
 }
 
 /**
- * 根据分辨率判断是否需要压缩
- * 注意：此函数不再提供"跳过"选项，高码率视频必须压缩
+ * 根据分辨率阶梯获取目标码率（异步版本，从 API 获取）
  */
-export function needsCompression(bitrateKbps: number, resolution: string | undefined): boolean {
+export async function getTargetBitrateAsync(resolution: '1080p' | '720p' | '480p'): Promise<number> {
+  const config = await fetchBitrateConfig();
+  return config[resolution] || DEFAULT_BITRATE_CONFIG[resolution];
+}
+
+/**
+ * 根据分辨率阶梯获取目标码率（同步版本，使用缓存或默认值）
+ * 注意：推荐使用异步版本 getTargetBitrateAsync
+ */
+export function getTargetBitrate(resolution: '1080p' | '720p' | '480p' | undefined): number {
+  const res = resolution || '480p';
+  // 如果缓存存在，使用缓存值；否则使用默认值
+  if (cachedBitrateConfig && cachedBitrateConfig[res]) {
+    return cachedBitrateConfig[res];
+  }
+  return DEFAULT_BITRATE_CONFIG[res];
+}
+
+/**
+ * 判断是否需要压缩（异步版本，从 API 获取码率配置）
+ */
+export async function needsCompressionAsync(
+  bitrateKbps: number,
+  resolution: '1080p' | '720p' | '480p'
+): Promise<boolean> {
+  const targetBitrate = await getTargetBitrateAsync(resolution);
+  return bitrateKbps > targetBitrate;
+}
+
+/**
+ * 判断是否需要压缩（同步版本，使用缓存或默认值）
+ */
+export function needsCompression(
+  bitrateKbps: number,
+  resolution: '1080p' | '720p' | '480p' | undefined
+): boolean {
   const targetBitrate = getTargetBitrate(resolution);
   return bitrateKbps > targetBitrate;
 }
@@ -75,15 +153,10 @@ export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo
       video.load();
       document.body.removeChild(video);
       URL.revokeObjectURL(url);
-      
-      // 根据高度判断分辨率
-      let resolution: '1080p' | '720p' | '480p' | 'other' = 'other';
-      if (height) {
-        if (height >= 1080) resolution = '1080p';
-        else if (height >= 720) resolution = '720p';
-        else if (height >= 480) resolution = '480p';
-      }
-      
+
+      // 使用分辨率阶梯判断逻辑
+      const resolution = getResolutionTier(height);
+
       resolve({ bitrateKbps, duration, width, height, resolution });
     };
 
@@ -138,7 +211,7 @@ async function fetchAsBlobURL(url: string): Promise<string> {
 
 export async function compressVideoInBrowser(
   file: File,
-  targetResolution?: '1080p' | '720p' | '480p' | 'other',
+  targetResolution?: '1080p' | '720p' | '480p',
   onProgress?: (stage: 'loading' | 'compressing', progress: number) => void
 ): Promise<{ success: true; file: File } | { success: false; message: string }> {
   try {
@@ -169,8 +242,9 @@ export async function compressVideoInBrowser(
     onProgress?.('loading', 100);
     onProgress?.('compressing', 0);
 
-    // 根据目标分辨率获取目标码率
-    const targetBitrate = getTargetBitrate(targetResolution);
+    // 根据目标分辨率获取目标码率（优先使用异步版本）
+    const resolution = targetResolution || '480p';
+    const targetBitrate = await getTargetBitrateAsync(resolution);
     const inputFileName = 'input' + getFileExtension(file.name);
     const outputFileName = 'output.mp4';
 

@@ -2,6 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Upload, Sparkles } from 'lucide-react';
 import type { Shot } from '../../lib/types';
 
+interface FieldSuggestions {
+  actors?: string[];
+  props?: string[];
+  locations?: string[];
+  focalLengths?: string[];
+  lightings?: string[];
+  costumes?: string[];
+}
+
 interface AddShotDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -10,11 +19,12 @@ interface AddShotDialogProps {
   onAdd?: (shot: Shot) => void;
   onUploadMedia?: () => void;
   onAiGenerate?: () => void;
+  fieldSuggestions?: FieldSuggestions;
 }
 
-const SHOT_TYPES = ['远景', '全景', '中景', '近景', '特写', '大特写'];
-const SHOT_ANGLES = ['平拍', '俯拍', '仰拍', '主观视角', '客观视角'];
-const CAMERA_MOVEMENTS = ['固定', '推', '拉', '摇', '移', '跟', '升降', '手持', '甩'];
+const SHOT_TYPES = ['大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写'];
+const SHOT_ANGLES = ['平拍', '俯拍', '仰拍', '正拍', '侧拍', '反打', '鸟瞰', '主观视角', '客观视角'];
+const CAMERA_MOVEMENTS = ['固定', '推', '拉', '摇', '移', '跟', '升降', '旋转', '环绕', '变焦', '手持', '甩'];
 
 export default function AddShotDialog({
   isOpen,
@@ -23,11 +33,13 @@ export default function AddShotDialog({
   sceneId,
   onAdd,
   onUploadMedia,
-  onAiGenerate
+  onAiGenerate,
+  fieldSuggestions = {}
 }: AddShotDialogProps) {
   const [formData, setFormData] = useState({
     sceneContent: '',
     actors: '',
+    costume: '',
     props: '',
     location: '',
     focalLength: '',
@@ -41,7 +53,7 @@ export default function AddShotDialog({
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -49,6 +61,7 @@ export default function AddShotDialog({
       setFormData({
         sceneContent: '',
         actors: '',
+        costume: '',
         props: '',
         location: '',
         focalLength: '',
@@ -134,7 +147,7 @@ export default function AddShotDialog({
     }
   };
 
-  const handleMediaButtonClick = () => {
+  const handleUploadClick = () => {
     if (onUploadMedia) {
       onUploadMedia();
     } else {
@@ -180,7 +193,7 @@ export default function AddShotDialog({
               画面内容
             </label>
             <textarea
-              ref={inputRef as any}
+              ref={inputRef}
               name="sceneContent"
               value={formData.sceneContent}
               onChange={handleChange}
@@ -191,7 +204,7 @@ export default function AddShotDialog({
           </div>
 
           {/* 其他字段（可选） */}
-          <div className="text-sm text-slate-400 -mb-3">其他字段（可选）：</div>
+          <div className="text-sm text-slate-400 mb-2">其他字段（可选）：</div>
 
           <div className="grid grid-cols-2 gap-4">
             {/* 演员 */}
@@ -203,8 +216,14 @@ export default function AddShotDialog({
                 value={formData.actors}
                 onChange={handleChange}
                 placeholder="演员"
+                list="actors-suggestions"
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
               />
+              <datalist id="actors-suggestions">
+                {fieldSuggestions.actors?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
             </div>
 
             {/* 道具 */}
@@ -216,8 +235,33 @@ export default function AddShotDialog({
                 value={formData.props}
                 onChange={handleChange}
                 placeholder="道具"
+                list="props-suggestions"
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
               />
+              <datalist id="props-suggestions">
+                {fieldSuggestions.props?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
+            </div>
+
+            {/* 服饰 */}
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">服饰</label>
+              <input
+                type="text"
+                name="costume"
+                value={formData.costume}
+                onChange={handleChange}
+                placeholder="服饰"
+                list="costumes-suggestions"
+                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
+              />
+              <datalist id="costumes-suggestions">
+                {fieldSuggestions.costumes?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
             </div>
 
             {/* 地点 */}
@@ -229,8 +273,14 @@ export default function AddShotDialog({
                 value={formData.location}
                 onChange={handleChange}
                 placeholder="地点"
+                list="locations-suggestions"
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
               />
+              <datalist id="locations-suggestions">
+                {fieldSuggestions.locations?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
             </div>
 
             {/* 焦段 */}
@@ -242,8 +292,33 @@ export default function AddShotDialog({
                 value={formData.focalLength}
                 onChange={handleChange}
                 placeholder="如 35mm"
+                list="focalLengths-suggestions"
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
               />
+              <datalist id="focalLengths-suggestions">
+                {fieldSuggestions.focalLengths?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
+            </div>
+
+            {/* 灯光 */}
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">灯光</label>
+              <input
+                type="text"
+                name="lighting"
+                value={formData.lighting}
+                onChange={handleChange}
+                placeholder="灯光"
+                list="lightings-suggestions"
+                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
+              />
+              <datalist id="lightings-suggestions">
+                {fieldSuggestions.lightings?.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
             </div>
 
             {/* 景别 */}
@@ -255,7 +330,7 @@ export default function AddShotDialog({
                 onChange={handleChange}
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm appearance-none cursor-pointer hover:bg-white/10 transition focus:outline-none focus:border-violet-500/50"
               >
-                <option value="" className="bg-slate-800">远景</option>
+                <option value="" className="bg-slate-800">请选择</option>
                 {SHOT_TYPES.map(type => (
                   <option key={type} value={type} className="bg-slate-800">{type}</option>
                 ))}
@@ -271,7 +346,7 @@ export default function AddShotDialog({
                 onChange={handleChange}
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm appearance-none cursor-pointer hover:bg-white/10 transition focus:outline-none focus:border-violet-500/50"
               >
-                <option value="" className="bg-slate-800">平拍</option>
+                <option value="" className="bg-slate-800">请选择</option>
                 {SHOT_ANGLES.map(angle => (
                   <option key={angle} value={angle} className="bg-slate-800">{angle}</option>
                 ))}
@@ -287,37 +362,11 @@ export default function AddShotDialog({
                 onChange={handleChange}
                 className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm appearance-none cursor-pointer hover:bg-white/10 transition focus:outline-none focus:border-violet-500/50"
               >
-                <option value="" className="bg-slate-800">固定</option>
+                <option value="" className="bg-slate-800">请选择</option>
                 {CAMERA_MOVEMENTS.map(move => (
                   <option key={move} value={move} className="bg-slate-800">{move}</option>
                 ))}
               </select>
-            </div>
-
-            {/* 灯光 */}
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">灯光</label>
-              <input
-                type="text"
-                name="lighting"
-                value={formData.lighting}
-                onChange={handleChange}
-                placeholder="灯光"
-                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
-              />
-            </div>
-
-            {/* 旁白 */}
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">旁白</label>
-              <input
-                type="text"
-                name="narration"
-                value={formData.narration}
-                onChange={handleChange}
-                placeholder="旁白"
-                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
-              />
             </div>
 
             {/* 预估时长 */}
@@ -335,36 +384,52 @@ export default function AddShotDialog({
             </div>
           </div>
 
+          {/* 旁白 */}
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">旁白</label>
+            <textarea
+              name="narration"
+              value={formData.narration}
+              onChange={handleChange}
+              placeholder="旁白或台词"
+              rows={3}
+              className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition resize-none"
+            />
+          </div>
+
           {/* 备注 */}
           <div>
             <label className="block text-xs text-slate-400 mb-1">备注</label>
-            <input
-              type="text"
+            <textarea
               name="notes"
               value={formData.notes}
               onChange={handleChange}
               placeholder="备注"
-              className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition"
+              rows={3}
+              className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500/50 transition resize-none"
             />
           </div>
 
           {/* 分隔线 */}
           <div className="border-t border-dashed border-white/10" />
 
-          {/* 上传或AI生成参考画面 */}
-          <div className="rounded-2xl border-2 border-dashed border-white/15 bg-white/[0.02] p-5 text-center">
+          {/* 上传和AI生成参考画面 */}
+          <div className="flex gap-3">
             <button
               type="button"
-              onClick={handleMediaButtonClick}
-              className="flex flex-col items-center gap-2 w-full"
+              onClick={handleUploadClick}
+              className="flex-1 py-3 rounded-2xl border border-white/15 bg-white/5 hover:bg-white/10 transition flex items-center justify-center gap-2 text-slate-200"
             >
-              <div className="w-12 h-12 rounded-full bg-violet-500/10 flex items-center justify-center">
-                <Upload className="w-5 h-5 text-violet-400" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-slate-200">上传或AI生成参考画面</p>
-                <p className="text-xs text-slate-500 mt-0.5">可选，不上传则创建空白分镜</p>
-              </div>
+              <Upload className="w-5 h-5" />
+              <span className="font-medium">上传参考画面</span>
+            </button>
+            <button
+              type="button"
+              onClick={onAiGenerate}
+              className="flex-1 py-3 rounded-2xl border border-dashed border-yellow-400/30 bg-yellow-500/10 hover:bg-yellow-500/20 transition flex items-center justify-center gap-2 text-yellow-200"
+            >
+              <Sparkles className="w-5 h-5" />
+              <span className="font-medium">AI 生成</span>
             </button>
             <input
               ref={fileInputRef}
@@ -374,18 +439,6 @@ export default function AddShotDialog({
               onChange={() => {}}
             />
           </div>
-
-          {/* AI生成按钮（如果提供回调） */}
-          {onAiGenerate && (
-            <button
-              type="button"
-              onClick={onAiGenerate}
-              className="w-full py-3 rounded-2xl border border-dashed border-yellow-400/30 bg-yellow-500/10 hover:bg-yellow-500/20 transition flex items-center justify-center gap-2 text-yellow-200"
-            >
-              <Sparkles className="w-5 h-5" />
-              <span className="font-medium">AI 生成参考画面</span>
-            </button>
-          )}
         </div>
 
         {/* Footer */}

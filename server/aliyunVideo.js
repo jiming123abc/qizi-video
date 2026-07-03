@@ -6,11 +6,12 @@ const VIDEORECOG_REGION = 'cn-shanghai';
 
 const MPS_ENDPOINT = 'https://mts.cn-shanghai.aliyuncs.com/';
 const MPS_REGION = 'cn-shanghai';
+const MPS_VERSION = '2014-06-18';
 
 function getAliyunCredentials() {
   return {
-    accessKeyId: process.env.OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID_DEV,
-    accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || process.env.OSS_ACCESS_KEY_SECRET_DEV,
+    accessKeyId: process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID_DEV || process.env.OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID_DEV,
+    accessKeySecret: process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET_DEV || process.env.OSS_ACCESS_KEY_SECRET || process.env.OSS_ACCESS_KEY_SECRET_DEV,
     ossBucket: process.env.OSS_BUCKET || process.env.OSS_BUCKET_DEV,
     ossRegion: process.env.OSS_REGION || process.env.OSS_REGION_DEV
   };
@@ -67,9 +68,11 @@ async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT
     Timestamp: timestamp
   };
 
-  // MPS API 不需要 Version 参数，VIDEORECOG API 需要
+  // MPS API 需要 Version 参数
   if (endpoint === VIDEORECOG_ENDPOINT) {
     commonParams.Version = VIDEORECOG_VERSION;
+  } else if (endpoint === MPS_ENDPOINT) {
+    commonParams.Version = MPS_VERSION;
   }
 
   const allParams = { ...commonParams, ...params };
@@ -246,16 +249,32 @@ function getOSSConfig() {
  * @param {number} height 视频高度
  * @returns {number} 目标码率（kbps）
  */
-function determineBitrate(width, height) {
-  const maxRes = Math.max(width, height);
+// 根据分辨率动态调整目标码率配置（默认值，可由外部配置覆盖）
+const DEFAULT_BITRATE_CONFIG = {
+  '1080p': 3000,  // 1080p 及以上
+  '720p': 2000,    // 720p
+  '480p': 1000     // 480p 及以下
+};
 
-  if (maxRes >= 1080) {
-    return 3000; // 1080p: 3000kbps
-  } else if (maxRes >= 720) {
-    return 2000; // 720p: 2000kbps
-  } else {
-    return 1000; // 480p/更低: 1000kbps
-  }
+function getResolutionFromMaxRes(maxRes) {
+  if (maxRes >= 1080) return '1080p';
+  if (maxRes >= 720) return '720p';
+  return '480p';
+}
+
+// 根据分辨率和外部传入的码率配置确定目标码率
+function determineBitrate(width, height, bitrateConfig = null) {
+  const maxRes = Math.max(width, height);
+  const resolution = getResolutionFromMaxRes(maxRes);
+
+  // 如果外部提供了配置，使用外部配置；否则使用默认配置
+  const config = bitrateConfig || DEFAULT_BITRATE_CONFIG;
+  return config[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
+}
+
+// 统一的码率阈值判断：原始码率 > 目标码率时需要压缩
+function shouldCompress(originalBitrateKbps, targetBitrateKbps) {
+  return originalBitrateKbps > targetBitrateKbps;
 }
 
 /**
@@ -453,5 +472,9 @@ module.exports = {
   submitTranscodeTask,
   getTranscodeResult,
   determineBitrate,
-  getOSSConfig
+  getOSSConfig,
+  // 统一码率配置
+  DEFAULT_BITRATE_CONFIG,
+  getResolutionFromMaxRes,
+  shouldCompress
 };

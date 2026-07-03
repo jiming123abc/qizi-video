@@ -57,6 +57,12 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [createLoading, setCreateLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteTaskId, setDeleteTaskId] = useState<string | null>(null);
+  const [deleteProgress, setDeleteProgress] = useState(0);
+  const [deleteTotalShots, setDeleteTotalShots] = useState(0);
+  const [deleteDeletedShots, setDeleteDeletedShots] = useState(0);
+  const [deleteStatus, setDeleteStatus] = useState<'idle' | 'deleting' | 'done' | 'error'>('idle');
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [projectStats, setProjectStats] = useState<Record<number, { done: number; pending: number; total: number }>>({});
 
@@ -208,9 +214,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
               url: r.url,
               title: r.title
             }));
-            if (next[projectId] === undefined) {
-              next[projectId] = refList;
-            }
+            next[projectId] = refList;
           }
           return next;
         });
@@ -317,18 +321,56 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleteLoading(true);
+    setDeleteStatus('deleting');
+    setDeleteProgress(0);
+    setDeleteDeletedShots(0);
+    setDeleteTotalShots(0);
+    setDeleteError(null);
     try {
       const res = await fetch(`/api/video2/projects/${deleteTarget.id}`, { method: 'DELETE' });
       const data = await res.json();
-      if (data.success) {
-        setProjects(prev => prev.filter(p => p.id !== deleteTarget.id));
-        setDeleteTarget(null);
-        showToast('项目已删除');
+      if (data.success && data.taskId) {
+        setDeleteTaskId(data.taskId);
+        const pollInterval = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`/api/video2/projects/delete/${data.taskId}`);
+            const pollData = await pollRes.json();
+            if (pollData.status === 'done') {
+              clearInterval(pollInterval);
+              setDeleteStatus('done');
+              setDeleteProgress(100);
+              setProjects(prev => prev.filter(p => p.id !== deleteTarget.id));
+              showToast('项目已删除');
+              setTimeout(() => {
+                setDeleteTarget(null);
+                setDeleteTaskId(null);
+                setDeleteStatus('idle');
+                setDeleteLoading(false);
+              }, 800);
+            } else if (pollData.status === 'error') {
+              clearInterval(pollInterval);
+              setDeleteStatus('error');
+              setDeleteError(pollData.error || '删除失败');
+              setDeleteLoading(false);
+              showToast(pollData.error || '删除失败', 'error');
+            } else {
+              setDeleteProgress(pollData.progress || 0);
+              setDeleteTotalShots(pollData.totalShots || 0);
+              setDeleteDeletedShots(pollData.deletedShots || 0);
+            }
+          } catch (pollErr) {
+            console.error('轮询删除进度失败:', pollErr);
+          }
+        }, 1000);
+      } else {
+        throw new Error(data.message || '删除失败');
       }
     } catch (e) {
       console.error('删除项目失败:', e);
-    } finally {
+      setDeleteStatus('error');
+      setDeleteError('删除失败，请检查网络连接');
       setDeleteLoading(false);
+      showToast('删除失败，请检查网络连接', 'error');
     }
   };
 
@@ -886,6 +928,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                           src={videoSrc}
                           className="w-full h-full object-cover cursor-pointer"
                           playsInline
+                          autoPlay
+                          muted
                           onClick={(e) => {
                             e.stopPropagation();
                             if (cardVideoRef.current) {
@@ -917,8 +961,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                       <img
                         src={mediaSrc}
                         alt={project.name}
-                        className="w-full h-full object-cover cursor-pointer"
-                        onClick={() => goToProject(project.id)}
+                        className="w-full h-full object-cover"
                         onError={(ev) => {
                           const img = ev.target as HTMLImageElement;
                           if (fallbackSrc && img.src !== fallbackSrc && img.src !== DEFAULT_COVER) {
@@ -934,7 +977,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                   {/* 底部渐变遮罩，增强文字对比度 */}
                   <div
                     className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/10 to-transparent"
-                    onClick={() => goToProject(project.id)}
                   />
 
                   {/* 视频条目：点击播放按钮在卡片内播放视频 */}
@@ -1163,7 +1205,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
       {/* 删除确认 */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !deleteLoading && setDeleteTarget(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !deleteLoading && deleteStatus !== 'deleting' && setDeleteTarget(null)}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="w-14 h-14 mx-auto rounded-full bg-red-500/15 border border-red-400/30 flex items-center justify-center mb-4">
               <Trash2 className="w-6 h-6 text-red-400" />
@@ -1171,22 +1213,47 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             <h2 className="text-center text-lg font-semibold mb-1.5">删除项目</h2>
             <p className="text-center text-sm text-slate-400 mb-1">确定要删除「{deleteTarget.name}」吗？</p>
             <p className="text-center text-xs text-slate-500 mb-5">{deleteTarget.videoCount} 个视频 · {formatSize(deleteTarget.totalSize)} — 删除后无法恢复</p>
-            <div className="flex items-center justify-center gap-3">
-              <button
-                onClick={() => setDeleteTarget(null)}
-                disabled={deleteLoading}
-                className="px-5 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={deleteLoading}
-                className="px-5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium disabled:opacity-50 transition"
-              >
-                {deleteLoading ? '删除中...' : '确认删除'}
-              </button>
-            </div>
+
+            {deleteStatus === 'deleting' && (
+              <div className="mb-5">
+                <div className="w-full h-3 rounded-full bg-white/10 overflow-hidden mb-2">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+                    style={{ width: `${deleteProgress}%` }}
+                  />
+                </div>
+                <p className="text-center text-xs text-slate-400">
+                  {deleteTotalShots > 0
+                    ? `已删除 ${deleteDeletedShots} / ${deleteTotalShots} 个分镜 · ${deleteProgress}%`
+                    : '准备删除...'}
+                </p>
+              </div>
+            )}
+
+            {deleteStatus === 'error' && (
+              <div className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-400/30">
+                <p className="text-center text-sm text-red-400">{deleteError || '删除失败'}</p>
+              </div>
+            )}
+
+            {deleteStatus !== 'deleting' && (
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={deleteLoading}
+                  className="px-5 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleteLoading}
+                  className="px-5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium disabled:opacity-50 transition"
+                >
+                  {deleteLoading ? '删除中...' : '确认删除'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1402,7 +1469,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[90] px-4 py-2.5 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl">
+        <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[90] px-6 py-3 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl">
           {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />}
           {toast.type === 'error' && <XCircle className="w-4 h-4 inline mr-2 text-red-400" />}
           {toast.type === 'info' && <Info className="w-4 h-4 inline mr-2 text-blue-400" />}

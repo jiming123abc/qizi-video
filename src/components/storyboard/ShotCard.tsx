@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
 import {
   Check,
@@ -15,16 +15,32 @@ import {
   Scissors,
   GripVertical,
   X,
-  Info
+  Info,
+  Loader2
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { MediaCarousel } from './MediaCarousel';
-import { getVideoPoster } from '../../lib/ossUtils';
+import AnalyzeShotDialog from '../ai/AnalyzeShotDialog';
+import { getVideoPoster, uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 
+interface FieldSuggestions {
+  location: string[];
+  actors: string[];
+  costume: string[];
+  props: string[];
+  shotType: string[];
+  focalLength: string[];
+  shotAngle: string[];
+  lighting: string[];
+  cameraMovement: string[];
+}
+
 interface ShotCardProps {
   shot: Shot;
+  projectId?: number;
+  fieldSuggestions?: FieldSuggestions;
   isSelected?: boolean;
   highlighted?: boolean;
   onSelect?: (shot: Shot) => void;
@@ -49,6 +65,41 @@ interface ShotCardProps {
   onVideoPause?: (shotId: number, mediaId: number) => void;
   playingVideoKey?: string;
   onVideoRefReady?: (key: string, ref: HTMLVideoElement | null) => void;
+  onDeleteMedia?: (shotId: number, mediaId: number) => void;
+  onOpenSettings?: () => void;
+}
+
+const SHOT_TYPES = ['大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写'];
+const SHOT_ANGLES = ['平拍', '俯拍', '仰拍', '正拍', '侧拍', '反打', '鸟瞰', '主观视角', '客观视角'];
+const CAMERA_MOVEMENTS = ['固定', '推', '拉', '摇', '移', '跟', '升降', '旋转', '环绕', '变焦', '手持', '甩'];
+
+// 行内下拉选择字段组件
+interface InlineSelectFieldProps {
+  label: string;
+  value: string;
+  options: string[];
+  onSave: (value: string) => void;
+  placeholder?: string;
+}
+
+function InlineSelectField({ label, value, options, onSave, placeholder = '请选择' }: InlineSelectFieldProps) {
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span className="text-xs text-slate-400 shrink-0">{label}：</span>
+      <select
+        value={value}
+        onChange={(e) => onSave(e.target.value)}
+        className="flex-1 min-w-0 px-1 py-0.5 text-xs leading-tight bg-white/10 border border-white/10 rounded outline-none focus:border-violet-400 h-5 text-white/90 cursor-pointer"
+      >
+        <option value="" className="bg-slate-900 text-white/50">{placeholder}</option>
+        {options.map((option) => (
+          <option key={option} value={option} className="bg-slate-900 text-white/90">
+            {option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
 
 // 行内编辑字段组件
@@ -58,33 +109,28 @@ interface InlineEditFieldProps {
   onSave: (value: string) => void;
   multiline?: boolean;
   hideLabel?: boolean;
+  suggestions?: string[];
+  enableAutocomplete?: boolean;
+  inputType?: 'text' | 'number';
+  datalistId?: string;
+  placeholder?: string;
 }
 
-function InlineEditField({ label, value, onSave, multiline = false, hideLabel = false }: InlineEditFieldProps) {
+function InlineEditField({ label, value, onSave, multiline = false, hideLabel = false, suggestions = [], enableAutocomplete = true, inputType = 'text', datalistId, placeholder }: InlineEditFieldProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(value);
   const [isExpanded, setIsExpanded] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const adjustTextareaHeight = useCallback(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
-    }
-  }, []);
+  const shouldShowAutocomplete = enableAutocomplete && label !== '旁白' && label !== '备注' && suggestions.length > 0;
 
   useEffect(() => {
     if (!isEditing && !isExpanded) {
       setEditValue(value);
     }
   }, [value, isEditing, isExpanded]);
-
-  useEffect(() => {
-    if (isEditing && multiline) {
-      adjustTextareaHeight();
-    }
-  }, [isEditing, multiline, editValue, adjustTextareaHeight]);
 
   const handleSave = useCallback(() => {
     onSave(editValue.trim());
@@ -108,6 +154,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
       }
     } else {
       if (e.key === 'Enter') {
+        e.preventDefault();
         handleSave();
       } else if (e.key === 'Escape') {
         handleCancel();
@@ -168,46 +215,42 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
 
   if (isEditing) {
     return (
-      <div className={`${hideLabel ? '' : 'gap-1.5'} ${multiline ? 'flex flex-col' : 'flex items-center'}`}>
+      <div className={`${hideLabel ? '' : 'gap-1.5'} flex items-center h-5 overflow-hidden`}>
         {!hideLabel && <span className="text-xs text-slate-400 shrink-0">{label}：</span>}
         {multiline ? (
-          <div className="flex-1 min-w-0 relative">
+          <div className="flex-1 min-w-0 relative flex items-center">
             <textarea
               ref={textareaRef}
               value={editValue}
-              onChange={(e) => {
-                setEditValue(e.target.value);
-                adjustTextareaHeight();
-              }}
+              onChange={(e) => setEditValue(e.target.value)}
               onBlur={handleSave}
               onKeyDown={handleKeyDown}
               autoFocus
               rows={1}
-              className="flex-1 w-full min-w-0 px-2 py-1 pr-16 text-xs bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 resize-none overflow-hidden"
+              className="flex-1 w-full min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 resize-none overflow-hidden h-5"
             />
-            <button
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setIsExpanded(true);
-              }}
-              onMouseDown={(e) => e.preventDefault()}
-              className="absolute right-1 top-1 w-6 h-6 rounded hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-violet-300 transition"
-              title="展开编辑"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
           </div>
         ) : (
-          <input
-            type="text"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onBlur={handleSave}
-            onKeyDown={handleKeyDown}
-            autoFocus
-            className="flex-1 min-w-0 px-2 py-1 text-xs bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400"
-          />
+          <div className="flex-1 min-w-0 relative">
+            <input
+              ref={inputRef}
+              type={inputType}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={handleSave}
+              onKeyDown={handleKeyDown}
+              list={shouldShowAutocomplete && datalistId ? datalistId : undefined}
+              autoFocus
+              className="flex-1 min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 h-5 w-full"
+            />
+            {shouldShowAutocomplete && datalistId && (
+              <datalist id={datalistId}>
+                {suggestions.map((s, i) => (
+                  <option key={i} value={s} />
+                ))}
+              </datalist>
+            )}
+          </div>
         )}
       </div>
     );
@@ -217,38 +260,34 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
 
   return (
     <div
-      className={`${hideLabel ? '' : 'gap-1.5'} cursor-pointer hover:bg-white/5 rounded px-1 py-0.5 -mx-1 transition ${multiline ? 'flex flex-col' : 'flex items-center'}`}
+      className={`${hideLabel ? '' : 'gap-1.5'} cursor-pointer hover:bg-white/5 rounded px-1 py-0.5 -mx-1 transition flex items-center min-w-0`}
+      onClick={() => setIsEditing(true)}
     >
-      <div className="flex items-center justify-between" onClick={() => setIsEditing(true)}>
-        {!hideLabel && <span className="text-xs text-slate-400 shrink-0">{label}：</span>}
-        {hideLabel && hasLongContent && (
-          <span className="text-xs text-slate-400 shrink-0">{label}</span>
-        )}
-      </div>
-      <div className="flex items-start gap-1" onClick={() => setIsEditing(true)}>
-        <span className={`text-xs text-white/90 flex-1 ${multiline ? 'whitespace-pre-wrap break-words line-clamp-3' : 'truncate'}`}>
-          {value || <span className="text-slate-500 italic">点击编辑</span>}
-        </span>
-        {hasLongContent && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setEditValue(value);
-              setIsExpanded(true);
-            }}
-            className="shrink-0 w-5 h-5 rounded hover:bg-white/10 flex items-center justify-center text-slate-500 hover:text-violet-300 transition"
-            title="展开编辑"
-          >
-            <Maximize2 className="w-3 h-3" />
-          </button>
-        )}
-      </div>
+      {!hideLabel && <span className="text-xs text-slate-400 shrink-0">{label}：</span>}
+      <span className={`text-xs text-white/90 flex-1 min-w-0 truncate`}>
+        {value || <span className="text-slate-500 italic">{placeholder || '点击编辑'}</span>}
+      </span>
+      {hasLongContent && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditValue(value);
+            setIsExpanded(true);
+          }}
+          className="shrink-0 w-5 h-5 rounded hover:bg-white/10 flex items-center justify-center text-slate-500 hover:text-violet-300 transition"
+          title="展开编辑"
+        >
+          <Maximize2 className="w-3 h-3" />
+        </button>
+      )}
     </div>
   );
 }
 
 export function ShotCard({
   shot,
+  projectId,
+  fieldSuggestions,
   isSelected = false,
   highlighted = false,
   onSelect,
@@ -273,6 +312,8 @@ export function ShotCard({
   onVideoPause,
   playingVideoKey,
   onVideoRefReady,
+  onDeleteMedia,
+  onOpenSettings,
 }: ShotCardProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -284,6 +325,14 @@ export function ShotCard({
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // 上传状态
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadMessage, setUploadMessage] = useState('');
+  const [showAnalyzeDialog, setShowAnalyzeDialog] = useState(false);
+  
   const media = shot.media || [];
   const currentMedia = media[currentIndex];
   const isVideo = currentMedia?.type === 'video';
@@ -325,6 +374,117 @@ export function ShotCard({
   const handleFieldUpdate = useCallback((field: keyof Shot, value: string) => {
     onUpdate?.(shot.id, { [field]: value });
   }, [shot.id, onUpdate]);
+
+  // AI分析分镜画面内容
+  const handleAnalyzeShot = useCallback(() => {
+    if (currentMedia) {
+      setShowAnalyzeDialog(true);
+    }
+  }, [currentMedia]);
+
+  // 处理文件上传（直接上传并添加到分镜）
+  const handleFileUpload = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0 || !projectId) return;
+
+    const MAX_MEDIA_COUNT = 10;
+    const remaining = MAX_MEDIA_COUNT - media.length;
+    if (remaining <= 0) {
+      alert(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`);
+      return;
+    }
+
+    const file = files[0];
+    const detected = detectFileType(file);
+    if (!detected.supported) {
+      alert('不支持的文件格式');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadProgress(5);
+    setUploadMessage('准备上传...');
+
+    try {
+      const fileType = detected.type as 'image' | 'video';
+      let result: { url: string; id?: number; filename?: string; ossKey?: string };
+
+      if (fileType === 'image') {
+        result = await uploadVideo2Image(file, {
+          projectId,
+          reference: true,
+          onProgress: p => {
+            setUploadProgress(p.progress);
+            setUploadMessage(p.message || '上传中...');
+          }
+        });
+      } else {
+        // 视频先检查码率
+        setUploadMessage('检测视频信息...');
+        const decision = await checkVideoBitrate(file);
+        
+        // 直接上传，使用 server 压缩方式
+        result = await uploadVideo2Video(file, {
+          projectId,
+          reference: true,
+          compressionMethod: 'server',
+          skipBitrateCheck: true,
+          onProgress: p => {
+            setUploadProgress(p.progress);
+            setUploadMessage(p.message || '上传中...');
+          }
+        });
+      }
+
+      setUploadProgress(100);
+      setUploadMessage('保存到分镜...');
+
+      // 保存到分镜
+      const res = await fetch(`/api/video2/shots/${shot.id}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: result.url,
+          type: fileType,
+          filename: file.name,
+          source: 'upload',
+          ossKey: result.ossKey
+        })
+      });
+
+      const data = await res.json();
+      if (data.success || data.id) {
+        // 创建新的媒体对象并更新分镜
+        const newMedia: ShotMedia = {
+          id: data.data?.id || data.id || Date.now(),
+          shotId: shot.id,
+          url: result.url,
+          type: fileType,
+          filename: file.name,
+          size: 0,
+          sortOrder: media.length,
+          source: 'upload',
+          ossKey: result.ossKey,
+          createdAt: new Date().toISOString()
+        };
+        
+        // 通过 onUpdate 更新分镜的 media 字段
+        onUpdate?.(shot.id, { media: [...media, newMedia] });
+        setUploadMessage('完成');
+      } else {
+        throw new Error(data.message || '保存失败');
+      }
+    } catch (err) {
+      console.error('上传失败:', err);
+      setUploadMessage('上传失败');
+      alert(`上传失败: ${(err as Error).message}`);
+    } finally {
+      setTimeout(() => {
+        setIsUploading(false);
+        setUploadProgress(0);
+        setUploadMessage('');
+      }, 500);
+    }
+  }, [shot.id, projectId, media, onUpdate]);
 
   const handlePlayVideo = useCallback(() => {
     if (!shouldLoadVideo) {
@@ -414,9 +574,10 @@ export function ShotCard({
   }, [currentIndex, handlePauseVideo]);
 
   return (
-    <div
-      ref={cardRef}
-      id={`shot-card-${shot.id}`}
+    <>
+      <div
+        ref={cardRef}
+        id={`shot-card-${shot.id}`}
       className={`relative rounded-2xl border overflow-hidden transition-all ${
         highlighted
           ? 'ring-2 ring-violet-400 ring-offset-2 ring-offset-slate-900 border-violet-400/60'
@@ -579,24 +740,54 @@ export function ShotCard({
           </>
         ) : (
           /* 无媒体时显示占位 - 桌面端与有媒体保持一致高度，移动端降低高度 */
-          <div className={`${isMobile ? 'aspect-[16/6]' : 'aspect-video'} bg-black/40 flex flex-col items-center justify-center gap-3`}>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => onUploadMedia?.(shot)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-violet-400/40 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition"
-              >
-                <Upload className="w-4 h-4" />
-                上传
-              </button>
-              <button
-                onClick={() => onAiGenerate?.(shot)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-pink-400/40 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition"
-              >
-                <Sparkles className="w-4 h-4" />
-                AI生成
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">上传或AI生成参考画面</p>
+          <div className={`${isMobile ? 'aspect-[16/6]' : 'aspect-video'} bg-black/40 flex flex-col items-center justify-center gap-3 relative`}>
+            {isUploading ? (
+              /* 上传进度显示 */
+              <div className="flex flex-col items-center gap-2">
+                <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
+                <div className="w-48 h-2 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-slate-400">{uploadMessage || `${uploadProgress}%`}</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      fileInputRef.current?.click();
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-violet-400/40 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition"
+                  >
+                    <Upload className="w-4 h-4" />
+                    上传
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAiGenerate?.(shot);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-pink-400/40 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    AI生成
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">上传或AI生成参考画面</p>
+                {/* 隐藏的文件输入 */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  className="hidden"
+                  onChange={(e) => handleFileUpload(e.target.files)}
+                />
+              </>
+            )}
           </div>
         )}
 
@@ -613,15 +804,31 @@ export function ShotCard({
           {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
         </button>
 
-        {/* 右上角：全屏按钮（无媒体时显示上传区域） */}
+        {/* 右上角：全屏按钮 + 删除按钮（无媒体时显示上传区域） */}
         {hasMedia && (
-          <button
-            onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
-            className="absolute top-3 right-3 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
-            title="全屏查看"
-          >
-            <Maximize2 className="w-4 h-4 text-white/90" />
-          </button>
+          <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
+              className="w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="全屏查看"
+            >
+              <Maximize2 className="w-4 h-4 text-white/90" />
+            </button>
+            {onDeleteMedia && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (confirm('确定要删除这个参考素材吗？')) {
+                    onDeleteMedia(shot.id, currentMedia.id);
+                  }
+                }}
+                className="w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
+                title="删除素材"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-white/90" />
+              </button>
+            )}
+          </div>
         )}
 
         {/* 左下角：状态标签 */}
@@ -663,14 +870,28 @@ export function ShotCard({
       {/* 中部内容区 */}
       <div className="px-3 py-2">
         {/* 画面内容（可编辑，无标题） */}
-        <div>
-          <InlineEditField
-            label="画面内容"
-            value={shot.sceneContent}
-            onSave={(value) => handleFieldUpdate('sceneContent', value)}
-            multiline
-            hideLabel
-          />
+        <div className="flex items-start gap-2">
+          <div className="flex-1 min-w-0">
+            <InlineEditField
+              label="画面内容"
+              value={shot.sceneContent}
+              onSave={(value) => handleFieldUpdate('sceneContent', value)}
+              multiline
+              hideLabel
+              suggestions={[]}
+              enableAutocomplete={false}
+            />
+          </div>
+          {currentMedia && (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleAnalyzeShot(); }}
+              className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-400/30 text-xs text-emerald-300 transition"
+              title="AI分析画面内容，自动填充各项信息"
+            >
+              <Sparkles className="w-3 h-3" />
+              AI分析
+            </button>
+          )}
         </div>
       </div>
 
@@ -708,84 +929,115 @@ export function ShotCard({
             </div>
           )}
 
-          {/* 第一行：演员 + 道具 */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            <InlineEditField
-              label="演员"
-              value={shot.actors}
-              onSave={(value) => handleFieldUpdate('actors', value)}
-            />
-            <InlineEditField
-              label="道具"
-              value={shot.props}
-              onSave={(value) => handleFieldUpdate('props', value)}
-            />
-          </div>
+          {/* 第一行：地点（占满一行） */}
+          <InlineEditField
+            label="地点"
+            value={shot.location}
+            onSave={(value) => handleFieldUpdate('location', value)}
+            suggestions={fieldSuggestions?.location || []}
+            datalistId={`shot-${shot.id}-location`}
+          />
 
-          {/* 第二行：地点 + 焦段 */}
+          {/* 第二行：演员 */}
+          <InlineEditField
+            label="演员"
+            value={shot.actors}
+            onSave={(value) => handleFieldUpdate('actors', value)}
+            suggestions={fieldSuggestions?.actors || []}
+            datalistId={`shot-${shot.id}-actors`}
+          />
+
+          {/* 第三行：服饰 */}
+          <InlineEditField
+            label="服饰"
+            value={shot.costume || ''}
+            onSave={(value) => handleFieldUpdate('costume', value)}
+            suggestions={fieldSuggestions?.costume || []}
+            datalistId={`shot-${shot.id}-costume`}
+          />
+
+          {/* 第四行：道具 */}
+          <InlineEditField
+            label="道具"
+            value={shot.props}
+            onSave={(value) => handleFieldUpdate('props', value)}
+            suggestions={fieldSuggestions?.props || []}
+            datalistId={`shot-${shot.id}-props`}
+          />
+
+          {/* 第五行：景别 + 焦段 */}
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            <InlineEditField
-              label="地点"
-              value={shot.location}
-              onSave={(value) => handleFieldUpdate('location', value)}
+            <InlineSelectField
+              label="景别"
+              value={shot.shotType || ''}
+              options={SHOT_TYPES}
+              onSave={(value) => handleFieldUpdate('shotType', value)}
             />
             <InlineEditField
               label="焦段"
               value={shot.focalLength}
               onSave={(value) => handleFieldUpdate('focalLength', value)}
+              suggestions={fieldSuggestions?.focalLength || []}
+              datalistId={`shot-${shot.id}-focalLength`}
+              placeholder="如35mm"
             />
           </div>
 
-          {/* 第三行：景别 + 角度 */}
+          {/* 第六行：角度 + 灯光 */}
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            <InlineEditField
-              label="景别"
-              value={shot.shotType}
-              onSave={(value) => handleFieldUpdate('shotType', value)}
-            />
-            <InlineEditField
+            <InlineSelectField
               label="角度"
-              value={shot.shotAngle}
+              value={shot.shotAngle || ''}
+              options={SHOT_ANGLES}
               onSave={(value) => handleFieldUpdate('shotAngle', value)}
-            />
-          </div>
-
-          {/* 第四行：镜头运动 + 灯光 */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            <InlineEditField
-              label="镜头运动"
-              value={shot.cameraMovement}
-              onSave={(value) => handleFieldUpdate('cameraMovement', value)}
             />
             <InlineEditField
               label="灯光"
               value={shot.lighting}
               onSave={(value) => handleFieldUpdate('lighting', value)}
+              suggestions={fieldSuggestions?.lighting || []}
+              datalistId={`shot-${shot.id}-lighting`}
             />
           </div>
 
-          {/* 第五行：旁白 */}
+          {/* 第七行：镜头运动 + 预估时长 */}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+            <InlineSelectField
+              label="镜头运动"
+              value={shot.cameraMovement || ''}
+              options={CAMERA_MOVEMENTS}
+              onSave={(value) => handleFieldUpdate('cameraMovement', value)}
+            />
+            <InlineEditField
+              label="预估时长"
+              value={shot.estimatedDuration?.toString() || ''}
+              inputType="number"
+              enableAutocomplete={false}
+              suggestions={[]}
+              placeholder="秒"
+              onSave={(value) => handleFieldUpdate('estimatedDuration', value)}
+            />
+          </div>
+
+          {/* 第八行：旁白（占满一行） */}
           <InlineEditField
             label="旁白"
             value={shot.narration}
             onSave={(value) => handleFieldUpdate('narration', value)}
             multiline
+            suggestions={[]}
+            enableAutocomplete={false}
           />
 
-          {/* 第六行：预估时长 + 备注 */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            <InlineEditField
-              label="预估时长"
-              value={shot.estimatedDuration}
-              onSave={(value) => handleFieldUpdate('estimatedDuration', value)}
-            />
-            <InlineEditField
-              label="备注"
-              value={shot.notes}
-              onSave={(value) => handleFieldUpdate('notes', value)}
-              multiline
-            />
-          </div>
+          {/* 第九行：备注（占满一行） */}
+          <InlineEditField
+            label="备注"
+            value={shot.notes}
+            onSave={(value) => handleFieldUpdate('notes', value)}
+            multiline
+            suggestions={[]}
+            enableAutocomplete={false}
+          />
 
           {/* 视频分割按钮 */}
           {(shot.type === 'video' || media.some(m => m.type === 'video')) && (
@@ -875,5 +1127,15 @@ export function ShotCard({
         </div>
       </div>
     </div>
+
+    <AnalyzeShotDialog
+      isOpen={showAnalyzeDialog}
+      onClose={() => setShowAnalyzeDialog(false)}
+      shot={shot}
+      currentMedia={currentMedia!}
+      onApply={(shotId, updates) => onUpdate?.(shotId, updates)}
+      onOpenSettings={onOpenSettings}
+    />
+    </>
   );
 }

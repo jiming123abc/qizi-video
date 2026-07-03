@@ -40,7 +40,7 @@ export function ShotSearchBar({
     return (
       <div className="relative">
         {isOpen ? (
-          <div className="relative w-48 sm:w-64">
+          <div className="relative w-64 sm:w-80">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               ref={inputRef}

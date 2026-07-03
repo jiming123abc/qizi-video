@@ -92,7 +92,7 @@ export async function getSignedOssUrl(ossUrl: string): Promise<string> {
   return signedUrl;
 }
 
-// 批量获取签名 URL（一次性请求，结果写入缓存）
+// 批量获取签名 URL（分批请求，避免 GET URL 过长导致 414）
 export async function batchGetSignedUrls(urls: string[]): Promise<void> {
   // 过滤出需要签名的 URL（排除缓存命中和非 OSS URL）
   const toSign = urls.filter(u => {
@@ -103,18 +103,27 @@ export async function batchGetSignedUrls(urls: string[]): Promise<void> {
 
   if (toSign.length === 0) return;
 
-  try {
-    const params = toSign.map(u => `urls=${encodeURIComponent(u)}`).join('&');
-    const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
-    if (!res.ok) return;
+  // 分批处理，避免 GET 请求 query string 过长导致 414
+  const BATCH_SIZE = 5;
+  const now = Date.now();
 
-    const { signedUrls } = await res.json();
-    const now = Date.now();
-    for (const [origUrl, signedUrl] of Object.entries(signedUrls)) {
-      signUrlCache.set(origUrl, { url: signedUrl, expires: now + 50 * 60 * 1000 });
+  for (let i = 0; i < toSign.length; i += BATCH_SIZE) {
+    const batch = toSign.slice(i, i + BATCH_SIZE);
+    try {
+      const params = batch.map(u => `urls=${encodeURIComponent(u)}`).join('&');
+      const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
+      if (!res.ok) {
+        console.warn('[oss] 批量签名请求失败:', res.status, res.statusText);
+        continue;
+      }
+
+      const { signedUrls } = await res.json();
+      for (const [origUrl, signedUrl] of Object.entries(signedUrls)) {
+        signUrlCache.set(origUrl, { url: signedUrl as string, expires: now + 50 * 60 * 1000 });
+      }
+    } catch (e) {
+      console.error('[oss] 批量签名失败 (batch', i / BATCH_SIZE + 1, '):', e);
     }
-  } catch (e) {
-    console.error('[oss] 批量签名失败:', e);
   }
 }
 
@@ -146,11 +155,14 @@ export interface OssUploadCredential {
 export async function getOssUploadCredential(
   projectId: number,
   filename: string,
-  type: 'image' | 'video'
+  type: 'image' | 'video',
+  usage?: 'shot' | 'project-cover' | 'project-reference'
 ): Promise<OssUploadCredential> {
-  const res = await fetch(
-    `${API_BASE_URL}/api/video2/oss-upload-credential?projectId=${projectId}&filename=${encodeURIComponent(filename)}&type=${type}`
-  );
+  let url = `${API_BASE_URL}/api/video2/oss-upload-credential?projectId=${projectId}&filename=${encodeURIComponent(filename)}&type=${type}`;
+  if (usage) {
+    url += `&usage=${usage}`;
+  }
+  const res = await fetch(url);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: '获取上传凭证失败' }));
     throw new Error(err.error || '获取上传凭证失败');
@@ -228,7 +240,7 @@ export type UploadDecision = {
   bitrateKbps: number | null;
   targetBitrateKbps: number;
   duration: number | null;
-  resolution?: '1080p' | '720p' | '480p' | 'other';
+  resolution?: '1080p' | '720p' | '480p';
   width?: number;
   height?: number;
   fileSizeMB: string;
@@ -316,13 +328,15 @@ export async function uploadImage(
 export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
   const fileSizeMBNum = file.size / 1024 / 1024;
   const fileSizeMB = fileSizeMBNum.toFixed(2);
-  
-  const { estimateVideoBitrate, getTargetBitrate, needsCompression } = await import('./videoCompressor');
+
+  const { estimateVideoBitrate, getTargetBitrateAsync, needsCompressionAsync } = await import('./videoCompressor');
   const result = await estimateVideoBitrate(file);
-  
-  const targetBitrateKbps = getTargetBitrate(result.resolution);
-  
-  if (result.bitrateKbps === null || !needsCompression(result.bitrateKbps, result.resolution)) {
+
+  // 使用异步版本从 API 获取目标码率
+  const targetBitrateKbps = await getTargetBitrateAsync(result.resolution || '480p');
+
+  // 使用异步版本判断是否需要压缩
+  if (result.bitrateKbps === null || !await needsCompressionAsync(result.bitrateKbps, result.resolution || '480p')) {
     return {
       decision: 'direct_upload',
       compressionMethod: null,
@@ -336,9 +350,9 @@ export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
       fileSizeMBNum,
     };
   }
-  
+
   const compressionMethod: 'server' | 'browser' = fileSizeMBNum <= CLOUDFLARE_MAX_MB ? 'server' : 'browser';
-  
+
   return {
     decision: 'must_compress',
     compressionMethod,
@@ -708,7 +722,7 @@ export async function uploadVideo2Video(
     );
 
     if (!compressResult.success) {
-      throw new Error('压缩失败：' + (compressResult as { success: false; message: string }).message + '。请手动压缩后再上传。');
+      throw new Error('浏览器压缩失败：' + (compressResult as { success: false; message: string }).message + '。请尝试其他压缩方式，或者手动压缩后再上传！');
     }
 
     targetFile = compressResult.file;
@@ -722,12 +736,16 @@ export async function uploadVideo2Video(
 
     // 获取视频分辨率信息
     const videoInfo = await checkVideoBitrate(file);
-    const { getTargetBitrate: getBitrate } = await import('./videoCompressor');
+    const { getTargetBitrateAsync: getBitrateAsync } = await import('./videoCompressor');
 
-    // 调用阿里云转码
+    // 调用阿里云转码，使用异步版本获取目标码率
     const result = await uploadVideoWithAliyunCompression(file, {
       projectId: options?.projectId,
-      targetBitrate: options?.targetBitrate || getBitrate(videoInfo.resolution),
+      sceneId: options?.sceneId,
+      reference: options?.reference,
+      title: options?.title,
+      createShot: options?.createShot,
+      targetBitrate: options?.targetBitrate || await getBitrateAsync(videoInfo.resolution || '480p'),
       onProgress: (p) => {
         options?.onProgress?.({
           phase: p.phase,
@@ -797,7 +815,7 @@ export async function uploadVideo2Video(
       }
       if (status.status === 'error') {
         if (useServerCompress && status.error?.includes('压缩')) {
-          throw new Error('服务端压缩失败：' + status.error + '。请手动压缩后再上传。');
+          throw new Error('服务端压缩失败：' + status.error + '。请尝试其他压缩方式，或者手动压缩后再上传！');
         }
         throw new Error(status.error || '上传失败');
       }
@@ -821,16 +839,28 @@ export async function uploadVideoWithAliyunCompression(
   file: File,
   options?: {
     projectId?: number;
+    sceneId?: number;
+    reference?: boolean;
+    title?: string;
+    createShot?: boolean;
     targetBitrate?: number;
     onProgress?: (p: UploadProgress) => void;
   }
 ): Promise<UploadResult & { id?: number; filename?: string; ossKey?: string }> {
+  // 0. 获取视频信息（码率、分辨率）用于后端码率阈值判断
+  const { estimateVideoBitrate } = await import('./videoCompressor');
+  const videoInfo = await estimateVideoBitrate(file);
+  
   // 1. 先上传原视频到 OSS（临时存储）
   options?.onProgress?.({ phase: 'uploading', progress: 0, message: '上传原视频到 OSS...' });
 
   const formData = new FormData();
   formData.append('file', file);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
+  if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
+  if (options?.reference) formData.append('reference', '1');
+  if (options?.title) formData.append('title', options.title);
+  if (options?.createShot) formData.append('createShot', '1');
 
   const uploadResp = await fetch(`${API_BASE_URL}/api/video2/upload/video`, {
     method: 'POST',
@@ -842,9 +872,40 @@ export async function uploadVideoWithAliyunCompression(
     throw new Error(`上传原视频失败: ${errText}`);
   }
 
-  const uploadResult = await uploadResp.json();
-  const videoUrl = uploadResult.url;
-  const ossKey = uploadResult.ossKey;
+  const { taskId: uploadTaskId } = await uploadResp.json();
+
+  // 轮询等待上传完成
+  let videoUrl = '';
+  let ossKey = '';
+  let uploadAttempts = 0;
+  const maxUploadAttempts = 180;
+
+  while (uploadAttempts < maxUploadAttempts) {
+    await new Promise(r => setTimeout(r, 1000));
+    const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`);
+    if (!statusResp.ok) throw new Error('上传状态查询失败');
+    const status = await statusResp.json();
+
+    if (status.status === 'done') {
+      videoUrl = status.result.url;
+      ossKey = status.result.ossKey;
+      break;
+    }
+    if (status.status === 'error') {
+      throw new Error(status.error || '上传失败');
+    }
+    const progress = Math.min(19, Math.floor((uploadAttempts / maxUploadAttempts) * 20));
+    options?.onProgress?.({
+      phase: 'uploading',
+      progress,
+      message: status.message || '上传中...'
+    });
+    uploadAttempts++;
+  }
+
+  if (!videoUrl) {
+    throw new Error('上传超时');
+  }
 
   options?.onProgress?.({ phase: 'compressing', progress: 20, message: '提交阿里云转码任务...' });
 
@@ -856,7 +917,15 @@ export async function uploadVideoWithAliyunCompression(
       videoUrl,
       ossKey,
       filename: file.name,
-      targetBitrate: options?.targetBitrate
+      targetBitrate: options?.targetBitrate,
+      originalBitrate: videoInfo.bitrateKbps,
+      width: videoInfo.width,
+      height: videoInfo.height,
+      projectId: options?.projectId,
+      sceneId: options?.sceneId,
+      reference: options?.reference ? 1 : 0,
+      title: options?.title,
+      createShot: options?.createShot ? 1 : 0
     })
   });
 
@@ -865,7 +934,19 @@ export async function uploadVideoWithAliyunCompression(
     throw new Error(`提交转码任务失败: ${errText}`);
   }
 
-  const { taskId } = await transcodeResp.json();
+  const { taskId, skipped, originalUrl } = await transcodeResp.json();
+  
+  // 如果后端判定不需要压缩，返回原视频
+  if (skipped && originalUrl) {
+    options?.onProgress?.({ phase: 'done', progress: 100, message: '视频码率符合要求，无需压缩' });
+    return {
+      url: originalUrl,
+      compressed: false,
+      originalBitrate: videoInfo.bitrateKbps ?? undefined,
+      targetBitrate: videoInfo.bitrateKbps,
+      duration: videoInfo.duration ?? undefined,
+    };
+  }
 
   // 3. 轮询 /api/video2/aliyun/transcode/:taskId 查询状态
   let attempts = 0;
@@ -895,7 +976,7 @@ export async function uploadVideoWithAliyunCompression(
     }
 
     if (status.status === 'failed' || status.status === 'error') {
-      throw new Error(status.error || '阿里云转码失败');
+      throw new Error('阿里云压缩失败：' + (status.error || '转码失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
     }
 
     // 更新进度：20-80 映射到转码进度
@@ -910,7 +991,7 @@ export async function uploadVideoWithAliyunCompression(
     await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒轮询一次
   }
 
-  throw new Error('阿里云转码超时（最长等待10分钟）');
+  throw new Error('阿里云压缩失败：转码超时。请尝试其他压缩方式，或者手动压缩后再上传！');
 }
 
 // 从网络 URL 转存图片/视频到 OSS

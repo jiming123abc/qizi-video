@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge } from 'lucide-react';
+import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
 import { uploadVideo2Video, detectFileType } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
@@ -32,6 +32,9 @@ import AIUsagePanel from '../components/ai/AIUsagePanel';
 
 // 设置组件
 import SettingsDialog from '../components/settings/SettingsDialog';
+
+// 数字资产组件
+import DigitalAssetDialog from '../components/assets/DigitalAssetDialog';
 
 // 类型
 import type { Shot, ShotMedia, Project, Scene } from '../lib/types';
@@ -115,6 +118,17 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [stats, setStats] = useState<{ pending: number; done: number; trash: number; unclassified: number }>({ pending: 0, done: 0, trash: 0, unclassified: 0 });
   const [sceneStatsMap, setSceneStatsMap] = useState<Record<string, { done: number; total: number }>>({});
   const [loading, setLoading] = useState(true);
+  const [fieldSuggestions, setFieldSuggestions] = useState<{
+    location: string[];
+    actors: string[];
+    costume: string[];
+    props: string[];
+    shotType: string[];
+    focalLength: string[];
+    shotAngle: string[];
+    lighting: string[];
+    cameraMovement: string[];
+  } | null>(null);
 
   const [currentTab, setCurrentTab] = useState<'pending' | 'done' | 'trash'>('pending');
   const [searchQuery, setSearchQuery] = useState('');
@@ -210,6 +224,12 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [selectedShotForMedia, setSelectedShotForMedia] = useState<Shot | null>(null);
   const [selectedShotForAIGen, setSelectedShotForAIGen] = useState<Shot | null>(null);
   const [selectedVideoForSplit, setSelectedVideoForSplit] = useState<string | null>(null);
+  const [showDigitalAssetDialog, setShowDigitalAssetDialog] = useState(false);
+  const [aiSuggestedAssets, setAiSuggestedAssets] = useState<{
+    mainActors: Array<{ name: string; imagePrompt: string }>;
+    keyProps: Array<{ name: string; imagePrompt: string }>;
+    mainScenes: Array<{ name: string; imagePrompt: string }>;
+  } | null>(null);
 
   // 展开的分镜ID
   const [expandedShotId, setExpandedShotId] = useState<number | null>(null);
@@ -238,6 +258,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // 滚动位置记录（key = sceneId-tab）
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const userManualSelectedUnclassifiedRef = useRef(false);
+  const refreshSuggestionsTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // 平板/桌面检测（用于区分桌面端拖拽 vs 手机端箭头排序）
   const [isMobile, setIsMobile] = useState(false);
@@ -313,14 +334,24 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }
   }, [projectId]);
 
+  const loadFieldSuggestions = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/video2/projects/${projectId}/field-suggestions`);
+      const data = await res.json();
+      if (data.success && data.data) {
+        setFieldSuggestions(data.data);
+      }
+    } catch (e) {
+      console.error('加载字段补全建议失败:', e);
+    }
+  }, [projectId]);
+
   const loadStats = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       params.set('projectId', String(projectId));
-      if (currentTab !== 'trash') {
-        if (currentSceneId === null) params.set('sceneId', 'null');
-        else params.set('sceneId', String(currentSceneId));
-      }
+      if (currentSceneId === null) params.set('sceneId', 'null');
+      else params.set('sceneId', String(currentSceneId));
       const res = await fetch(`/api/video2/stats?${params.toString()}`);
       const data = await res.json();
       if (data.success) {
@@ -354,6 +385,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     handleCompressionDecision,
     aliyunConfigured,
     clearUploadingFiles,
+    retryFailedFiles,
   } = useUpload({
     projectId,
     currentSceneId,
@@ -364,8 +396,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   });
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadProject(), loadScenes(), loadShots(), loadStats(), loadSceneStats()]);
-  }, [loadProject, loadScenes, loadShots, loadStats, loadSceneStats]);
+    await Promise.all([loadProject(), loadScenes(), loadShots(), loadStats(), loadSceneStats(), loadFieldSuggestions()]);
+  }, [loadProject, loadScenes, loadShots, loadStats, loadSceneStats, loadFieldSuggestions]);
 
   useEffect(() => {
     setLoading(true);
@@ -489,9 +521,18 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   };
 
   // ============ 删除 / 恢复（包装 useShots + 本地状态） ============
-  const softDeleteWithStats = async (id: number) => {
-    await softDelete(id);
-    await loadStats();
+  const softDeleteWithConfirm = (id: number) => {
+    setGenericConfirm({
+      isOpen: true,
+      title: '删除分镜',
+      message: '确定将此分镜移到垃圾桶吗？',
+      confirmText: '移到垃圾桶',
+      onConfirm: async () => {
+        setGenericConfirm(null);
+        await softDelete(id);
+        await loadStats();
+      }
+    });
   };
 
   const restoreItemWithStats = async (id: number) => {
@@ -516,9 +557,20 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   };
 
   // ============ 批量操作（包装 useShots + 本地状态） ============
-  const batchSoftDeleteWithStats = async () => {
-    await batchSoftDelete();
-    await loadStats();
+  const batchSoftDeleteWithConfirm = () => {
+    if (selectedIds.size === 0) return;
+    const count = selectedIds.size;
+    setGenericConfirm({
+      isOpen: true,
+      title: '批量删除',
+      message: `确定将所选 ${count} 项移到垃圾桶吗？`,
+      confirmText: '移到垃圾桶',
+      onConfirm: async () => {
+        setGenericConfirm(null);
+        await batchSoftDelete();
+        await loadStats();
+      }
+    });
   };
 
   const batchRestoreWithStats = async () => {
@@ -772,10 +824,41 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fields)
       }).catch(console.error);
+
+      // 如果编辑了补全相关字段，防抖刷新建议列表
+      const autocompleteFields = ['location', 'actors', 'costume', 'props', 'shotType', 'focalLength', 'shotAngle', 'lighting', 'cameraMovement'];
+      const hasAutocompleteField = autocompleteFields.some(f => f in fields);
+      if (hasAutocompleteField) {
+        if (refreshSuggestionsTimerRef.current) {
+          clearTimeout(refreshSuggestionsTimerRef.current);
+        }
+        refreshSuggestionsTimerRef.current = setTimeout(() => {
+          loadFieldSuggestions();
+        }, 800);
+      }
     };
 
     const handleDelete = (id: number) => {
-      softDeleteWithStats(id);
+      softDeleteWithConfirm(id);
+    };
+
+    const handleDeleteMedia = async (shotId: number, mediaId: number) => {
+      try {
+        await fetch(`/api/video2/shots/${shotId}/media/${mediaId}`, {
+          method: 'DELETE'
+        });
+        setShots(prev => prev.map(shot => {
+          if (shot.id !== shotId) return shot;
+          return {
+            ...shot,
+            media: (shot.media || []).filter(m => m.id !== mediaId)
+          };
+        }));
+        showToast('素材已删除');
+      } catch (e) {
+        console.error('删除素材失败:', e);
+        showToast('删除失败', 'error');
+      }
     };
 
     const handleClone = (id: number) => {
@@ -839,6 +922,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         )}
         <ShotCard
           shot={shot}
+          projectId={projectId}
+          fieldSuggestions={fieldSuggestions}
           isSelected={isSelected}
           highlighted={highlightedShotId === shot.id}
           onSelect={(s) => toggleSelect(s.id)}
@@ -863,6 +948,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           onVideoPause={handleVideoPause}
           playingVideoKey={playingVideoKey}
           onVideoRefReady={handleVideoRefReady}
+          onDeleteMedia={handleDeleteMedia}
+          onOpenSettings={() => setShowSettingsDialog(true)}
         />
       </div>
     );
@@ -962,14 +1049,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           </div>
           {/* 工具按钮组（桌面端图标，移动端文字） */}
           <div className="hidden sm:flex items-center gap-1">
-            <button
-              onClick={handleShare}
-              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
-              title="分享项目"
-            >
-              <Share2 className="w-4 h-4 text-white/90" />
-            </button>
-
             {/* 搜索（垃圾桶模式下隐藏） */}
             {currentTab !== 'trash' && (
               <ShotSearchBar
@@ -985,6 +1064,14 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               />
             )}
 
+            <button
+              onClick={handleShare}
+              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="分享项目"
+            >
+              <Share2 className="w-4 h-4 text-white/90" />
+            </button>
+
             {/* AI 生成分镜 */}
             <button
               onClick={() => { setPlayingItemId(null); setShowAIScriptDialog(true); }}
@@ -996,7 +1083,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
             {/* 视频分割 */}
             <button
-              onClick={() => { setPlayingItemId(null); videoSplitInputRef.current?.click(); }}
+              onClick={() => { setPlayingItemId(null); setShowVideoSplitDialog(true); }}
               className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
               title="视频分割为分镜"
             >
@@ -1010,6 +1097,15 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               title="费用统计"
             >
               <BarChart3 className="w-4 h-4 text-white/90" />
+            </button>
+
+            {/* 数字资产管理 */}
+            <button
+              onClick={() => { setPlayingItemId(null); setShowDigitalAssetDialog(true); }}
+              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="数字资产管理"
+            >
+              <Archive className="w-4 h-4 text-white/90" />
             </button>
 
             {/* 设置 */}
@@ -1060,7 +1156,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                       AI 生成分镜
                     </button>
                     <button
-                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); videoSplitInputRef.current?.click(); }}
+                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowVideoSplitDialog(true); }}
                       className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
                     >
                       <Scissors className="w-4 h-4 text-violet-300" />
@@ -1072,6 +1168,13 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                     >
                       <BarChart3 className="w-4 h-4 text-violet-300" />
                       费用统计
+                    </button>
+                    <button
+                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowDigitalAssetDialog(true); }}
+                      className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
+                    >
+                      <Archive className="w-4 h-4 text-violet-300" />
+                      数字资产管理
                     </button>
                     <div className="my-1 border-t border-white/5" />
                     <button
@@ -1188,7 +1291,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                   移动到场次
                 </button>
                 <button
-                  onClick={batchSoftDeleteWithStats}
+                  onClick={batchSoftDeleteWithConfirm}
                   className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
                 >
                   <Trash2 className="w-3.5 h-3.5 inline mr-1" /> 删除
@@ -1242,8 +1345,19 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             />
           )
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filteredShots.map((shot, idx) => renderShotCard(shot, idx, filteredShots.length))}
+          <div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {filteredShots.map((shot, idx) => renderShotCard(shot, idx, filteredShots.length))}
+            </div>
+            {currentTab === 'pending' && (
+              <button
+                onClick={() => setShowAddShotDialog(true)}
+                className="mt-4 w-full py-3 rounded-2xl border-2 border-dashed border-violet-400/30 bg-violet-500/5 hover:bg-violet-500/10 text-violet-300 text-sm font-medium transition flex items-center justify-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                增加分镜
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1481,6 +1595,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onCompressionDecision={handleCompressionDecision}
         aliyunConfigured={aliyunConfigured}
         currentSceneName={currentSceneId === null ? '未分类' : (scenes.find(s => s.id === currentSceneId)?.name || '')}
+        onRetryFailed={retryFailedFiles}
       />
 
       {/* 场次管理面板 */}
@@ -1543,6 +1658,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onClose={() => setShowAddShotDialog(false)}
         projectId={projectId}
         sceneId={currentSceneId}
+        fieldSuggestions={fieldSuggestions}
         onAdd={async (shot) => {
           await loadShots();
           await loadStats();
@@ -1556,15 +1672,22 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onClose={() => setShowAIScriptDialog(false)}
         projectId={projectId}
         sceneId={currentSceneId}
-        onSuccess={async (shots) => {
+        onSuccess={async (result) => {
+          const shots = result.shots || [];
+          const assets = result.digitalAssets;
+          if (assets && (assets.mainActors?.length || assets.keyProps?.length || assets.mainScenes?.length)) {
+            setAiSuggestedAssets(assets);
+          }
           await loadShots();
           await loadStats();
+          await loadFieldSuggestions();
           const sceneList = await loadScenes();
           if (currentSceneId === null && sceneList.length > 0) {
             setCurrentSceneId(sceneList[0].id);
           }
-          showToast(`AI 生成了 ${shots?.length || 0} 个分镜`);
+          showToast(`AI 生成了 ${shots.length} 个分镜`);
         }}
+        onOpenSettings={() => setShowSettingsDialog(true)}
       />
 
       {/* AI 生图 */}
@@ -1577,6 +1700,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             await loadShots();
             showToast('AI 生图成功');
           }}
+          onOpenSettings={() => setShowSettingsDialog(true)}
         />
       )}
 
@@ -1593,10 +1717,10 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       <VideoSplitDialog
         isOpen={showVideoSplitDialog}
         onClose={() => setShowVideoSplitDialog(false)}
-        videoUrl={selectedVideoForSplit || ''}
         projectId={projectId}
         sceneId={currentSceneId}
-        onSplit={async (shots) => {
+        maxUploads={5}
+        onSplit={async (shots, videoUrl) => {
           await loadShots();
           await loadStats();
           showToast('视频分割完成');
@@ -1616,6 +1740,17 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       <AIUsagePanel
         isOpen={showAIUsagePanel}
         onClose={() => setShowAIUsagePanel(false)}
+      />
+
+      {/* 数字资产管理 */}
+      <DigitalAssetDialog
+        isOpen={showDigitalAssetDialog}
+        onClose={() => setShowDigitalAssetDialog(false)}
+        projectId={projectId}
+        aiSuggestedAssets={aiSuggestedAssets}
+        onAssetsImported={() => {
+          loadFieldSuggestions();
+        }}
       />
 
       {/* 媒体管理 */}
@@ -1657,10 +1792,10 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-24 left-1/2 -translate-x-1/2 z-[90] px-4 py-2.5 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl transition-all duration-300 ${
+          className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[90] px-6 py-3 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl transition-all duration-300 ${
             toastVisible
-              ? 'opacity-100 translate-y-0'
-              : 'opacity-0 translate-y-4'
+              ? 'opacity-100 scale-100'
+              : 'opacity-0 scale-95'
           }`}
         >
           {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />}

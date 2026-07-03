@@ -47,8 +47,10 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
   const [dragItemId, setDragItemId] = useState<number | null>(null);
   const [dragOverItemId, setDragOverItemId] = useState<number | null>(null);
   const dragHandlePressedRef = useRef(false);
+  const loadSeqRef = useRef(0);
 
   const loadShots = useCallback(async (sceneId: number | null, tab: 'pending' | 'done' | 'trash') => {
+    const seq = ++loadSeqRef.current;
     setShotsLoading(true);
     try {
       const params = new URLSearchParams();
@@ -64,6 +66,8 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
       else params.set('status', tab);
       const res = await fetch(`/api/video2/list?${params.toString()}`);
       const data = await res.json();
+      // 竞态保护：只有最新请求的结果才能更新 state
+      if (seq !== loadSeqRef.current) return;
       if (data.success) {
         const list: Shot[] = (data.data || []).slice();
         list.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
@@ -72,7 +76,10 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     } catch (e) {
       console.error('加载列表失败:', e);
     } finally {
-      setShotsLoading(false);
+      // 同样保护 loading 状态
+      if (seq === loadSeqRef.current) {
+        setShotsLoading(false);
+      }
     }
   }, [projectId]);
 

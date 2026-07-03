@@ -27,6 +27,7 @@ export interface Shot {
   sceneContent: string;
   actors: string;
   props: string;
+  costume: string;
   location: string;
   focalLength: string;
   narration: string;
@@ -80,12 +81,22 @@ export interface Scene {
   videoCount?: number;
 }
 
+export interface AiPlatform {
+  id: string;              // 唯一标识，如 'geekai', 'siliconflow', 'custom_xxx'
+  name: string;            // 显示名称，如 'GeekAI', '硅基流动'
+  baseUrl: string;         // API base URL，如 'https://geekai.co/api/v1'
+  apiKey: string;          // API Key（保存后脱敏，编辑时明文）
+  docsUrl?: string;        // 技术文档链接
+  builtIn?: boolean;       // 是否内置平台
+}
+
 export interface ModelConfig {
   model: string;
   quality?: string;
-  provider: 'geekai' | 'siliconflow';
+  provider: string;  // 引用 AiPlatform.id
   cost: 'free' | 'low' | 'mid' | 'mid_high' | 'high';
   supportsImageRef?: boolean;
+  supportsVision?: boolean;  // 是否支持视觉输入（用于AI分析）
 }
 
 export interface Settings {
@@ -104,12 +115,16 @@ export interface Settings {
   video_target_bitrate_1080p: number;
   video_target_bitrate_720p: number;
   video_target_bitrate_480p: number;
+  image_compress_threshold_kb: number;
   model_prices: Record<string, any>;
+  ai_platforms: AiPlatform[];           // AI平台统一管理
+  analyze_llm_provider: string;         // AI分析使用的平台ID
+  analyze_llm_model: string;            // AI分析使用的模型名
 }
 
 export interface AiTask {
   id: string;
-  type: 'script_parse' | 'image_gen' | 'video_split';
+  type: 'script_parse' | 'image_gen' | 'video_split' | 'analyze_shot';
   status: 'pending' | 'processing' | 'done' | 'error';
   projectId?: number;
   input?: any;
@@ -136,4 +151,23 @@ export interface AiUsageStats {
     imageCount: number;
     cost: number;
   }>;
+}
+
+export interface DigitalAsset {
+  id: number;
+  projectId: number;
+  type: 'actor' | 'prop' | 'scene';
+  name: string;
+  imagePrompt: string;
+  imageUrl: string;
+  createdAt: string;
+  images?: DigitalAssetImage[];
+}
+
+export interface DigitalAssetImage {
+  id: number;
+  assetId: number;
+  imageUrl: string;
+  sortOrder: number;
+  createdAt: string;
 }
