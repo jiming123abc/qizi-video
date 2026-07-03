@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Loader2, Play, Check, ChevronDown, AlertCircle, Settings } from 'lucide-react';
+import { X, Loader2, Play, Check, ChevronDown, AlertCircle, Settings as SettingsIcon } from 'lucide-react';
 import type { Shot, ShotMedia, Settings, ModelConfig } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
@@ -38,8 +38,8 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const signedUrl = useSignedUrl(currentMedia.url);
-  const displayUrl = signedUrl || currentMedia.url;
+  const signedUrl = useSignedUrl(currentMedia?.url);
+  const displayUrl = signedUrl || currentMedia?.url;
 
   useEscapeKey(onClose, isOpen);
 
@@ -102,8 +102,8 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           shotId: shot.id,
-          mediaUrl: currentMedia.url,
-          mediaType: currentMedia.type,
+          mediaUrl: currentMedia?.url,
+          mediaType: currentMedia?.type,
           provider: selectedProvider,
           model: selectedModel,
         }),
@@ -244,7 +244,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                     onClick={handleOpenSettings}
                     className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs transition"
                   >
-                    <Settings className="w-3 h-3" />
+                    <SettingsIcon className="w-3 h-3" />
                     去设置
                   </button>
                 </div>

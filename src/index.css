@@ -69,17 +69,9 @@
     overflow-x: hidden;
   }
 
-  button,
-  [role="button"] {
-    min-height: 44px;
-    min-width: 44px;
-    touch-action: manipulation;
-  }
-
   input,
   select,
   textarea {
-    min-height: 44px;
     font-size: 16px;
   }
 
