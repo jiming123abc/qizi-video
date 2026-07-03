@@ -379,6 +379,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     setUrlError,
     pendingCompressionVideo,
     pendingCompressionDecision,
+    pendingCompressionFiles,
     handleUploadFiles,
     handleUploadFromUrl,
     cancelUpload,
@@ -1592,6 +1593,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onCancelUpload={cancelUpload}
         pendingCompressionVideo={pendingCompressionVideo}
         pendingCompressionDecision={pendingCompressionDecision}
+        pendingCompressionFiles={pendingCompressionFiles}
         onCompressionDecision={handleCompressionDecision}
         aliyunConfigured={aliyunConfigured}
         currentSceneName={currentSceneId === null ? '未分类' : (scenes.find(s => s.id === currentSceneId)?.name || '')}

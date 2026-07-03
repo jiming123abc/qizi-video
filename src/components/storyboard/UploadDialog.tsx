@@ -1,6 +1,7 @@
 import React from 'react';
 import { Upload, Link2, Image as ImageIcon, X } from 'lucide-react';
 import type { UploadDecision } from '../../lib/ossUtils';
+import type { FileCompressionInfo } from '../../hooks/useUpload';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 
 interface UploadingFile {
@@ -8,7 +9,7 @@ interface UploadingFile {
   name: string;
   size: number;
   progress: number;
-  status: 'uploading' | 'done' | 'error' | 'cancelled';
+  status: 'uploading' | 'done' | 'error' | 'cancelled' | 'pending' | 'detecting';
   message?: string;
 }
 
@@ -26,6 +27,7 @@ interface UploadDialogProps {
   onCancelUpload: () => void;
   pendingCompressionVideo: File | null;
   pendingCompressionDecision: UploadDecision | null;
+  pendingCompressionFiles?: FileCompressionInfo[];
   onCompressionDecision: (method: 'server' | 'browser' | 'aliyun' | 'cancel') => void;
   aliyunConfigured: boolean;
   currentSceneName?: string;
@@ -47,6 +49,7 @@ export function UploadDialog({
   onCancelUpload,
   pendingCompressionVideo,
   pendingCompressionDecision,
+  pendingCompressionFiles = [],
   onCompressionDecision,
   aliyunConfigured,
   currentSceneName,
@@ -221,6 +224,7 @@ export function UploadDialog({
         onClose={() => onCompressionDecision('cancel')}
         file={pendingCompressionVideo}
         decision={pendingCompressionDecision}
+        compressionFiles={pendingCompressionFiles}
         aliyunConfigured={aliyunConfigured}
         onSelect={onCompressionDecision}
       />

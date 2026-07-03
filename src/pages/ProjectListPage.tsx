@@ -412,6 +412,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         body: JSON.stringify({ coverUrl })
       });
       setProjects(prev => prev.map(p => p.id === projectId ? { ...p, coverUrl } : p));
+      setUploadDialogProject(prev => prev && prev.id === projectId ? { ...prev, coverUrl } : prev);
     } catch (e) {
       console.error('设置封面失败:', e);
     }
@@ -423,6 +424,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       const data = await res.json();
       if (data.success) {
         setProjects(prev => prev.map(p => p.id === projectId ? { ...p, coverUrl: DEFAULT_COVER } : p));
+        setUploadDialogProject(prev => prev && prev.id === projectId ? { ...prev, coverUrl: DEFAULT_COVER } : prev);
         showToast('封面已删除');
       }
     } catch (e) {

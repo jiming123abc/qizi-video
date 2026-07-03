@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { batchGetSignedUrls, getSignedUrlFromCache } from '../lib/ossUtils';
+import { useState, useEffect } from 'react';
+import { batchGetSignedUrls, getSignedUrlFromCache, subscribeSignUrlUpdate } from '../lib/ossUtils';
 
 const pendingUrls = new Set<string>();
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -23,10 +23,9 @@ function requestSignUrl(url: string) {
 }
 
 // 组件级别：为单个 URL 获取签名 URL
-// 返回签名 URL（未就绪时返回原始 URL）
+// 使用 pub-sub 订阅缓存更新，替代轮询；保留长间隔轮询作为兜底
 export function useSignedUrl(originalUrl: string | undefined | null): string {
   const [signedUrl, setSignedUrl] = useState<string>('');
-  const urlRef = useRef(originalUrl);
 
   useEffect(() => {
     if (!originalUrl) {
@@ -42,19 +41,33 @@ export function useSignedUrl(originalUrl: string | undefined | null): string {
     if (cached === originalUrl) {
       requestSignUrl(originalUrl);
     }
-  }, [originalUrl]);
 
-  // 当缓存更新时同步更新 state
-  useEffect(() => {
-    if (!originalUrl) return;
-    const interval = setInterval(() => {
-      const cached = getSignedUrlFromCache(originalUrl);
-      if (cached !== signedUrl && cached !== originalUrl) {
-        setSignedUrl(cached);
+    // 订阅缓存更新：当本 URL 的签名就绪时立即更新 state
+    const unsubscribe = subscribeSignUrlUpdate(updatedUrls => {
+      if (updatedUrls.includes(originalUrl)) {
+        const latest = getSignedUrlFromCache(originalUrl);
+        setSignedUrl(prev => (prev !== latest ? latest : prev));
       }
-    }, 200);
-    return () => clearInterval(interval);
-  }, [originalUrl, signedUrl]);
+    });
+
+    // 兜底：长间隔轮询（2s），防止 pub-sub 遗漏；最多持续 30s
+    const startTime = Date.now();
+    const fallbackInterval = setInterval(() => {
+      const latest = getSignedUrlFromCache(originalUrl);
+      if (latest !== originalUrl) {
+        setSignedUrl(prev => (prev !== latest ? latest : prev));
+      }
+      // 签名就绪或超过 30s 则停止兜底轮询
+      if (latest !== originalUrl || Date.now() - startTime > 30000) {
+        clearInterval(fallbackInterval);
+      }
+    }, 2000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(fallbackInterval);
+    };
+  }, [originalUrl]);
 
   return signedUrl || originalUrl || '';
 }

@@ -65,6 +65,23 @@ export function getVideoPoster(url: string): string {
 // ================ 签名 URL 缓存（1小时有效期） ================
 const signUrlCache = new Map<string, { url: string; expires: number }>();
 
+// 签名 URL 更新订阅（pub-sub，替代轮询）
+const signUrlSubscribers = new Set<(urls: string[]) => void>();
+
+/** 订阅签名 URL 缓存更新，返回取消订阅函数 */
+export function subscribeSignUrlUpdate(cb: (urls: string[]) => void): () => void {
+  signUrlSubscribers.add(cb);
+  return () => { signUrlSubscribers.delete(cb); };
+}
+
+/** 通知订阅者指定 URL 的签名已更新 */
+function notifySignUrlUpdate(updatedUrls: string[]): void {
+  if (updatedUrls.length === 0) return;
+  signUrlSubscribers.forEach(cb => {
+    try { cb(updatedUrls); } catch (e) { /* 忽略订阅者错误 */ }
+  });
+}
+
 export async function getSignedOssUrl(ossUrl: string): Promise<string> {
   if (!ossUrl) return ossUrl;
   if (ossUrl.startsWith('data:')) return ossUrl;
@@ -89,10 +106,11 @@ export async function getSignedOssUrl(ossUrl: string): Promise<string> {
 
   // 缓存 50 分钟（1小时有效期提前刷新）
   signUrlCache.set(ossUrl, { url: signedUrl, expires: Date.now() + 50 * 60 * 1000 });
+  notifySignUrlUpdate([ossUrl]);
   return signedUrl;
 }
 
-// 批量获取签名 URL（分批请求，避免 GET URL 过长导致 414）
+// 批量获取签名 URL（分批请求，避免 GET URL 过长导致 414；失败批次自动重试）
 export async function batchGetSignedUrls(urls: string[]): Promise<void> {
   // 过滤出需要签名的 URL（排除缓存命中和非 OSS URL）
   const toSign = urls.filter(u => {
@@ -105,24 +123,47 @@ export async function batchGetSignedUrls(urls: string[]): Promise<void> {
 
   // 分批处理，避免 GET 请求 query string 过长导致 414
   const BATCH_SIZE = 5;
+  const MAX_RETRIES = 2;
   const now = Date.now();
 
   for (let i = 0; i < toSign.length; i += BATCH_SIZE) {
     const batch = toSign.slice(i, i + BATCH_SIZE);
-    try {
-      const params = batch.map(u => `urls=${encodeURIComponent(u)}`).join('&');
-      const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
-      if (!res.ok) {
-        console.warn('[oss] 批量签名请求失败:', res.status, res.statusText);
-        continue;
-      }
+    let success = false;
 
-      const { signedUrls } = await res.json();
-      for (const [origUrl, signedUrl] of Object.entries(signedUrls)) {
-        signUrlCache.set(origUrl, { url: signedUrl as string, expires: now + 50 * 60 * 1000 });
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const params = batch.map(u => `urls=${encodeURIComponent(u)}`).join('&');
+        const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
+        if (!res.ok) {
+          console.warn(`[oss] 批量签名请求失败 (batch ${i / BATCH_SIZE + 1}, attempt ${attempt + 1}):`, res.status, res.statusText);
+          if (attempt < MAX_RETRIES) {
+            await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+            continue;
+          }
+          break;
+        }
+
+        const { signedUrls } = await res.json();
+        const updated: string[] = [];
+        for (const [origUrl, signedUrl] of Object.entries(signedUrls)) {
+          signUrlCache.set(origUrl, { url: signedUrl as string, expires: now + 50 * 60 * 1000 });
+          updated.push(origUrl);
+        }
+        if (updated.length > 0) notifySignUrlUpdate(updated);
+        success = true;
+        break;
+      } catch (e) {
+        console.error(`[oss] 批量签名失败 (batch ${i / BATCH_SIZE + 1}, attempt ${attempt + 1}):`, e);
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+          continue;
+        }
+        break;
       }
-    } catch (e) {
-      console.error('[oss] 批量签名失败 (batch', i / BATCH_SIZE + 1, '):', e);
+    }
+
+    if (!success) {
+      console.warn(`[oss] 批量签名最终失败，跳过 batch ${i / BATCH_SIZE + 1}，共 ${batch.length} 个 URL`);
     }
   }
 }

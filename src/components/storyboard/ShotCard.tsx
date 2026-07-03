@@ -320,6 +320,7 @@ export function ShotCard({
   const [isVideoLoading, setIsVideoLoading] = useState(false);
   const [bufferProgress, setBufferProgress] = useState(0);
   const [imgError, setImgError] = useState(false);
+  const [posterRetryCount, setPosterRetryCount] = useState(0);
   const [showMergedFrom, setShowMergedFrom] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
@@ -342,6 +343,20 @@ export function ShotCard({
   // 签名 URL
   const signedMediaUrl = useSignedUrl(currentMedia?.url);
   const signedPosterUrl = useSignedUrl(currentMedia?.url ? getVideoPoster(currentMedia.url) : undefined);
+
+  // 当签名 URL 就绪或媒体切换时，重置图片错误状态
+  useEffect(() => {
+    if ((signedPosterUrl || signedMediaUrl) && imgError) {
+      setImgError(false);
+      setPosterRetryCount(0);
+    }
+  }, [signedPosterUrl, signedMediaUrl, currentIndex]);
+
+  // 媒体切换时重置错误状态
+  useEffect(() => {
+    setImgError(false);
+    setPosterRetryCount(0);
+  }, [currentIndex, currentMedia?.id]);
 
   useEffect(() => {
     if (!cardRef.current) return;
@@ -609,6 +624,7 @@ export function ShotCard({
                         </div>
                       ) : isVisible ? (
                         <img
+                          key={`poster-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
                           src={signedPosterUrl || signedMediaUrl}
                           alt={currentMedia.filename}
                           className="w-full h-full object-cover"
@@ -616,6 +632,12 @@ export function ShotCard({
                           onError={() => {
                             console.error('[ShotCard] 封面加载失败:', { url: currentMedia.url, shotId: shot.id });
                             setImgError(true);
+                            if (posterRetryCount < 3) {
+                              setTimeout(() => {
+                                setImgError(false);
+                                setPosterRetryCount(c => c + 1);
+                              }, 1000 * (posterRetryCount + 1));
+                            }
                           }}
                         />
                       ) : (
@@ -688,6 +710,7 @@ export function ShotCard({
                   </div>
                 ) : (
                   <img
+                    key={`img-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
                     src={signedMediaUrl}
                     alt={currentMedia.filename}
                     className="w-full h-full object-cover"
@@ -695,6 +718,12 @@ export function ShotCard({
                     onError={() => {
                       console.error('[ShotCard] 图片加载失败:', { url: currentMedia.url, filename: currentMedia.filename, shotId: shot.id });
                       setImgError(true);
+                      if (posterRetryCount < 3) {
+                        setTimeout(() => {
+                          setImgError(false);
+                          setPosterRetryCount(c => c + 1);
+                        }, 1000 * (posterRetryCount + 1));
+                      }
                     }}
                   />
                 )

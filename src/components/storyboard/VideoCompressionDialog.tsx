@@ -1,12 +1,14 @@
 import React from 'react';
-import { X, Server, Monitor, Hand, AlertTriangle, Cloud } from 'lucide-react';
+import { X, Server, Monitor, Hand, AlertTriangle, Cloud, FileVideo } from 'lucide-react';
 import type { UploadDecision } from '../../lib/ossUtils';
+import type { FileCompressionInfo } from '../../hooks/useUpload';
 
 interface VideoCompressionDialogProps {
   isOpen: boolean;
   onClose: () => void;
   file: File | null;
   decision: UploadDecision | null;
+  compressionFiles?: FileCompressionInfo[];
   aliyunConfigured?: boolean;
   onSelect: (method: 'server' | 'browser' | 'aliyun' | 'cancel') => void;
 }
@@ -16,10 +18,11 @@ export function VideoCompressionDialog({
   onClose,
   file,
   decision,
+  compressionFiles = [],
   aliyunConfigured = false,
   onSelect,
 }: VideoCompressionDialogProps) {
-  if (!isOpen || !file || !decision) return null;
+  if (!isOpen || !decision) return null;
 
   const canServerCompress = decision.fileSizeMBNum <= 95;
   const canAliyunCompress = aliyunConfigured;
@@ -28,9 +31,11 @@ export function VideoCompressionDialog({
   const targetBitrateKbps = decision.targetBitrateKbps;
   const resolution = decision.resolution || 'other';
 
+  const isMultiple = compressionFiles.length > 1;
+
   return (
     <div className="fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
           <h3 className="text-base font-semibold text-white">视频码率过高</h3>
           <button
@@ -41,36 +46,58 @@ export function VideoCompressionDialog({
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4">
+        <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/20">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-amber-200">检测到视频码率较高</p>
-                <div className="text-xs text-amber-200/70 space-y-0.5">
-                  <p>当前码率：<span className="text-amber-100 font-medium">{bitrateKbps?.toLocaleString() || '未知'} kbps</span></p>
-                  <p>目标码率：<span className="text-amber-100 font-medium">{targetBitrateKbps.toLocaleString()} kbps</span>（{resolution}）</p>
-                  <p>文件大小：<span className="text-amber-100 font-medium">{fileSizeMB} MB</span></p>
-                </div>
+              <div className="flex-1">
+                <p className="text-sm text-amber-200 font-medium">
+                  {isMultiple 
+                    ? `${compressionFiles.length} 个视频文件码率超过限制` 
+                    : '视频文件码率超过限制'}
+                </p>
+                <p className="mt-0.5 text-xs text-amber-200/70">
+                  当前码率 {bitrateKbps} Kbps，建议压缩至 {targetBitrateKbps} Kbps
+                </p>
               </div>
             </div>
           </div>
 
-          <div className="space-y-2">
-            <p className="text-sm text-white/80 font-medium">请选择压缩方式：</p>
+          {isMultiple && (
+            <div className="space-y-2">
+              <p className="text-xs text-white/50 font-medium">需要压缩的文件：</p>
+              <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                {compressionFiles.map((cf, idx) => (
+                  <div 
+                    key={`${cf.index}-${cf.file.name}`}
+                    className="flex items-center gap-2 p-2 rounded-lg bg-white/5"
+                  >
+                    <FileVideo className="w-4 h-4 text-violet-400" />
+                    <span className="text-xs text-white/80 truncate flex-1">
+                      {cf.file.name}
+                    </span>
+                    <span className="text-xs text-amber-400">
+                      {(cf.decision?.fileSizeMB || '').toString().substring(0, 5)}MB
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
+          <div className="space-y-3">
             <button
               onClick={() => onSelect('server')}
               disabled={!canServerCompress}
-              className={`w-full p-3 rounded-xl border text-left transition ${
-                canServerCompress
-                  ? 'border-green-400/30 bg-green-500/10 hover:bg-green-500/20 hover:border-green-400/50 cursor-pointer'
-                  : 'border-white/10 bg-white/[0.02] opacity-50 cursor-not-allowed'
-              }`}
+              className={`w-full p-3 rounded-xl border ${
+                canServerCompress 
+                  ? 'border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20' 
+                  : 'border-white/10 bg-white/[0.02]'
+              } text-left transition cursor-pointer`}
             >
-              <div className="flex items-start gap-3">
+              <div className="flex items-center gap-3">
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                  canServerCompress ? 'bg-green-500/20 text-green-300' : 'bg-white/5 text-white/30'
+                  canServerCompress ? 'bg-violet-500/20 text-violet-300' : 'bg-white/5 text-white/30'
                 }`}>
                   <Server className="w-4.5 h-4.5" />
                 </div>
@@ -81,12 +108,7 @@ export function VideoCompressionDialog({
                     </span>
                     {!canServerCompress && (
                       <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-white/50">
-                        不支持
-                      </span>
-                    )}
-                    {canServerCompress && (
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">
-                        推荐
+                        不可用
                       </span>
                     )}
                   </div>
@@ -96,7 +118,7 @@ export function VideoCompressionDialog({
                   </div>
                   {!canServerCompress && (
                     <p className="mt-1 text-xs text-amber-300/70">
-                      文件超过 95MB，服务端暂不支持
+                      部分文件超过 95MB，服务端暂不支持
                     </p>
                   )}
                 </div>
@@ -105,19 +127,17 @@ export function VideoCompressionDialog({
 
             <button
               onClick={() => onSelect('browser')}
-              className="w-full p-3 rounded-xl border border-blue-400/30 bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/50 text-left transition cursor-pointer"
+              className="w-full p-3 rounded-xl border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20 text-left transition cursor-pointer"
             >
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-300 flex items-center justify-center shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/20 text-cyan-300 flex items-center justify-center shrink-0">
                   <Monitor className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-white">浏览器压缩</span>
-                  </div>
-                  <div className="mt-0.5 text-xs text-white/60">
-                    无文件大小限制 · 本地处理 · 免费
-                  </div>
+                  <span className="text-sm font-medium text-white">浏览器端压缩</span>
+                  <p className="mt-0.5 text-xs text-white/60">
+                    本地处理 · 隐私安全 · 速度取决于电脑性能
+                  </p>
                 </div>
               </div>
             </button>
@@ -125,13 +145,13 @@ export function VideoCompressionDialog({
             <button
               onClick={() => onSelect('aliyun')}
               disabled={!canAliyunCompress}
-              className={`w-full p-3 rounded-xl border text-left transition ${
-                canAliyunCompress
-                  ? 'border-orange-400/30 bg-orange-500/10 hover:bg-orange-500/20 hover:border-orange-400/50 cursor-pointer'
-                  : 'border-white/10 bg-white/[0.02] opacity-50 cursor-not-allowed'
-              }`}
+              className={`w-full p-3 rounded-xl border ${
+                canAliyunCompress 
+                  ? 'border-orange-500/30 bg-orange-500/10 hover:bg-orange-500/20' 
+                  : 'border-white/10 bg-white/[0.02]'
+              } text-left transition cursor-pointer`}
             >
-              <div className="flex items-start gap-3">
+              <div className="flex items-center gap-3">
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                   canAliyunCompress ? 'bg-orange-500/20 text-orange-300' : 'bg-white/5 text-white/30'
                 }`}>
