@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
-import { X, Download, TrendingUp, MessageSquare, Image, Film } from 'lucide-react';
+import { X, Download, TrendingUp, MessageSquare, Image, Film, RotateCw } from 'lucide-react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 interface AiUsageStats {
@@ -43,21 +43,9 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
       const data: AiUsageStats = json.data || json;
       setStats(data);
     } catch (e) {
+      // P3-3：失败时不显示假数据，仅设置 error 状态，UI 提供重试按钮
       setError(e instanceof Error ? e.message : '获取数据失败');
-      // 使用模拟数据
-      setStats({
-        totalCost: 12.5,
-        breakdown: {
-          chat: 5.2,
-          image: 7.3,
-          video_split: 0,
-        },
-        modelStats: [
-          { model: 'DeepSeek V3', provider: 'DeepSeek', promptTokens: 80000, completionTokens: 45000, totalTokens: 125000, imageCount: 0, cost: 3.5 },
-          { model: 'GPT-Image-2', provider: 'OpenAI', promptTokens: 0, completionTokens: 0, totalTokens: 0, imageCount: 15, cost: 1.2 },
-          { model: 'Z-Image-Turbo', provider: 'Zhipu', promptTokens: 0, completionTokens: 0, totalTokens: 0, imageCount: 12, cost: 0.24 },
-        ],
-      });
+      setStats(null);
     } finally {
       setLoading(false);
     }
@@ -111,7 +99,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition"
+            className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition"
           >
             <X className="w-5 h-5" />
           </button>
@@ -148,9 +136,16 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
         )}
 
         {/* 错误提示 */}
-        {error && (
-          <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm">
-            {error}
+        {error && !loading && (
+          <div className="mb-4 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
+            <p className="text-sm text-red-300 mb-3">{error}</p>
+            <button
+              onClick={() => fetchStats(period)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-200 text-xs transition"
+            >
+              <RotateCw className="w-3 h-3" />
+              重试
+            </button>
           </div>
         )}
 

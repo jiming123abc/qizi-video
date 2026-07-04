@@ -16,10 +16,10 @@ import {
   GripVertical,
   X,
   Info,
-  Loader2
+  Loader2,
+  RotateCcw
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
-import { MediaCarousel } from './MediaCarousel';
 import AnalyzeShotDialog from '../ai/AnalyzeShotDialog';
 import { getVideoPoster, uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
@@ -46,6 +46,8 @@ interface ShotCardProps {
   onSelect?: (shot: Shot) => void;
   onUpdate?: (id: number, fields: Partial<Shot>) => void;
   onDelete?: (id: number) => void;
+  onHardDelete?: (id: number) => void;
+  onRestore?: (id: number) => void;
   onSort?: (id: number, direction: 'up' | 'down') => void;
   onExpand?: (id: number) => void;
   isExpanded?: boolean;
@@ -58,6 +60,8 @@ interface ShotCardProps {
   isLast?: boolean;
   isMobile?: boolean;
   currentTab?: 'pending' | 'done' | 'trash';
+  // P4-1：搜索状态下禁用拖拽，手柄显示禁用样式
+  dragDisabled?: boolean;
   onStatusClick?: (shot: Shot) => void;
   onShotNoClick?: (shot: Shot) => void;
   onDragHandleMouseDown?: () => void;
@@ -67,6 +71,8 @@ interface ShotCardProps {
   onVideoRefReady?: (key: string, ref: HTMLVideoElement | null) => void;
   onDeleteMedia?: (shotId: number, mediaId: number) => void;
   onOpenSettings?: () => void;
+  // P3-4：上传失败等提示改用 toast 而非 alert
+  onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 const SHOT_TYPES = ['大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写'];
@@ -293,6 +299,8 @@ export function ShotCard({
   onSelect,
   onUpdate,
   onDelete,
+  onHardDelete,
+  onRestore,
   onSort,
   onExpand,
   isExpanded = false,
@@ -305,6 +313,7 @@ export function ShotCard({
   isLast = false,
   isMobile = false,
   currentTab = 'pending',
+  dragDisabled = false,
   onStatusClick,
   onShotNoClick,
   onDragHandleMouseDown,
@@ -314,6 +323,7 @@ export function ShotCard({
   onVideoRefReady,
   onDeleteMedia,
   onOpenSettings,
+  onShowToast,
 }: ShotCardProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -404,14 +414,16 @@ export function ShotCard({
     const MAX_MEDIA_COUNT = 10;
     const remaining = MAX_MEDIA_COUNT - media.length;
     if (remaining <= 0) {
-      alert(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`);
+      // P3-4：alert 改为 toast
+      onShowToast?.(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
       return;
     }
 
     const file = files[0];
     const detected = detectFileType(file);
     if (!detected.supported) {
-      alert('不支持的文件格式');
+      // P3-4：alert 改为 toast
+      onShowToast?.('不支持的文件格式', 'error');
       return;
     }
 
@@ -491,7 +503,8 @@ export function ShotCard({
     } catch (err) {
       console.error('上传失败:', err);
       setUploadMessage('上传失败');
-      alert(`上传失败: ${(err as Error).message}`);
+      // P3-4：alert 改为 toast
+      onShowToast?.(`上传失败: ${(err as Error).message}`, 'error');
     } finally {
       setTimeout(() => {
         setIsUploading(false);
@@ -499,7 +512,7 @@ export function ShotCard({
         setUploadMessage('');
       }, 500);
     }
-  }, [shot.id, projectId, media, onUpdate]);
+  }, [shot.id, projectId, media, onUpdate, onShowToast]);
 
   const handlePlayVideo = useCallback(() => {
     if (!shouldLoadVideo) {
@@ -733,7 +746,7 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  className="touch-target-44 absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
                   style={{ opacity: 0.7 }}
                 >
                   <ChevronLeft className="w-4 h-4 text-white" />
@@ -744,7 +757,7 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  className="touch-target-44 absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
                   style={{ opacity: 0.7 }}
                 >
                   <ChevronRight className="w-4 h-4 text-white" />
@@ -823,7 +836,7 @@ export function ShotCard({
         {/* 左上角：选择按钮 */}
         <button
           onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-          className={`absolute top-3 left-3 z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+          className={`touch-target-44 absolute top-3 left-3 z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${
             isSelected
               ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
               : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
@@ -838,7 +851,7 @@ export function ShotCard({
           <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5">
             <button
               onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
-              className="w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              className="touch-target-44 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
               title="全屏查看"
             >
               <Maximize2 className="w-4 h-4 text-white/90" />
@@ -851,7 +864,7 @@ export function ShotCard({
                     onDeleteMedia(shot.id, currentMedia.id);
                   }
                 }}
-                className="w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
+                className="touch-target-44 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
                 title="删除素材"
               >
                 <Trash2 className="w-3.5 h-3.5 text-white/90" />
@@ -860,27 +873,40 @@ export function ShotCard({
           </div>
         )}
 
-        {/* 左下角：状态标签 */}
+        {/* 左下角：状态标签 / 恢复按钮 */}
         <div className="absolute bottom-3 left-3 z-20">
-          <button
-            onClick={(e) => { e.stopPropagation(); onStatusClick?.(shot); }}
-            className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border transition cursor-pointer ${
-              shot.status === 'done'
-                ? 'bg-green-500/20 border-green-400/60 text-green-200 hover:bg-green-500/30'
-                : 'bg-white/10 border-white/25 text-white/80 hover:bg-white/20'
-            }`}
-          >
-            {shot.status === 'done' ? (
-              <>
-                <span className="w-4 h-4 rounded-full border-[1.5px] border-green-400 flex items-center justify-center mr-1.5" style={{ backgroundColor: '#22c55e' }}>
-                  <Check className="w-3 h-3 text-white" />
-                </span>
-                已拍摄
-              </>
-            ) : (
-              '未拍摄'
-            )}
-          </button>
+          {currentTab === 'trash' ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRestore?.(shot.id); }}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border border-white/25 bg-white/10 text-white/80 hover:bg-white/20 transition cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              恢复
+            </button>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStatusClick?.(shot); }}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition cursor-pointer ${
+                shot.status === 'done'
+                  ? 'bg-green-500/20 border-green-400/60 text-green-200 hover:bg-green-500/30'
+                  : 'bg-white/10 border-white/25 text-white/80 hover:bg-white/20'
+              }`}
+            >
+              {shot.status === 'done' ? (
+                <>
+                  <span className="w-4 h-4 rounded-full border-[1.5px] border-green-400 flex items-center justify-center shrink-0" style={{ backgroundColor: '#22c55e' }}>
+                    <Check className="w-3 h-3 text-white" />
+                  </span>
+                  已拍摄
+                </>
+              ) : (
+                <>
+                  <span className="w-4 h-4 rounded-full border-[1.5px] border-white/40 shrink-0" />
+                  未拍摄
+                </>
+              )}
+            </button>
+          )}
         </div>
 
         {/* 右下角：镜头编号（仅已拍摄 tab 显示） */}
@@ -1079,26 +1105,36 @@ export function ShotCard({
             </button>
           )}
 
-          {/* 管理参考画面按钮 */}
-          <button
-            onClick={() => onManageMedia?.(shot)}
-            className="w-full mt-2 py-2 rounded-xl border border-dashed border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition flex items-center justify-center gap-2"
-          >
-            <ImageIcon className="w-4 h-4" />
-            管理参考画面 ({media.length}/10)
-          </button>
+          {/* 管理参考画面 + AI 生成按钮（P3-23：AI 生图入口常驻） */}
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={() => onManageMedia?.(shot)}
+              className="flex-1 py-2 rounded-xl border border-dashed border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition flex items-center justify-center gap-2"
+            >
+              <ImageIcon className="w-4 h-4" />
+              管理参考画面 ({media.length}/10)
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onAiGenerate?.(shot); }}
+              className="py-2 px-3 rounded-xl border border-dashed border-pink-400/30 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition flex items-center justify-center gap-1.5"
+              title="AI 生成参考画面"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              AI生成
+            </button>
+          </div>
         </div>
       )}
 
       {/* 底部操作栏 */}
-      <div className="px-3 pb-3 flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
+      <div className="px-3 pb-3 flex items-center justify-between flex-wrap gap-y-2">
+        <div className="flex items-center gap-1.5 min-w-0">
           {isMobile ? (
             <>
               <button
                 onClick={() => onSort?.(shot.id, 'up')}
                 disabled={isFirst}
-                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
+                className={`touch-target-44 w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isFirst
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'
@@ -1110,7 +1146,7 @@ export function ShotCard({
               <button
                 onClick={() => onSort?.(shot.id, 'down')}
                 disabled={isLast}
-                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
+                className={`touch-target-44 w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isLast
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'
@@ -1123,9 +1159,14 @@ export function ShotCard({
           ) : (
             <button
               data-drag-handle
-              onMouseDown={() => onDragHandleMouseDown?.()}
-              className="w-6 h-6 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/40 hover:text-white hover:bg-white/10 rounded transition"
-              title="拖拽排序"
+              onMouseDown={() => { if (!dragDisabled) onDragHandleMouseDown?.(); }}
+              disabled={dragDisabled}
+              className={`w-6 h-6 flex items-center justify-center rounded transition ${
+                dragDisabled
+                  ? 'cursor-not-allowed text-white/20'
+                  : 'cursor-grab active:cursor-grabbing text-white/40 hover:text-white hover:bg-white/10'
+              }`}
+              title={dragDisabled ? '搜索状态下不可拖拽排序' : '拖拽排序'}
             >
               <GripVertical className="w-4 h-4" />
             </button>
@@ -1144,15 +1185,27 @@ export function ShotCard({
             {isExpanded ? <ChevronUp className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} /> : <ChevronDown className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />}
             {!isMobile && <span>{isExpanded ? '收起' : '详情'}</span>}
           </button>
-          <button
-            onClick={() => onDelete?.(shot.id)}
-            className={`inline-flex items-center gap-1 rounded-full text-xs border border-red-400/30 hover:bg-red-500/20 text-red-200 transition ${
-              isMobile ? 'px-2.5 py-2' : 'px-2.5 py-1.5'
-            }`}
-            title="删除"
-          >
-            <Trash2 className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
-          </button>
+          {currentTab === 'trash' && onHardDelete ? (
+            <button
+              onClick={() => onHardDelete(shot.id)}
+              className={`inline-flex items-center gap-1 rounded-full text-xs border border-red-400/30 hover:bg-red-500/20 text-red-200 transition ${
+                isMobile ? 'px-2.5 py-2' : 'px-2.5 py-1.5'
+              }`}
+              title="彻底删除"
+            >
+              <Trash2 className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
+            </button>
+          ) : (
+            <button
+              onClick={() => onDelete?.(shot.id)}
+              className={`inline-flex items-center gap-1 rounded-full text-xs border border-red-400/30 hover:bg-red-500/20 text-red-200 transition ${
+                isMobile ? 'px-2.5 py-2' : 'px-2.5 py-1.5'
+              }`}
+              title="删除"
+            >
+              <Trash2 className={isMobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
+            </button>
+          )}
         </div>
       </div>
     </div>

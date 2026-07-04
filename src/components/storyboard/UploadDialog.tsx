@@ -99,7 +99,7 @@ export function UploadDialog({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={handleBackdropClick}>
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={handleBackdropClick}>
         <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -110,7 +110,7 @@ export function UploadDialog({
                 </p>
               )}
             </div>
-            <button onClick={handleCloseClick} className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
+            <button onClick={handleCloseClick} className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">
               <X className="w-4 h-4" />
             </button>
           </div>

@@ -3,6 +3,7 @@ import { X, Eye, EyeOff, ChevronDown, Loader2, Download, Upload, AlertTriangle, 
 import type { Settings, AiPlatform } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { clearAdminToken, checkAuth, loginWithToken } from '../../lib/auth';
+import { getErrorMessage } from '../../lib/utils';
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -90,15 +91,29 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
         'ai_platforms',
       ] as const;
 
+      // P3-7：记录每个设置项的保存结果，失败时提示具体哪项
+      const failedKeys: string[] = [];
       for (const key of keys) {
-        await fetch('/api/video2/settings', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, value: settings[key] }),
-        });
+        try {
+          const res = await fetch('/api/video2/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, value: settings[key] }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            failedKeys.push(`${key}（${data.message || res.statusText}）`);
+          }
+        } catch (e) {
+          failedKeys.push(`${key}（网络错误）`);
+        }
       }
 
-      onClose();
+      if (failedKeys.length > 0) {
+        setError(`以下设置项保存失败：${failedKeys.join('、')}`);
+      } else {
+        onClose();
+      }
     } catch (e) {
       console.error('保存设置失败:', e);
       setError('保存设置失败');
@@ -260,9 +275,9 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
       alert(`导入成功！\n场次: ${data.sceneCount} 个\n分镜: ${data.shotCount} 个`);
       onClose();
       window.location.reload();
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error('导入备份失败:', e);
-      setError('导入备份失败: ' + (e.message || ''));
+      setError('导入备份失败: ' + getErrorMessage(e, ''));
     } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';

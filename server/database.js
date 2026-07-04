@@ -57,6 +57,20 @@ const dbAsync = {
         else resolve({ lastID: this.lastID, changes: this.changes });
       });
     });
+  },
+  // P4-2：事务辅助方法，包裹多步写操作保证原子性
+  // 用法：await dbAsync.transaction(async (tx) => { await tx.run(...); await tx.run(...); });
+  // tx 与 dbAsync 等价（同一连接），BEGIN/COMMIT/ROLLBACK 控制事务边界
+  transaction: async (fn) => {
+    await dbAsync.run('BEGIN');
+    try {
+      const result = await fn(dbAsync);
+      await dbAsync.run('COMMIT');
+      return result;
+    } catch (e) {
+      await dbAsync.run('ROLLBACK').catch(() => {});
+      throw e;
+    }
   }
 };
 
@@ -419,6 +433,9 @@ function video2DbSetReady() {
 
 function initVideo2Database() {
   video2Db.serialize(() => {
+    // P3-5：ignoredMsg 提前到 serialize 顶部，避免 TDZ 风险
+    const ignoredMsg = 'duplicate column name';
+
     // 1. 创建 videos 表（完整新结构，包括所有新列：type/coverUrl/isCover/reference）
     video2Db.run(`
       CREATE TABLE IF NOT EXISTS videos (
@@ -494,6 +511,24 @@ function initVideo2Database() {
       )
     `);
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_shot_media_shot ON shot_media(shotId)');
+
+    // ========== ai_generated_images 表（P3-22：AI 生图历史持久化） ==========
+    video2Db.run(`
+      CREATE TABLE IF NOT EXISTS ai_generated_images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ownerType TEXT NOT NULL,
+        ownerId INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        prompt TEXT DEFAULT '',
+        model TEXT DEFAULT '',
+        provider TEXT DEFAULT '',
+        size TEXT DEFAULT '',
+        fileSize INTEGER DEFAULT 0,
+        sortOrder INTEGER DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    video2Db.run('CREATE INDEX IF NOT EXISTS idx_ai_gen_owner ON ai_generated_images(ownerType, ownerId)');
 
     // ========== settings 表（系统设置） ==========
     video2Db.run(`
@@ -629,7 +664,7 @@ function initVideo2Database() {
 
     // 4. 安全添加列（列已存在时报 duplicate column name，忽略即可，依然在 serialize 上下文中串行）
     //    对旧数据库升级：逐列补齐
-    const ignoredMsg = 'duplicate column name';
+    // P3-5：ignoredMsg 已在 serialize 顶部声明，此处无需重复
     const addColSqlList = [
       'ALTER TABLE videos ADD COLUMN sortOrder INTEGER DEFAULT 0',
       'ALTER TABLE videos ADD COLUMN deleted INTEGER DEFAULT 0',
@@ -911,6 +946,19 @@ const video2Async = {
         });
       });
     });
+  },
+  // P4-2：事务辅助方法（video2Db 连接），包裹多步写操作保证原子性
+  // 用法：await video2Async.transaction(async (tx) => { await tx.run(...); });
+  transaction: async (fn) => {
+    await video2Async.run('BEGIN');
+    try {
+      const result = await fn(video2Async);
+      await video2Async.run('COMMIT');
+      return result;
+    } catch (e) {
+      await video2Async.run('ROLLBACK').catch(() => {});
+      throw e;
+    }
   }
 };
 
@@ -920,19 +968,86 @@ const video2Projects = {
     const projects = await video2Async.all(
       'SELECT * FROM projects ORDER BY sortOrder ASC, id ASC'
     );
-    // 附加视频数与占用空间
-    const result = [];
-    for (const p of projects) {
-      const stats = await video2Async.get(
-        'SELECT COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize FROM videos WHERE projectId = ? AND deleted = 0 AND reference = 0',
-        [p.id]
-      );
-      result.push({
+    if (projects.length === 0) return [];
+
+    // P4-8：5 个 GROUP BY 聚合查询替代 N+1（1+5N → 7）
+    // 1. 分镜主视频（videos 表，reference=0）
+    const videoStatsRows = await video2Async.all(
+      `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
+       FROM videos WHERE deleted = 0 AND reference = 0
+       GROUP BY projectId`
+    );
+    const videoMap = new Map();
+    videoStatsRows.forEach(r => videoMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+
+    // 2. 项目参考文件（videos 表，reference=1）
+    const refStatsRows = await video2Async.all(
+      `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
+       FROM videos WHERE deleted = 0 AND reference = 1
+       GROUP BY projectId`
+    );
+    const refMap = new Map();
+    refStatsRows.forEach(r => refMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+
+    // 3. 分镜参考画面（shot_media JOIN videos）
+    const shotMediaStatsRows = await video2Async.all(
+      `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(m.size),0) as totalSize
+       FROM shot_media m JOIN videos v ON m.shotId = v.id
+       WHERE v.deleted = 0
+       GROUP BY v.projectId`
+    );
+    const shotMediaMap = new Map();
+    shotMediaStatsRows.forEach(r => shotMediaMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+
+    // 4. 数字资产图（digital_asset_images JOIN digital_assets）
+    //    注意：digital_asset_images 表只存 imageUrl，无 size 列，totalSize 用 0 占位（COUNT 仍准确）
+    const assetImgStatsRows = await video2Async.all(
+      `SELECT da.projectId, COUNT(*) as cnt, 0 as totalSize
+       FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
+       GROUP BY da.projectId`
+    );
+    const assetImgMap = new Map();
+    assetImgStatsRows.forEach(r => assetImgMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+
+    // 5. AI 生图历史（ai_generated_images，按 shot/asset 维度关联到项目）
+    //    该查询涉及两个子查询（shot/asset），无法直接 GROUP BY projectId
+    //    分两次查询：shot 维度和 asset 维度分别聚合，再在内存合并
+    const aiHistShotRows = await video2Async.all(
+      `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
+       FROM ai_generated_images a JOIN videos v ON a.ownerId = v.id
+       WHERE a.ownerType = 'shot' AND v.deleted = 0
+       GROUP BY v.projectId`
+    );
+    const aiHistAssetRows = await video2Async.all(
+      `SELECT da.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
+       FROM ai_generated_images a JOIN digital_assets da ON a.ownerId = da.id
+       WHERE a.ownerType = 'asset'
+       GROUP BY da.projectId`
+    );
+    const aiHistMap = new Map();
+    aiHistShotRows.forEach(r => {
+      const cur = aiHistMap.get(r.projectId) || { cnt: 0, totalSize: 0 };
+      aiHistMap.set(r.projectId, { cnt: cur.cnt + r.cnt, totalSize: cur.totalSize + r.totalSize });
+    });
+    aiHistAssetRows.forEach(r => {
+      const cur = aiHistMap.get(r.projectId) || { cnt: 0, totalSize: 0 };
+      aiHistMap.set(r.projectId, { cnt: cur.cnt + r.cnt, totalSize: cur.totalSize + r.totalSize });
+    });
+
+    // 合并到 projects
+    // P3-25：统计包含所有项目媒体（分镜主视频 + 参考文件 + 参考画面 + 数字资产图 + AI 生图历史）
+    const result = projects.map(p => {
+      const v = videoMap.get(p.id) || { cnt: 0, totalSize: 0 };
+      const r = refMap.get(p.id) || { cnt: 0, totalSize: 0 };
+      const sm = shotMediaMap.get(p.id) || { cnt: 0, totalSize: 0 };
+      const ai = assetImgMap.get(p.id) || { cnt: 0, totalSize: 0 };
+      const ah = aiHistMap.get(p.id) || { cnt: 0, totalSize: 0 };
+      return {
         ...p,
-        videoCount: stats ? stats.cnt : 0,
-        totalSize: stats ? stats.totalSize : 0
-      });
-    }
+        videoCount: v.cnt + r.cnt,
+        totalSize: v.totalSize + r.totalSize + sm.totalSize + ai.totalSize + ah.totalSize
+      };
+    });
     return result;
   },
   getById: async (id) => {
@@ -990,18 +1105,21 @@ const video2Scenes = {
       'SELECT * FROM scenes WHERE projectId = ? ORDER BY sortOrder ASC, id ASC',
       [projectId]
     );
-    const result = [];
-    for (const s of scenes) {
-      const stats = await video2Async.get(
-        'SELECT COUNT(*) as cnt FROM videos WHERE sceneId = ? AND deleted = 0 AND reference = 0',
-        [s.id]
-      );
-      result.push({
-        ...s,
-        videoCount: stats ? stats.cnt : 0
-      });
-    }
-    return result;
+    if (scenes.length === 0) return [];
+
+    // P4-8：一次 GROUP BY 聚合替代 N+1（1+N → 2）
+    const statsRows = await video2Async.all(
+      `SELECT sceneId, COUNT(*) as cnt
+       FROM videos WHERE sceneId IS NOT NULL AND deleted = 0 AND reference = 0
+       GROUP BY sceneId`
+    );
+    const statsMap = new Map();
+    statsRows.forEach(r => statsMap.set(r.sceneId, r.cnt));
+
+    return scenes.map(s => ({
+      ...s,
+      videoCount: statsMap.get(s.id) || 0
+    }));
   },
   create: async ({ projectId, name }) => {
     const maxRow = await video2Async.get(
@@ -1373,6 +1491,15 @@ const video2Items = {
     );
     return result.changes;
   },
+  // 批量更新状态
+  batchUpdateStatus: async (ids, status) => {
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await video2Async.run(
+      `UPDATE videos SET status = ?, updatedAt = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
+      [status, ...ids]
+    );
+    return result.changes;
+  },
   // 批量彻底删除（返回被删视频的 URL 列表）
   batchHardDelete: async (ids) => {
     const placeholders = ids.map(() => '?').join(',');
@@ -1406,6 +1533,18 @@ const video2Items = {
     const r = await video2Async.run('UPDATE videos SET isCover = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
     return r.changes > 0;
   },
+  // P4-2 补充：原子设置封面，同时更新 videos.isCover 和 projects.coverUrl（事务包裹）
+  // 用法：await setCoverWithProject(projectId, videoId, coverUrl)
+  setCoverWithProject: async (projectId, videoId, coverUrl) => {
+    return await video2Async.transaction(async (tx) => {
+      await tx.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE projectId = ? AND isCover = 1', [projectId]);
+      const r = await tx.run('UPDATE videos SET isCover = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
+      if (r.changes > 0) {
+        await tx.run('UPDATE projects SET coverUrl = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [coverUrl, projectId]);
+      }
+      return r.changes > 0;
+    });
+  },
   // 取消某条视频的封面标记
   unsetCover: async (videoId) => {
     const r = await video2Async.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
@@ -1437,50 +1576,53 @@ const video2Items = {
 
   // 分镜升级：创建空白分镜（无参考画面）
   createShot: async (item) => {
-    const maxRow = await video2Async.get(
-      'SELECT MAX(sortOrder) as maxSort FROM videos WHERE deleted = 0 AND projectId = ?' + (item.sceneId !== undefined ? ' AND sceneId ' + (item.sceneId === null ? 'IS NULL' : '= ?') : ''),
-      item.sceneId !== undefined && item.sceneId !== null ? [item.projectId, item.sceneId] : [item.projectId]
-    );
-    const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
+    // P4-2：用事务包裹 MAX+1 与 INSERT，防御并发请求分配到相同 sortOrder
+    const { newId, nextSort } = await video2Async.transaction(async (tx) => {
+      const maxRow = await tx.get(
+        'SELECT MAX(sortOrder) as maxSort FROM videos WHERE deleted = 0 AND projectId = ?' + (item.sceneId !== undefined ? ' AND sceneId ' + (item.sceneId === null ? 'IS NULL' : '= ?') : ''),
+        item.sceneId !== undefined && item.sceneId !== null ? [item.projectId, item.sceneId] : [item.projectId]
+      );
+      const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
 
-    const r = await video2Async.run(
-      `INSERT INTO videos 
-       (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, 
-        sceneContent, actors, props, costume, location, focalLength, narration, 
-        cameraMovement, shotType, shotAngle, lighting, notes, estimatedDuration,
-        aiImagePrompt, aiStylePrompt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        item.sceneContent || item.title || '新分镜',
-        item.filename || '',
-        item.url || '',
-        item.status || 'done',
-        item.size || 0,
-        item.duration || null,
-        item.sortOrder !== undefined ? item.sortOrder : nextSort,
-        item.projectId,
-        item.sceneId !== undefined ? item.sceneId : null,
-        item.type || 'image',
-        item.sceneContent || '',
-        item.actors || '',
-        item.props || '',
-        item.costume || '',
-        item.location || '',
-        item.focalLength || '',
-        item.narration || '',
-        item.cameraMovement || '',
-        item.shotType || '',
-        item.shotAngle || '',
-        item.lighting || '',
-        item.notes || '',
-        item.estimatedDuration || '',
-        item.aiImagePrompt || '',
-        item.aiStylePrompt || ''
-      ]
-    );
-    const newId = r.lastID;
+      const r = await tx.run(
+        `INSERT INTO videos
+         (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type,
+          sceneContent, actors, props, costume, location, focalLength, narration,
+          cameraMovement, shotType, shotAngle, lighting, notes, estimatedDuration,
+          aiImagePrompt, aiStylePrompt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          item.sceneContent || item.title || '新分镜',
+          item.filename || '',
+          item.url || '',
+          item.status || 'done',
+          item.size || 0,
+          item.duration || null,
+          item.sortOrder !== undefined ? item.sortOrder : nextSort,
+          item.projectId,
+          item.sceneId !== undefined ? item.sceneId : null,
+          item.type || 'image',
+          item.sceneContent || '',
+          item.actors || '',
+          item.props || '',
+          item.costume || '',
+          item.location || '',
+          item.focalLength || '',
+          item.narration || '',
+          item.cameraMovement || '',
+          item.shotType || '',
+          item.shotAngle || '',
+          item.lighting || '',
+          item.notes || '',
+          item.estimatedDuration || '',
+          item.aiImagePrompt || '',
+          item.aiStylePrompt || ''
+        ]
+      );
+      return { newId: r.lastID, nextSort };
+    });
 
-    // 重新计算 shotIndex
+    // 重新计算 shotIndex（事务外执行，避免长事务）
     await recalcShotIndexPromise(item.projectId);
 
     return formatShot({ id: newId, sortOrder: nextSort, ...item });
@@ -1517,55 +1659,58 @@ const video2Items = {
     // 合并 sceneContent（拼接）
     const mergedContent = shots.map(s => s.sceneContent || s.title || '').filter(t => t).join(' / ');
 
-    // 合并后第一个分镜保留，其他分镜的media迁移过来
-    let sortOffset = 0;
-    for (const shot of otherShots) {
-      // 获取该分镜的media最大sortOrder
-      const maxSortRow = await video2Async.get(
-        'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',
-        [firstShot.id]
-      );
-      const baseSort = (maxSortRow ? maxSortRow.maxSort : -1) + 1;
-
-      // 迁移media
-      const media = await video2Async.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [shot.id]);
-      for (let i = 0; i < media.length; i++) {
-        await video2Async.run(
-          'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [firstShot.id, media[i].url, media[i].type, media[i].filename, media[i].size, media[i].duration, baseSort + i, media[i].source, media[i].createdAt]
+    // P4-2：用事务包裹"迁移 media + 删除原 shot + 更新首 shot + 重算 shotIndex"，保证原子性
+    // 中途任何步骤失败都会 ROLLBACK，避免出现孤儿 media 或媒体丢失
+    await video2Async.transaction(async (tx) => {
+      // 合并后第一个分镜保留，其他分镜的media迁移过来
+      for (const shot of otherShots) {
+        // 获取该分镜的media最大sortOrder
+        const maxSortRow = await tx.get(
+          'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',
+          [firstShot.id]
         );
-      }
+        const baseSort = (maxSortRow ? maxSortRow.maxSort : -1) + 1;
 
-      // 删除被合并的分镜
-      await video2Async.run('DELETE FROM videos WHERE id = ?', [shot.id]);
-    }
-
-    // 收集所有被合并分镜的 mergedFrom，用于递归统计
-    const allMergedFromIds = new Set();
-    for (const shot of shots) {
-      if (shot.mergedFrom) {
-        try {
-          const prevIds = JSON.parse(shot.mergedFrom);
-          if (Array.isArray(prevIds)) {
-            prevIds.forEach(id => allMergedFromIds.add(id));
-          }
-        } catch (e) {
-          // 解析失败，忽略
+        // 迁移media
+        const media = await tx.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [shot.id]);
+        for (let i = 0; i < media.length; i++) {
+          await tx.run(
+            'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [firstShot.id, media[i].url, media[i].type, media[i].filename, media[i].size, media[i].duration, baseSort + i, media[i].source, media[i].createdAt]
+          );
         }
-      } else {
-        allMergedFromIds.add(shot.id);
+
+        // 删除被合并的分镜
+        await tx.run('DELETE FROM videos WHERE id = ?', [shot.id]);
       }
-    }
-    const mergedFromArray = Array.from(allMergedFromIds);
 
-    // 更新第一个分镜的 sceneContent 和 mergedFrom
-    await video2Async.run(
-      'UPDATE videos SET sceneContent = ?, title = ?, mergedFrom = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
-      [mergedContent, mergedContent, JSON.stringify(mergedFromArray), firstShot.id]
-    );
+      // 收集所有被合并分镜的 mergedFrom，用于递归统计
+      const allMergedFromIds = new Set();
+      for (const shot of shots) {
+        if (shot.mergedFrom) {
+          try {
+            const prevIds = JSON.parse(shot.mergedFrom);
+            if (Array.isArray(prevIds)) {
+              prevIds.forEach(id => allMergedFromIds.add(id));
+            }
+          } catch (e) {
+            // 解析失败，忽略
+          }
+        } else {
+          allMergedFromIds.add(shot.id);
+        }
+      }
+      const mergedFromArray = Array.from(allMergedFromIds);
 
-    // 重新计算 shotIndex
-    await recalcShotIndexPromise(projectId);
+      // 更新第一个分镜的 sceneContent 和 mergedFrom
+      await tx.run(
+        'UPDATE videos SET sceneContent = ?, title = ?, mergedFrom = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+        [mergedContent, mergedContent, JSON.stringify(mergedFromArray), firstShot.id]
+      );
+
+      // 重新计算 shotIndex（事务内执行，确保原子性）
+      await recalcShotIndexPromise(projectId);
+    });
 
     // 返回合并后的分镜
     const merged = await video2Async.get('SELECT * FROM videos WHERE id = ?', [firstShot.id]);

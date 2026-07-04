@@ -31,7 +31,8 @@ export function useToast(duration: number = 2500) {
       clearTimeout(timerRef.current);
     }
     setToastVisible(false);
-    setTimeout(() => setToast(null), 300);
+    // P3-1：保存到 timerRef 以便 unmount 时清理
+    timerRef.current = setTimeout(() => setToast(null), 300);
   }, []);
 
   useEffect(() => {

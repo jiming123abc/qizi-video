@@ -114,6 +114,7 @@ export default function VideoSplitDialog({
   const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
   const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
   const pendingUploadRef = useRef<{ file: File; queue?: File[] } | null>(null);
+  const pendingCompressionVideoRef = useRef<File | null>(null);
 
   const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
   const currentVideoUrl = currentVideo?.url || '';
@@ -149,6 +150,32 @@ export default function VideoSplitDialog({
     }
     resetSplitState();
   }, [isOpen, initialVideos, initialVideoUrl]);
+
+  // P2-11：对话框关闭时清理未被分割使用的孤儿视频（已被 shot_media 引用的不删）
+  const prevIsOpenRef = useRef(false);
+  useEffect(() => {
+    // 检测 isOpen 从 true → false 的变化
+    if (prevIsOpenRef.current && !isOpen && uploadedVideos.length > 0) {
+      const urlsToClean = uploadedVideos
+        .map(v => v.url)
+        .filter(u => u && u.startsWith('http'));
+      // 使用 keepalive 确保页面卸载/导航时也能发请求
+      urlsToClean.forEach(url => {
+        try {
+          fetch('/api/video2/upload/orphan', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+            keepalive: true
+          }).catch(() => {});
+        } catch { /* 忽略，避免关闭流程被阻塞 */ }
+      });
+      // 清空本地 state（下次打开会重置）
+      setUploadedVideos([]);
+      setSelectedVideoId(null);
+    }
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, uploadedVideos]);
 
   const generateVideoThumbnail = (file: File): Promise<string> => {
     return new Promise((resolve) => {
@@ -193,11 +220,12 @@ export default function VideoSplitDialog({
       if (decision.decision === 'must_compress') {
         return new Promise((resolve) => {
           pendingUploadRef.current = { file };
+          pendingCompressionVideoRef.current = file;
           setPendingCompressionVideo(file);
           setPendingCompressionDecision(decision);
           setIsUploading(false);
           const checkInterval = setInterval(() => {
-            if (!pendingCompressionVideo && !pendingUploadRef.current) {
+            if (!pendingCompressionVideoRef.current && !pendingUploadRef.current) {
               clearInterval(checkInterval);
               resolve(null);
             }
@@ -295,6 +323,7 @@ export default function VideoSplitDialog({
     const pending = pendingUploadRef.current;
     const file = pendingCompressionVideo;
 
+    pendingCompressionVideoRef.current = null;
     setPendingCompressionVideo(null);
     setPendingCompressionDecision(null);
     pendingUploadRef.current = null;
@@ -1258,6 +1287,7 @@ export default function VideoSplitDialog({
       <VideoCompressionDialog
         isOpen={pendingCompressionVideo !== null}
         onClose={() => {
+          pendingCompressionVideoRef.current = null;
           setPendingCompressionVideo(null);
           setPendingCompressionDecision(null);
           pendingUploadRef.current = null;

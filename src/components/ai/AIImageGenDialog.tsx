@@ -1,8 +1,10 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { X, Upload, ImageIcon, Loader2, CheckCircle, AlertCircle, Info, Plus, Sparkles, ChevronDown } from 'lucide-react';
-import type { Shot, ShotMedia, DigitalAsset, ModelConfig, Settings } from '../../lib/types';
+import React, { useState, useRef, useEffect } from 'react';
+import { X, Upload, ImageIcon, Loader2, CheckCircle, AlertCircle, Info, Plus, Sparkles, ChevronDown, Trash2 } from 'lucide-react';
+import type { Shot, ShotMedia, DigitalAsset, ModelConfig, Settings, AiGeneratedImage, RefImage } from '../../lib/types';
 import { uploadVideo2Image } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { useRefImages } from '../../hooks/useRefImages';
 import AIImageGenerateDialog from './AIImageGenerateDialog';
 
 interface AIImageGenDialogProps {
@@ -35,11 +37,9 @@ const COST_LABELS: Record<string, string> = {
   high: '高',
 };
 
-// 同地点选择缓存（location -> 选择状态，key 为规范化后的地点名）
+// P3-24：同地点选择缓存（location -> refImageUrls，key 为规范化后的地点名）
 const locationSelectionCache: Record<string, {
-  selectedActors: number[];
-  selectedProps: number[];
-  selectedScene: number | null;
+  refImageUrls: string[];
 }> = {};
 
 function getLocationKey(location: string | undefined): string {
@@ -83,16 +83,26 @@ export default function AIImageGenDialog({
   const [propAssets, setPropAssets] = useState<DigitalAsset[]>([]);
   const [sceneAssets, setSceneAssets] = useState<DigitalAsset[]>([]);
 
-  // 选中状态
-  const [selectedActors, setSelectedActors] = useState<number[]>([]);
-  const [selectedProps, setSelectedProps] = useState<number[]>([]);
-  const [selectedScene, setSelectedScene] = useState<number | null>(null);
+  // P3-24：使用 useRefImages hook 统一管理参考图与历史图
+  const {
+    refImages,
+    historyImages,
+    MAX_REF_IMAGES,
+    MAX_HISTORY,
+    isFull,
+    addAssetRef,
+    toggleAssetRef,
+    addUploadRef,
+    removeRef,
+    clearRefs,
+    isRefSelected,
+    loadHistory,
+    deleteHistory,
+    getAllRefUrls,
+  } = useRefImages({ ownerType: 'shot', ownerId: shot.id, projectId: shot.projectId });
 
   // 展开的资产（显示多张图片）
   const [expandedAssetId, setExpandedAssetId] = useState<{ type: 'actor' | 'prop' | 'scene'; id: number } | null>(null);
-
-  // 选中的图片ID（key: "type-assetId-imageId"）
-  const [selectedImageKeys, setSelectedImageKeys] = useState<Set<string>>(new Set());
 
   // 平台和模型
   const [selectedProvider, setSelectedProvider] = useState<string>('geekai');
@@ -116,6 +126,16 @@ export default function AIImageGenDialog({
   const [saveMode, setSaveMode] = useState<'shot_only' | 'add_to_assets' | 'replace_asset'>('shot_only');
   const [assetToReplace, setAssetToReplace] = useState<number | null>(null);
 
+  // P3-24：@引用浮层
+  const [showAtDropdown, setShowAtDropdown] = useState(false);
+  const [atDropdownPos, setAtDropdownPos] = useState<{ top: number; left: number } | null>(null);
+
+  // P3-24：参考图上传 input（顶部缩略图条的 + 按钮）
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  // P3-24：地点缓存恢复标记（防止 assets 加载后重复恢复）
+  const cacheRestoredRef = useRef(false);
+
   const fileInputRefs = {
     actor: useRef<HTMLInputElement>(null),
     prop: useRef<HTMLInputElement>(null),
@@ -133,101 +153,6 @@ export default function AIImageGenDialog({
       return [{ id: 0, assetId: asset.id, imageUrl: asset.imageUrl, sortOrder: 0, createdAt: '' }];
     }
     return [];
-  };
-
-  // 构建选中图片的 key
-  const getImageKey = (type: 'actor' | 'prop' | 'scene', assetId: number, imageId: number) =>
-    `${type}-${assetId}-${imageId}`;
-
-  // 获取资产中选中的图片
-  const getSelectedImagesForAsset = (type: 'actor' | 'prop' | 'scene', asset: DigitalAsset) => {
-    const images = getAssetImages(asset);
-    return images.filter(img =>
-      selectedImageKeys.has(getImageKey(type, asset.id, img.id))
-    );
-  };
-
-  // 获取资产是否被选中（至少有一张图片被选中）
-  const isAssetSelected = (type: 'actor' | 'prop' | 'scene', assetId: number) => {
-    const keyPrefix = `${type}-${assetId}-`;
-    for (const key of selectedImageKeys) {
-      if (key.startsWith(keyPrefix)) return true;
-    }
-    return false;
-  };
-
-  // 切换资产选择（选中第一张图或取消所有选中）
-  const toggleAssetSelection = (type: 'actor' | 'prop' | 'scene', asset: DigitalAsset) => {
-    const images = getAssetImages(asset);
-    if (images.length === 0) return;
-
-    const keyPrefix = `${type}-${asset.id}-`;
-    const hasSelected = Array.from(selectedImageKeys).some((k: string) => k.startsWith(keyPrefix));
-
-    const newSet = new Set<string>(selectedImageKeys);
-    if (hasSelected) {
-      // 取消所有选中
-      for (const key of Array.from(newSet)) {
-        if (key.startsWith(keyPrefix)) newSet.delete(key);
-      }
-    } else {
-      // 选中第一张图
-      newSet.add(getImageKey(type, asset.id, images[0].id));
-    }
-    setSelectedImageKeys(newSet);
-
-    // 同步更新旧的 selectedActors/selectedProps/selectedScene 状态（保持兼容）
-    if (type === 'actor') {
-      if (hasSelected) {
-        setSelectedActors(prev => prev.filter(id => id !== asset.id));
-      } else {
-        setSelectedActors(prev => [...prev, asset.id]);
-      }
-    } else if (type === 'prop') {
-      if (hasSelected) {
-        setSelectedProps(prev => prev.filter(id => id !== asset.id));
-      } else {
-        setSelectedProps(prev => [...prev, asset.id]);
-      }
-    } else {
-      setSelectedScene(hasSelected ? null : asset.id);
-    }
-  };
-
-  // 切换单张图片的选中状态
-  const toggleImageSelection = (type: 'actor' | 'prop' | 'scene', asset: DigitalAsset, imageId: number) => {
-    const key = getImageKey(type, asset.id, imageId);
-    const newSet = new Set<string>(selectedImageKeys);
-    const wasSelected = newSet.has(key);
-
-    if (wasSelected) {
-      newSet.delete(key);
-    } else {
-      // 不支持图生图的模型限制只能选1张？这里暂时不限制，后端处理
-      newSet.add(key);
-    }
-    setSelectedImageKeys(newSet);
-
-    // 同步更新旧的选中状态
-    const images = getAssetImages(asset);
-    const keyPrefix = `${type}-${asset.id}-`;
-    const hasAnySelected = Array.from(newSet).some((k: string) => k.startsWith(keyPrefix));
-
-    if (type === 'actor') {
-      if (hasAnySelected && !selectedActors.includes(asset.id)) {
-        setSelectedActors(prev => [...prev, asset.id]);
-      } else if (!hasAnySelected) {
-        setSelectedActors(prev => prev.filter(id => id !== asset.id));
-      }
-    } else if (type === 'prop') {
-      if (hasAnySelected && !selectedProps.includes(asset.id)) {
-        setSelectedProps(prev => [...prev, asset.id]);
-      } else if (!hasAnySelected) {
-        setSelectedProps(prev => prev.filter(id => id !== asset.id));
-      }
-    } else {
-      setSelectedScene(hasAnySelected ? asset.id : null);
-    }
   };
 
   // 加载设置
@@ -297,19 +222,34 @@ export default function AIImageGenDialog({
     }
   }, [isOpen, shot.projectId]);
 
-  // 恢复同地点缓存的选择状态 + 自动匹配场景资产
+  // P3-24：恢复同地点缓存的选择状态 + 自动匹配场景资产
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      cacheRestoredRef.current = false;
+      return;
+    }
+    if (cacheRestoredRef.current) return;
 
     const locationKey = getLocationKey(shot.location);
+    const allAssets = [...actorAssets, ...propAssets, ...sceneAssets];
+    // 等待资产加载
+    if (allAssets.length === 0) return;
+
+    cacheRestoredRef.current = true;
 
     // 先尝试从地点缓存恢复
     if (locationKey) {
       const cached = locationSelectionCache[locationKey];
-      if (cached) {
-        setSelectedActors(cached.selectedActors);
-        setSelectedProps(cached.selectedProps);
-        setSelectedScene(cached.selectedScene);
+      if (cached && cached.refImageUrls.length > 0) {
+        for (const url of cached.refImageUrls) {
+          // 在所有资产中找到对应 URL 的资产
+          const asset = allAssets.find(a =>
+            a.imageUrl === url || a.images?.some(img => img.imageUrl === url)
+          );
+          if (asset) {
+            addAssetRef(url, { assetId: asset.id, assetName: asset.name, assetType: asset.type });
+          }
+        }
         return;
       }
     }
@@ -320,31 +260,39 @@ export default function AIImageGenDialog({
         a.name && a.name.trim().toLowerCase() === locationKey
       );
       if (matchedScene) {
-        setSelectedScene(matchedScene.id);
+        const images = getAssetImages(matchedScene);
+        if (images.length > 0) {
+          addAssetRef(images[0].imageUrl, { assetId: matchedScene.id, assetName: matchedScene.name, assetType: 'scene' });
+        }
       }
     }
-  }, [isOpen, shot.location, sceneAssets]);
+  }, [isOpen, shot.location, sceneAssets, actorAssets, propAssets, addAssetRef]);
 
-  // 保存选择状态到地点缓存
+  // P3-24：保存参考图 URL 列表到地点缓存
   useEffect(() => {
     const locationKey = getLocationKey(shot.location);
     if (locationKey) {
       locationSelectionCache[locationKey] = {
-        selectedActors,
-        selectedProps,
-        selectedScene,
+        refImageUrls: refImages.map(r => r.url),
       };
     }
-  }, [shot.location, selectedActors, selectedProps, selectedScene]);
+  }, [shot.location, refImages]);
 
-  // 清理轮询
+  // P3-1：清理轮询（unmount 或对话框关闭时）
   useEffect(() => {
+    if (!isOpen) {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    }
     return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
+        pollingRef.current = null;
       }
     };
-  }, []);
+  }, [isOpen]);
 
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
@@ -360,8 +308,20 @@ export default function AIImageGenDialog({
       setShowSaveOptions(false);
       setSaveMode('shot_only');
       setAssetToReplace(null);
+      // P3-24：清空参考图，防止上次选择残留
+      clearRefs();
+      // P3-22：重新加载历史图（dialog 重新打开时手动触发）
+      loadHistory();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, shot.aiImagePrompt, shot.sceneContent]);
+
+  // P3-24：@引用浮层 - 当无可引用的资产时自动关闭
+  useEffect(() => {
+    if (showAtDropdown && !refImages.some(r => r.source === 'asset' && r.assetName)) {
+      setShowAtDropdown(false);
+    }
+  }, [refImages, showAtDropdown]);
 
   // 根据平台过滤模型
   const filteredModels = availableModels.filter(m => m.provider === selectedProvider);
@@ -372,25 +332,6 @@ export default function AIImageGenDialog({
       setSelectedModel(filteredModels[0]);
     }
   }, [selectedProvider, filteredModels, selectedModel]);
-
-  // 演员选择（多选）
-  const handleActorToggle = (id: number) => {
-    setSelectedActors(prev =>
-      prev.includes(id) ? prev.filter(a => a !== id) : [...prev, id]
-    );
-  };
-
-  // 道具选择（多选）
-  const handlePropToggle = (id: number) => {
-    setSelectedProps(prev =>
-      prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
-    );
-  };
-
-  // 场景选择（单选）
-  const handleSceneSelect = (id: number) => {
-    setSelectedScene(prev => (prev === id ? null : id));
-  };
 
   // 上传数字资产
   const handleUploadAsset = async (type: 'actor' | 'prop' | 'scene', files: FileList | null) => {
@@ -474,32 +415,15 @@ export default function AIImageGenDialog({
       // 更新本地列表
       if (aiGenDialogType === 'actor') {
         setActorAssets(prev => [...prev, newAsset]);
-        setSelectedActors(prev => [...prev, newAsset.id]);
-        setSelectedImageKeys(prev => {
-          const newSet = new Set(prev);
-          const images = newAsset.images?.length > 0 ? newAsset.images : [{ id: 0, imageUrl: newAsset.imageUrl }];
-          newSet.add(getImageKey('actor', newAsset.id, images[0].id));
-          return newSet;
-        });
       } else if (aiGenDialogType === 'prop') {
         setPropAssets(prev => [...prev, newAsset]);
-        setSelectedProps(prev => [...prev, newAsset.id]);
-        setSelectedImageKeys(prev => {
-          const newSet = new Set(prev);
-          const images = newAsset.images?.length > 0 ? newAsset.images : [{ id: 0, imageUrl: newAsset.imageUrl }];
-          newSet.add(getImageKey('prop', newAsset.id, images[0].id));
-          return newSet;
-        });
       } else {
         setSceneAssets(prev => [...prev, newAsset]);
-        setSelectedScene(newAsset.id);
-        setSelectedImageKeys(prev => {
-          const newSet = new Set(prev);
-          const images = newAsset.images?.length > 0 ? newAsset.images : [{ id: 0, imageUrl: newAsset.imageUrl }];
-          newSet.add(getImageKey('scene', newAsset.id, images[0].id));
-          return newSet;
-        });
       }
+
+      // P3-24：自动添加为参考图
+      const refUrl = newAsset.images?.length > 0 ? newAsset.images[0].imageUrl : newAsset.imageUrl;
+      addAssetRef(refUrl, { assetId: newAsset.id, assetName: newAsset.name, assetType: aiGenDialogType });
     } catch (err) {
       console.error('创建数字资产失败:', err);
     }
@@ -513,24 +437,8 @@ export default function AIImageGenDialog({
     setErrorMessage('');
 
     try {
-      // 获取选中图片的 URL（按图片粒度选择）
-      const getSelectedUrls = (type: 'actor' | 'prop' | 'scene', assets: DigitalAsset[]) => {
-        const urls: string[] = [];
-        for (const asset of assets) {
-          const images = getAssetImages(asset);
-          for (const img of images) {
-            if (selectedImageKeys.has(getImageKey(type, asset.id, img.id))) {
-              urls.push(img.imageUrl);
-            }
-          }
-        }
-        return urls;
-      };
-
-      const actorUrls = getSelectedUrls('actor', actorAssets);
-      const propUrls = getSelectedUrls('prop', propAssets);
-      const sceneUrls = getSelectedUrls('scene', sceneAssets);
-      const sceneUrl = sceneUrls[0]; // 场景只取第一张
+      // P3-24：使用统一的参考图 URL 列表
+      const refUrls = getAllRefUrls();
 
       // 调用生成接口
       const response = await fetch('/api/video2/ai/generate-image', {
@@ -539,9 +447,7 @@ export default function AIImageGenDialog({
         body: JSON.stringify({
           shotId: shot.id,
           prompt: prompt.trim(),
-          actorImageUrls: actorUrls,
-          propImageUrls: propUrls,
-          sceneImageUrl: sceneUrl,
+          refImages: refUrls,
           size: selectedSize,
           provider: selectedProvider,
           model: selectedModel.model,
@@ -582,6 +488,8 @@ export default function AIImageGenDialog({
               });
               setStatus('done');
               setShowSaveOptions(true);
+              // P3-22：生成成功后刷新历史图列表
+              loadHistory();
             } else {
               throw new Error('生成结果无效');
             }
@@ -654,8 +562,9 @@ export default function AIImageGenDialog({
 
     try {
       if (mode === 'add') {
-        // 追加新资产
-        const type = selectedActors.length > 0 ? 'actor' : selectedProps.length > 0 ? 'prop' : 'scene';
+        // P3-24：从 refImages 中找第一个 source='asset' 的项的 assetType 来判断
+        const assetRef = refImages.find(r => r.source === 'asset');
+        const type = assetRef?.assetType || 'scene';
         await fetch(`/api/video2/projects/${shot.projectId}/assets`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -711,6 +620,30 @@ export default function AIImageGenDialog({
     return displayNames[model.model.toLowerCase()] || model.model;
   };
 
+  // P3-24：prompt 输入变化，检测 @ 触发引用浮层
+  const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setPrompt(value);
+    // 检测 @ 触发（最后一个字符为 @，且存在可引用的资产参考图）
+    const lastChar = value[value.length - 1];
+    if (lastChar === '@' && refImages.some(r => r.source === 'asset' && r.assetName)) {
+      const textarea = e.target;
+      const rect = textarea.getBoundingClientRect();
+      setAtDropdownPos({ top: rect.bottom + 4, left: rect.left + 20 });
+      setShowAtDropdown(true);
+    } else {
+      setShowAtDropdown(false);
+    }
+  };
+
+  // P3-24：选择 @ 引用项
+  const handleSelectAtRef = (refImg: RefImage) => {
+    if (!refImg.assetName) return;
+    setPrompt(prev => prev.replace(/@$/, `@${refImg.assetName} `));
+    setShowAtDropdown(false);
+    setAtDropdownPos(null);
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -755,10 +688,52 @@ export default function AIImageGenDialog({
                   </label>
                   <textarea
                     value={prompt}
-                    onChange={e => setPrompt(e.target.value)}
+                    onChange={handlePromptChange}
                     rows={3}
                     className="w-full px-4 py-3 rounded-xl border border-white/10 bg-white/5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50"
-                    placeholder="描述你想要生成的画面内容..."
+                    placeholder="描述你想要生成的画面内容...（输入 @ 可引用资产）"
+                  />
+                </div>
+
+                {/* P3-24：已选参考图缩略图条 */}
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    参考图 ({refImages.length}/{MAX_REF_IMAGES})
+                  </label>
+                  {refImages.length === 0 ? (
+                    <p className="text-xs text-slate-500">点击下方资产图片选择，或点击 + 上传参考图</p>
+                  ) : (
+                    <div className="flex gap-2 overflow-x-auto pb-2">
+                      {refImages.map(r => (
+                        <RefThumb key={r.id} refImg={r} onRemove={() => removeRef(r.id)} />
+                      ))}
+                      {!isFull && (
+                        <button
+                          onClick={() => uploadInputRef.current?.click()}
+                          className="shrink-0 w-16 h-16 rounded-lg border-2 border-dashed border-white/20 hover:border-violet-400 flex items-center justify-center transition"
+                          title="上传参考图"
+                        >
+                          <Plus className="w-5 h-5 text-white/40" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <input
+                    ref={uploadInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async e => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        try {
+                          await addUploadRef(f);
+                        } catch (err) {
+                          alert(err instanceof Error ? err.message : '上传参考图失败');
+                        }
+                      }
+                      e.target.value = '';
+                    }}
                   />
                 </div>
 
@@ -772,14 +747,19 @@ export default function AIImageGenDialog({
                       <div className="space-y-2 mb-3">
                         {actorAssets.map(asset => {
                           const images = getAssetImages(asset);
-                          const isSelected = isAssetSelected('actor', asset.id);
+                          const isSelected = images.some(img => isRefSelected(img.imageUrl));
                           const isExpanded = expandedAssetId?.type === 'actor' && expandedAssetId.id === asset.id;
-                          const selectedCount = images.filter(img => selectedImageKeys.has(getImageKey('actor', asset.id, img.id))).length;
+                          const selectedCount = images.filter(img => isRefSelected(img.imageUrl)).length;
                           return (
                             <div key={asset.id} className="rounded-lg overflow-hidden border border-white/5">
                               <div className="flex items-center gap-2 p-2 hover:bg-white/5 transition">
                                 <button
-                                  onClick={() => toggleAssetSelection('actor', asset)}
+                                  onClick={() => {
+                                    const imgs = getAssetImages(asset);
+                                    if (imgs.length > 0) {
+                                      toggleAssetRef(imgs[0].imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'actor' });
+                                    }
+                                  }}
                                   className={`relative rounded-md overflow-hidden border-2 transition flex-shrink-0 ${
                                     isSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                   }`}
@@ -814,11 +794,11 @@ export default function AIImageGenDialog({
                               {isExpanded && images.length > 1 && (
                                 <div className="px-2 pb-2 flex flex-wrap gap-2 border-t border-white/5 pt-2">
                                   {images.map((img, idx) => {
-                                    const imgSelected = selectedImageKeys.has(getImageKey('actor', asset.id, img.id));
+                                    const imgSelected = isRefSelected(img.imageUrl);
                                     return (
                                       <button
                                         key={img.id}
-                                        onClick={() => toggleImageSelection('actor', asset, img.id)}
+                                        onClick={() => toggleAssetRef(img.imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'actor' })}
                                         className={`relative rounded-md overflow-hidden border-2 transition ${
                                           imgSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                         }`}
@@ -879,14 +859,19 @@ export default function AIImageGenDialog({
                       <div className="space-y-2 mb-3">
                         {propAssets.map(asset => {
                           const images = getAssetImages(asset);
-                          const isSelected = isAssetSelected('prop', asset.id);
+                          const isSelected = images.some(img => isRefSelected(img.imageUrl));
                           const isExpanded = expandedAssetId?.type === 'prop' && expandedAssetId.id === asset.id;
-                          const selectedCount = images.filter(img => selectedImageKeys.has(getImageKey('prop', asset.id, img.id))).length;
+                          const selectedCount = images.filter(img => isRefSelected(img.imageUrl)).length;
                           return (
                             <div key={asset.id} className="rounded-lg overflow-hidden border border-white/5">
                               <div className="flex items-center gap-2 p-2 hover:bg-white/5 transition">
                                 <button
-                                  onClick={() => toggleAssetSelection('prop', asset)}
+                                  onClick={() => {
+                                    const imgs = getAssetImages(asset);
+                                    if (imgs.length > 0) {
+                                      toggleAssetRef(imgs[0].imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'prop' });
+                                    }
+                                  }}
                                   className={`relative rounded-md overflow-hidden border-2 transition flex-shrink-0 ${
                                     isSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                   }`}
@@ -921,11 +906,11 @@ export default function AIImageGenDialog({
                               {isExpanded && images.length > 1 && (
                                 <div className="px-2 pb-2 flex flex-wrap gap-2 border-t border-white/5 pt-2">
                                   {images.map((img, idx) => {
-                                    const imgSelected = selectedImageKeys.has(getImageKey('prop', asset.id, img.id));
+                                    const imgSelected = isRefSelected(img.imageUrl);
                                     return (
                                       <button
                                         key={img.id}
-                                        onClick={() => toggleImageSelection('prop', asset, img.id)}
+                                        onClick={() => toggleAssetRef(img.imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'prop' })}
                                         className={`relative rounded-md overflow-hidden border-2 transition ${
                                           imgSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                         }`}
@@ -986,14 +971,19 @@ export default function AIImageGenDialog({
                       <div className="space-y-2 mb-3">
                         {sceneAssets.map(asset => {
                           const images = getAssetImages(asset);
-                          const isSelected = isAssetSelected('scene', asset.id);
+                          const isSelected = images.some(img => isRefSelected(img.imageUrl));
                           const isExpanded = expandedAssetId?.type === 'scene' && expandedAssetId.id === asset.id;
-                          const selectedCount = images.filter(img => selectedImageKeys.has(getImageKey('scene', asset.id, img.id))).length;
+                          const selectedCount = images.filter(img => isRefSelected(img.imageUrl)).length;
                           return (
                             <div key={asset.id} className="rounded-lg overflow-hidden border border-white/5">
                               <div className="flex items-center gap-2 p-2 hover:bg-white/5 transition">
                                 <button
-                                  onClick={() => toggleAssetSelection('scene', asset)}
+                                  onClick={() => {
+                                    const imgs = getAssetImages(asset);
+                                    if (imgs.length > 0) {
+                                      toggleAssetRef(imgs[0].imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'scene' });
+                                    }
+                                  }}
                                   className={`relative rounded-md overflow-hidden border-2 transition flex-shrink-0 ${
                                     isSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                   }`}
@@ -1028,11 +1018,11 @@ export default function AIImageGenDialog({
                               {isExpanded && images.length > 1 && (
                                 <div className="px-2 pb-2 flex flex-wrap gap-2 border-t border-white/5 pt-2">
                                   {images.map((img, idx) => {
-                                    const imgSelected = selectedImageKeys.has(getImageKey('scene', asset.id, img.id));
+                                    const imgSelected = isRefSelected(img.imageUrl);
                                     return (
                                       <button
                                         key={img.id}
-                                        onClick={() => toggleImageSelection('scene', asset, img.id)}
+                                        onClick={() => toggleAssetRef(img.imageUrl, { assetId: asset.id, assetName: asset.name, assetType: 'scene' })}
                                         className={`relative rounded-md overflow-hidden border-2 transition ${
                                           imgSelected ? 'border-violet-500' : 'border-transparent hover:border-white/30'
                                         }`}
@@ -1126,6 +1116,23 @@ export default function AIImageGenDialog({
                       </svg>
                     </div>
                   </div>
+                  {/* P3-24：模型能力警告 */}
+                  {selectedModel && !selectedModel.supportsImageRef && refImages.length > 0 && (
+                    <div className="mt-2 p-2 rounded-lg bg-orange-500/10 border border-orange-500/30 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                      <p className="text-xs text-orange-300">
+                        当前模型不支持图生图，将仅以文字描述参考图风格生成
+                      </p>
+                    </div>
+                  )}
+                  {selectedModel?.supportsImageRef && refImages.length > 1 && (
+                    <div className="mt-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-start gap-2">
+                      <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
+                      <p className="text-xs text-blue-300">
+                        当前模型仅支持单张参考图，将使用第一张（已选 {refImages.length} 张）
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* 图片尺寸 */}
@@ -1215,7 +1222,7 @@ export default function AIImageGenDialog({
                         />
                         <span className="text-sm text-slate-300">追加到数字资产并添加到分镜</span>
                       </label>
-                      {(selectedActors.length > 0 || selectedProps.length > 0 || selectedScene) && (
+                      {refImages.some(r => r.source === 'asset') && (
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
                             type="radio"
@@ -1241,6 +1248,41 @@ export default function AIImageGenDialog({
                 <AlertCircle className="w-12 h-12 text-red-400 mb-4" />
                 <p className="text-lg font-medium text-red-300 mb-2">生成失败</p>
                 <p className="text-sm text-slate-400">{errorMessage || '请稍后重试'}</p>
+              </div>
+            )}
+
+            {/* P3-22：历史图缩略图条（持久化，跨会话保留） */}
+            {historyImages.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-white/10">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-slate-400">
+                    历史生成 ({historyImages.length}/{MAX_HISTORY})
+                  </p>
+                  <p className="text-xs text-slate-500">点击缩略图重新选择</p>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-2">
+                  {historyImages.map((img) => (
+                    <HistoryThumb
+                      key={img.id}
+                      img={img}
+                      isSelected={generatedImage?.url === img.url}
+                      onSelect={() => {
+                        setGeneratedImage({ url: img.url, cost: 0 });
+                        setStatus('done');
+                      }}
+                      onDelete={(e) => {
+                        e.stopPropagation();
+                        if (!confirm('确定要删除这张历史图吗？')) return;
+                        deleteHistory(img.id);
+                      }}
+                    />
+                  ))}
+                </div>
+                {historyImages.length >= MAX_HISTORY && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    已达上限，请先删除旧图才能继续生成
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -1325,6 +1367,24 @@ export default function AIImageGenDialog({
         </div>
       </div>
 
+      {/* P3-24：@引用浮层 */}
+      {showAtDropdown && atDropdownPos && (
+        <div
+          className="fixed z-[70] bg-slate-800 border border-white/10 rounded-lg shadow-xl py-1 max-h-48 overflow-y-auto min-w-[200px]"
+          style={{ top: atDropdownPos.top, left: atDropdownPos.left }}
+        >
+          {refImages.filter(r => r.source === 'asset' && r.assetName).map(r => (
+            <button
+              key={r.id}
+              onClick={() => handleSelectAtRef(r)}
+              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-white/10 text-white"
+            >
+              @{r.assetName}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* AI 生成对话框 */}
       <AIImageGenerateDialog
         isOpen={showAIGenDialog}
@@ -1333,7 +1393,82 @@ export default function AIImageGenDialog({
         onUseImage={handleAIImageGenerated}
         title={`AI 生成${aiGenDialogType === 'actor' ? '演员' : aiGenDialogType === 'prop' ? '道具' : '地点'}图片`}
         onOpenSettings={onOpenSettings}
+        projectId={shot.projectId}
       />
     </>
+  );
+}
+
+// P3-22：历史图缩略图组件（独立组件以使用 useSignedUrl hook）
+function HistoryThumb({
+  img,
+  isSelected,
+  onSelect,
+  onDelete,
+}: {
+  img: AiGeneratedImage;
+  isSelected: boolean;
+  onSelect: () => void;
+  onDelete: (e: React.MouseEvent) => void;
+}) {
+  const signedUrl = useSignedUrl(img.url);
+  return (
+    <div
+      onClick={onSelect}
+      className={`relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border cursor-pointer transition ${
+        isSelected ? 'border-violet-400 ring-2 ring-violet-400/50' : 'border-white/10 hover:border-white/30'
+      }`}
+      title={img.prompt || '历史生成图'}
+    >
+      <img
+        src={signedUrl || img.url}
+        alt="历史图"
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+      />
+      <button
+        onClick={onDelete}
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
+        title="删除此历史图"
+      >
+        <Trash2 className="w-2.5 h-2.5 text-white" />
+      </button>
+    </div>
+  );
+}
+
+// P3-24：已选参考图缩略图组件（独立组件以使用 useSignedUrl hook）
+function RefThumb({
+  refImg,
+  onRemove,
+}: {
+  refImg: RefImage;
+  onRemove: () => void;
+}) {
+  const signedUrl = useSignedUrl(refImg.url);
+  return (
+    <div
+      className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-white/10"
+      title={refImg.assetName || '参考图'}
+    >
+      <img
+        src={signedUrl || refImg.url}
+        alt={refImg.assetName || '参考图'}
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+      />
+      <button
+        onClick={onRemove}
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
+        title="移除参考图"
+      >
+        <X className="w-2.5 h-2.5 text-white" />
+      </button>
+      {refImg.assetName && (
+        <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
+          {refImg.assetName}
+        </div>
+      )}
+    </div>
   );
 }

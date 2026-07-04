@@ -415,14 +415,16 @@ export default function AddShotDialog({
 
           {/* 上传和AI生成参考画面 */}
           <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={handleUploadClick}
-              className="flex-1 py-3 rounded-2xl border border-white/15 bg-white/5 hover:bg-white/10 transition flex items-center justify-center gap-2 text-slate-200"
-            >
-              <Upload className="w-5 h-5" />
-              <span className="font-medium">上传参考画面</span>
-            </button>
+            {onUploadMedia && (
+              <button
+                type="button"
+                onClick={handleUploadClick}
+                className="flex-1 py-3 rounded-2xl border border-white/15 bg-white/5 hover:bg-white/10 transition flex items-center justify-center gap-2 text-slate-200"
+              >
+                <Upload className="w-5 h-5" />
+                <span className="font-medium">上传参考画面</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onAiGenerate}
@@ -431,13 +433,15 @@ export default function AddShotDialog({
               <Sparkles className="w-5 h-5" />
               <span className="font-medium">AI 生成</span>
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={() => {}}
-            />
+            {onUploadMedia && (
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={() => {}}
+              />
+            )}
           </div>
         </div>
 

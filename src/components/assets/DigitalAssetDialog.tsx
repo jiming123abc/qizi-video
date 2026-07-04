@@ -685,6 +685,8 @@ export default function DigitalAssetDialog({
         showUpdatePromptOption={true}
         updatePromptChecked={updatePromptAfterGen}
         onUpdatePromptChange={setUpdatePromptAfterGen}
+        ownerId={aiImageTargetAsset?.id}
+        projectId={projectId}
       />
 
       {/* 隐藏的文件上传 input */}

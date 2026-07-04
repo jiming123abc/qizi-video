@@ -105,13 +105,14 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     batchRestore,
     batchHardDelete,
     batchMoveToScene,
+    batchUpdateStatus,
+    moveShotToScene,
     batchMergeShots,
     handleItemDragStart,
     handleDragHandleMouseDown,
     handleItemDragOver,
     handleItemDrop: handleItemDropApi,
     moveItem: moveItemApi,
-    cloneShot,
   } = useShots({ projectId, showToast });
 
   const [project, setProject] = useState<Project | null>(null);
@@ -130,7 +131,27 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     cameraMovement: string[];
   } | null>(null);
 
-  const [currentTab, setCurrentTab] = useState<'pending' | 'done' | 'trash'>('pending');
+  // P3-13：从 URL 恢复 tab/scene 状态，刷新后保持上下文
+  const initialTab = (() => {
+    if (typeof window === 'undefined') return 'pending' as const;
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get('tab');
+    return t === 'done' || t === 'trash' ? t : 'pending';
+  })();
+  // P3-13：scene 状态从 URL 恢复
+  // undefined = URL 中没有 scene 参数（让自动跳转逻辑处理）
+  // null = URL 中显式 scene=null（用户上次选择了"未分类"）
+  // number = URL 中 scene=<id>（需在 scenes 加载后验证是否存在）
+  const initialSceneFromUrl = (() => {
+    if (typeof window === 'undefined') return undefined as undefined | null | number;
+    const params = new URLSearchParams(window.location.search);
+    const s = params.get('scene');
+    if (s === null) return undefined;
+    if (s === 'null') return null;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : undefined;
+  })();
+  const [currentTab, setCurrentTab] = useState<'pending' | 'done' | 'trash'>(initialTab);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchDialog, setShowSearchDialog] = useState(false);
   const [showDesktopSearch, setShowDesktopSearch] = useState(false);
@@ -157,6 +178,10 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [renameSceneId, setRenameSceneId] = useState<number | null>(null);
   const [renameSceneName, setRenameSceneName] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [dragShotId, setDragShotId] = useState<number | null>(null);
+  const [dragOverSceneForShot, setDragOverSceneForShot] = useState<number | null>(null);
+  const [isCreatingScene, setIsCreatingScene] = useState(false);
+  const [isRenamingScene, setIsRenamingScene] = useState(false);
 
   const [shareHintVisible, setShareHintVisible] = useState(false);
   const [shareHintMode, setShareHintMode] = useState<'wechat' | 'default'>('default');
@@ -259,6 +284,9 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const userManualSelectedUnclassifiedRef = useRef(false);
   const refreshSuggestionsTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // P3-13：URL scene 恢复标记，true 表示已完成恢复（或无需恢复）
+  // 初始值：URL 没有 scene 参数时为 true（让自动跳转逻辑正常工作）
+  const urlSceneRestoredRef = useRef(initialSceneFromUrl === undefined);
 
   // 平板/桌面检测（用于区分桌面端拖拽 vs 手机端箭头排序）
   const [isMobile, setIsMobile] = useState(false);
@@ -424,17 +452,59 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     loadStats();
     // 切换 tab 时停止当前播放
     setPlayingItemId(null);
-  }, [currentSceneId, currentTab, loadShots, loadStats]);
+    // P3-14：切换场次/tab 时清空选中，避免选中不可见分镜导致误操作
+    setSelectedIds(new Set());
+  }, [currentSceneId, currentTab, loadShots, loadStats, setSelectedIds]);
+
+  // P3-13：从 URL 恢复 scene 状态（仅首次加载时执行一次）
+  // - URL 无 scene 参数：立即标记为已恢复，让自动跳转逻辑处理
+  // - URL scene=null：标记用户选择了"未分类"，阻止自动跳转
+  // - URL scene=<id>：等 scenes 加载后验证，存在则恢复，不存在则让自动跳转处理
+  useEffect(() => {
+    if (urlSceneRestoredRef.current) return;
+    if (initialSceneFromUrl === undefined) {
+      urlSceneRestoredRef.current = true;
+      return;
+    }
+    if (initialSceneFromUrl === null) {
+      urlSceneRestoredRef.current = true;
+      userManualSelectedUnclassifiedRef.current = true;
+      // currentSceneId 已为 null，无需设置
+      return;
+    }
+    // initialSceneFromUrl 为数字，需等 scenes 加载完成才能验证
+    if (scenes.length === 0) return;
+    urlSceneRestoredRef.current = true;
+    const exists = scenes.find(s => s.id === initialSceneFromUrl);
+    if (exists) {
+      setCurrentSceneId(initialSceneFromUrl);
+    }
+    // 不存在则不设置，让下方自动跳转逻辑处理
+  }, [scenes, initialSceneFromUrl, setCurrentSceneId]);
 
   // 自动跳转场次逻辑：当 currentSceneId === null 且存在场次时，自动跳转到第一个场次
   // 例外：用户手动选择了"未分类"时不强制跳转
+  // P3-13：URL 恢复未完成时跳过，避免覆盖 URL 中的 scene 状态
   useEffect(() => {
+    if (!urlSceneRestoredRef.current) return;
     if (userManualSelectedUnclassifiedRef.current) return;
     if (currentSceneId === null && scenes.length > 0) {
       setCurrentSceneId(scenes[0].id);
       setSelectedIds(new Set());
     }
   }, [scenes, currentSceneId]);
+
+  // P3-13：tab/scene 变化时同步到 URL（使用 replaceState 避免污染历史记录）
+  // URL 恢复完成前不同步，避免覆盖 URL 中已有的状态
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!urlSceneRestoredRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    params.set('tab', currentTab);
+    params.set('scene', currentSceneId === null ? 'null' : String(currentSceneId));
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+  }, [currentTab, currentSceneId]);
 
   // ============ 滚动位置记录 ============
   useEffect(() => {
@@ -579,6 +649,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     await loadStats();
   };
 
+  const batchUpdateStatusWithStats = async (status: 'pending' | 'done') => {
+    await batchUpdateStatus(status);
+    await loadStats();
+  };
+
   const batchHardDeleteWithConfirm = () => {
     if (selectedIds.size === 0) return;
     const count = selectedIds.size;
@@ -633,22 +708,36 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const createScene = async () => {
     const name = newSceneName.trim();
     if (!name) return;
-    await createSceneApi(name);
-    setNewSceneName('');
-    setSceneManagerMode('list');
-    userManualSelectedUnclassifiedRef.current = false;
-    await loadStats();
+    if (isCreatingScene) return;
+    setIsCreatingScene(true);
+    try {
+      await createSceneApi(name);
+      setNewSceneName('');
+      setSceneManagerMode('list');
+      setShowSceneManager(false);
+      userManualSelectedUnclassifiedRef.current = false;
+      await loadStats();
+    } finally {
+      setIsCreatingScene(false);
+    }
   };
 
   const renameScene = async () => {
     if (renameSceneId === null) return;
     const name = renameSceneName.trim();
     if (!name) return;
-    await renameSceneApi(renameSceneId, name);
-    setRenameSceneId(null);
-    setRenameSceneName('');
-    setSceneManagerMode('list');
-    await loadStats();
+    if (isRenamingScene) return;
+    setIsRenamingScene(true);
+    try {
+      await renameSceneApi(renameSceneId, name);
+      setRenameSceneId(null);
+      setRenameSceneName('');
+      setSceneManagerMode('list');
+      setShowSceneManager(false);
+      await loadStats();
+    } finally {
+      setIsRenamingScene(false);
+    }
   };
 
   const deleteScene = async (id: number) => {
@@ -663,6 +752,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       setDragItemId(id);
       return;
     }
+    setDragShotId(id);
     handleItemDragStart(id, e);
   };
 
@@ -674,8 +764,24 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     await moveItemApi(itemId, dir, scrollItemIntoView);
   };
 
-  const cloneShotWithReload = async (id: number) => {
-    await cloneShot(id, loadShots);
+  // 分镜拖拽到场景标签移动场次
+  const handleShotDragOverScene = (e: React.DragEvent, sceneId: number | null) => {
+    if (dragShotId === null) return;
+    e.preventDefault();
+    setDragOverSceneForShot(sceneId);
+  };
+
+  const handleShotDropOnScene = async (sceneId: number | null) => {
+    if (dragShotId === null) return;
+    if (sceneId === currentSceneId) {
+      setDragShotId(null);
+      setDragOverSceneForShot(null);
+      return;
+    }
+    await moveShotToScene(dragShotId, sceneId);
+    await loadStats();
+    setDragShotId(null);
+    setDragOverSceneForShot(null);
   };
 
   // 将指定卡片滚动到可视区（垂直居中）
@@ -702,7 +808,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
     setShowUploadDialog(true);
     setUploadTab('file');
-    const uploadId = `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+    const uploadId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
     setUploadingFiles([{
       id: uploadId,
       name: file.name,
@@ -862,10 +968,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       }
     };
 
-    const handleClone = (id: number) => {
-      cloneShotWithReload(id);
-    };
-
     const handleSort = (id: number, direction: 'up' | 'down') => {
       moveItem(id, direction === 'up' ? -1 : 1);
     };
@@ -908,12 +1010,12 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onDragOver={(e) => handleItemDragOver(e, shot.id)}
         onDragLeave={() => setDragOverItemId(null)}
         onDrop={(e) => { e.preventDefault(); handleItemDrop(shot.id); }}
-        draggable={currentTab !== 'trash'}
+        draggable={currentTab !== 'trash' && !searchQuery.trim()}
         onDragStart={(e) => {
           handleItemDragStartWrap(shot.id, e);
           try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
         }}
-        onDragEnd={() => { setDragItemId(null); setDragOverItemId(null); }}
+        onDragEnd={() => { setDragItemId(null); setDragOverItemId(null); setDragShotId(null); setDragOverSceneForShot(null); }}
         className={`relative transition-all duration-200 ${
           dragItemId === shot.id ? 'opacity-60 scale-[0.98]' : ''
         } ${dragOverItemId === shot.id && dragItemId !== shot.id ? 'ring-2 ring-violet-400/70 ring-offset-2 ring-offset-slate-900 rounded-2xl' : ''}`}
@@ -930,6 +1032,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           onSelect={(s) => toggleSelect(s.id)}
           onUpdate={handleUpdate}
           onDelete={handleDelete}
+          onHardDelete={hardDeleteWithConfirm}
+          onRestore={restoreItemWithStats}
           onSort={handleSort}
           onExpand={handleExpand}
           isExpanded={expandedShotId === shot.id}
@@ -942,6 +1046,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           isLast={isLast}
           isMobile={isMobile}
           currentTab={currentTab}
+          dragDisabled={searchQuery.trim() !== ''}
           onStatusClick={(s) => toggleStatus(s)}
           onShotNoClick={handleShotNoClick}
           onDragHandleMouseDown={handleDragHandleMouseDown}
@@ -951,6 +1056,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           onVideoRefReady={handleVideoRefReady}
           onDeleteMedia={handleDeleteMedia}
           onOpenSettings={() => setShowSettingsDialog(true)}
+          onShowToast={showToast}
         />
       </div>
     );
@@ -1242,6 +1348,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               setCurrentSceneId(null);
               setSelectedIds(new Set());
             }}
+            dragShotId={dragShotId}
+            dragOverSceneForShot={dragOverSceneForShot}
+            onShotDragOverScene={handleShotDragOverScene}
+            onShotDropOnScene={handleShotDropOnScene}
+            onShotDragLeaveScene={() => setDragOverSceneForShot(null)}
           />
         </div>
 
@@ -1291,6 +1402,22 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 >
                   移动到场次
                 </button>
+                {currentTab === 'pending' && (
+                  <button
+                    onClick={() => batchUpdateStatusWithStats('done')}
+                    className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
+                  >
+                    标记为已拍摄
+                  </button>
+                )}
+                {currentTab === 'done' && (
+                  <button
+                    onClick={() => batchUpdateStatusWithStats('pending')}
+                    className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
+                  >
+                    移动到未拍摄
+                  </button>
+                )}
                 <button
                   onClick={batchSoftDeleteWithConfirm}
                   className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
@@ -1389,7 +1516,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       {/* 移动到场次 */}
       {showMoveModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowMoveModal(false)}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowMoveModal(false)}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold">移动到...（{selectedIds.size} 项）</h2>
@@ -1416,7 +1543,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       {/* 合并分镜确认弹窗 */}
       {showMergeConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowMergeConfirm(false)}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowMergeConfirm(false)}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold">确认合并分镜</h2>
@@ -1466,7 +1593,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       {/* 镜头号输入弹窗 */}
       {showShotNoDialog !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setShowShotNoDialog(null); setShotNoInputValue(''); }}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setShowShotNoDialog(null); setShotNoInputValue(''); }}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold">输入镜头编号</h2>
@@ -1521,7 +1648,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       {/* 已拍摄按钮确认弹窗 */}
       {showConfirmDialog !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowConfirmDialog(null)}>
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowConfirmDialog(null)}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold">确认操作</h2>
@@ -1555,7 +1682,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       {/* 通用确认弹窗 */}
       {genericConfirm && genericConfirm.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { genericConfirm.onCancel?.(); setGenericConfirm(null); }}>
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { genericConfirm.onCancel?.(); setGenericConfirm(null); }}>
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold">{genericConfirm.title}</h2>
@@ -1637,6 +1764,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             }
           });
         }}
+        isCreating={isCreatingScene}
+        isRenaming={isRenamingScene}
       />
 
       {/* ============ 新增对话框 ============ */}

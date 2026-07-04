@@ -32,29 +32,6 @@ const API_BASE_URL = import.meta.env.DEV
   ? ''
   : (import.meta.env.VITE_API_URL || '');
 
-export function getOssProxyUrl(ossUrl: string, ossKey?: string): string {
-  if (!ossUrl) return ossUrl;
-  if (ossUrl.startsWith('data:')) return ossUrl;
-  if (ossUrl.startsWith('/uploads/')) return ossUrl;
-  
-  // 如果是相对路径（已经是代理路径），直接返回
-  if (ossUrl.startsWith('/api/')) return ossUrl;
-  
-  // 检查是否是 OSS URL（包括 aliyuncs.com 和自定义域名）
-  const isOssUrl = ossUrl.includes('aliyuncs.com') || 
-                   ossUrl.includes('qiziwenhua.top') ||
-                   ossUrl.includes('oss-');
-  
-  if (!isOssUrl) return ossUrl;
-  
-  // 优先使用 key 参数
-  if (ossKey) {
-    return `${API_BASE_URL}/api/video2/oss-proxy?key=${encodeURIComponent(ossKey)}`;
-  }
-  
-  return `${API_BASE_URL}/api/video2/oss-proxy?url=${encodeURIComponent(ossUrl)}`;
-}
-
 export function getVideoPoster(url: string): string {
   if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
     return url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
@@ -408,72 +385,6 @@ export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
   };
 }
 
-// 客户端直传 OSS（低码率视频，不经过服务器）
-// TODO: OSS 路径已改为按项目ID分文件夹 (projectId/videos/ 或 default/videos/)
-//       此函数需要添加 projectId 参数并更新 presign 请求的 folder 字段
-export async function uploadVideoDirectToOSS(
-  file: File,
-  onProgress?: (progress: UploadProgress) => void
-): Promise<UploadResult> {
-  if (!validateFileType(file, 'video')) {
-    throw new Error('不支持的视频格式，请上传 MP4、WebM、OGG 或 MOV 格式');
-  }
-
-  const sizeValidation = validateFileSize(file, 'video');
-  if (!sizeValidation.valid) {
-    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
-    throw new Error(`视频大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
-  }
-
-  onProgress?.({ phase: 'uploading', progress: 0, message: '正在获取上传凭证...' });
-
-  const presignResponse = await fetch(`${API_BASE_URL}/api/oss/presign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      folder: 'videos',
-      filename: file.name,
-      contentType: file.type || 'video/mp4'
-    })
-  });
-
-  if (!presignResponse.ok) {
-    const err = await presignResponse.json();
-    throw new Error(err.error || '获取上传凭证失败');
-  }
-
-  const { signedUrl, publicUrl } = await presignResponse.json();
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', signedUrl);
-    xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
-    xhr.timeout = 600000;
-
-    xhr.upload.addEventListener('progress', (event) => {
-      if (event.loaded && event.total) {
-        const percentage = Math.round((event.loaded / event.total) * 100);
-        onProgress?.({ phase: 'uploading', progress: percentage, message: `视频上传中... ${percentage}%` });
-      }
-    });
-
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
-        onProgress?.({ phase: 'done', progress: 100, message: `视频上传完成\n大小: ${fileSizeMB}MB` });
-        resolve({ url: publicUrl, compressed: false });
-      } else {
-        reject(new Error(`OSS 上传失败: HTTP ${xhr.status}`));
-      }
-    });
-
-    xhr.addEventListener('error', () => reject(new Error('网络错误')));
-    xhr.addEventListener('timeout', () => reject(new Error('上传超时')));
-
-    xhr.send(file);
-  });
-}
-
 // 轮询函数
 async function pollTaskStatus(
   taskId: string,
@@ -578,90 +489,6 @@ export async function uploadVideoToServerWithCompression(
     originalSizeKB: result.originalSizeKB,
     compressedSizeKB: result.compressedSizeKB,
   };
-}
-
-// 浏览器压缩后再直传 OSS（高码率视频，绕过 Cloudflare 100MB 限制）
-export async function uploadVideoWithBrowserCompression(
-  file: File,
-  onProgress?: (progress: UploadProgress) => void
-): Promise<UploadResult> {
-  if (!validateFileType(file, 'video')) {
-    throw new Error('不支持的视频格式，请上传 MP4、WebM、OGG 或 MOV 格式');
-  }
-
-  const sizeValidation = validateFileSize(file, 'video');
-  if (!sizeValidation.valid) {
-    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
-    throw new Error(`视频大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
-  }
-
-  const originalSizeKB = Math.round(file.size / 1024);
-  onProgress?.({ phase: 'compressing', progress: 0, message: '正在加载浏览器压缩组件...' });
-
-  const { compressVideoInBrowser } = await import('./videoCompressor');
-  const compressResult = await compressVideoInBrowser(file, undefined, (stage, progress) => {
-    if (stage === 'loading') {
-      onProgress?.({ phase: 'compressing', progress: Math.min(progress * 0.3, 30), message: `正在加载压缩组件... ${Math.round(progress)}%` });
-    } else {
-      onProgress?.({ phase: 'compressing', progress: 30 + progress * 0.3, message: `正在浏览器中压缩视频... ${Math.round(progress)}%` });
-    }
-  });
-
-  if (!compressResult.success) {
-    throw new Error((compressResult as { success: false; message: string }).message);
-  }
-
-  const compressedFile = compressResult.file;
-  const compressedSizeKB = Math.round(compressedFile.size / 1024);
-  onProgress?.({ phase: 'uploading', progress: 60, message: `压缩完成，正在上传至 OSS (${(compressedSizeKB / 1024).toFixed(2)}MB)...` });
-
-  const presignResponse = await fetch(`${API_BASE_URL}/api/oss/presign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      folder: 'videos',
-      filename: compressedFile.name,
-      contentType: 'video/mp4'
-    })
-  });
-
-  if (!presignResponse.ok) {
-    throw new Error('获取上传凭证失败');
-  }
-
-  const { signedUrl, publicUrl } = await presignResponse.json();
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', signedUrl);
-    xhr.setRequestHeader('Content-Type', 'video/mp4');
-    xhr.timeout = 600000;
-
-    xhr.upload.addEventListener('progress', (event) => {
-      if (event.loaded && event.total) {
-        const percentage = 60 + Math.round((event.loaded / event.total) * 40);
-        onProgress?.({ phase: 'uploading', progress: percentage, message: `上传压缩后视频... ${Math.round((event.loaded / event.total) * 100)}%` });
-      }
-    });
-
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress?.({ phase: 'done', progress: 100, message: `浏览器压缩完成\n${(originalSizeKB / 1024).toFixed(2)}MB -> ${(compressedSizeKB / 1024).toFixed(2)}MB` });
-        resolve({
-          url: publicUrl,
-          compressed: true,
-          originalSizeKB,
-          compressedSizeKB,
-        });
-      } else {
-        reject(new Error(`上传失败: HTTP ${xhr.status}`));
-      }
-    });
-
-    xhr.addEventListener('error', () => reject(new Error('网络错误')));
-    xhr.addEventListener('timeout', () => reject(new Error('上传超时')));
-    xhr.send(compressedFile);
-  });
 }
 
 // ================ video2 专用上传函数 ================
@@ -855,8 +682,9 @@ export async function uploadVideo2Video(
         };
       }
       if (status.status === 'error') {
-        if (useServerCompress && status.error?.includes('压缩')) {
-          throw new Error('服务端压缩失败：' + status.error + '。请尝试其他压缩方式，或者手动压缩后再上传！');
+        // P3-7：使用结构化错误码判断压缩失败，避免依赖中文字符串匹配
+        if (useServerCompress && status.errorCode === 'COMPRESSION_FAILED') {
+          throw new Error('服务端压缩失败：' + (status.error || '压缩失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
         }
         throw new Error(status.error || '上传失败');
       }

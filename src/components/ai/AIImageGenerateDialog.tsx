@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Upload, Loader2, CheckCircle, AlertCircle, ChevronDown } from 'lucide-react';
-import type { Settings, ModelConfig } from '../../lib/types';
+import { X, Upload, Loader2, CheckCircle, AlertCircle, Info, Plus, ChevronDown, Trash2 } from 'lucide-react';
+import type { Settings, ModelConfig, AiGeneratedImage, RefImage } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { useRefImages } from '../../hooks/useRefImages';
 import { AiErrorGuide } from './AiErrorGuide';
 
 interface AIImageGenerateDialogProps {
@@ -14,6 +16,9 @@ interface AIImageGenerateDialogProps {
   updatePromptChecked?: boolean;
   onUpdatePromptChange?: (checked: boolean) => void;
   onOpenSettings?: () => void;
+  // P3-24 新增：
+  ownerId?: number;  // 用于历史图持久化（如数字资产 ID）
+  projectId?: number;  // 用于上传参考图到正确的 OSS 目录
 }
 
 type ImageSize = '1024x576' | '576x1024' | '768x768' | '1536x1024';
@@ -43,10 +48,10 @@ export default function AIImageGenerateDialog({
   updatePromptChecked = false,
   onUpdatePromptChange,
   onOpenSettings,
+  ownerId,
+  projectId,
 }: AIImageGenerateDialogProps) {
   const [prompt, setPrompt] = useState(initialPrompt);
-  const [refImage, setRefImage] = useState<File | null>(null);
-  const [refImagePreview, setRefImagePreview] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>('geekai');
   const [selectedModel, setSelectedModel] = useState<ModelConfig | null>(null);
   const [selectedSize, setSelectedSize] = useState<ImageSize>('1024x576');
@@ -57,7 +62,33 @@ export default function AIImageGenerateDialog({
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [isDragOver, setIsDragOver] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // P3-24：@引用浮层
+  const [showAtDropdown, setShowAtDropdown] = useState(false);
+  const [atDropdownPos, setAtDropdownPos] = useState<{ top: number; left: number } | null>(null);
+
+  // P3-24：使用 useRefImages hook 统一管理参考图与历史图
+  // ownerId 未传入时 enabled=false，不持久化历史图；projectId 未传入时不支持上传
+  const {
+    refImages,
+    historyImages,
+    MAX_REF_IMAGES,
+    MAX_HISTORY,
+    isFull,
+    addUploadRef,
+    removeRef,
+    clearRefs,
+    loadHistory,
+    deleteHistory,
+    getAllRefUrls,
+  } = useRefImages({
+    ownerType: 'asset',
+    ownerId: ownerId || 0,
+    projectId,
+    enabled: !!ownerId,
+  });
+
+  // P3-24：参考图上传 input（缩略图条的 + 按钮）
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   // 加载设置
@@ -81,14 +112,21 @@ export default function AIImageGenerateDialog({
     }
   }, [isOpen]);
 
-  // 清理轮询
+  // P3-1：清理轮询（unmount 或对话框关闭时）
   useEffect(() => {
+    if (!isOpen) {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    }
     return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
+        pollingRef.current = null;
       }
     };
-  }, []);
+  }, [isOpen]);
 
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
@@ -97,16 +135,25 @@ export default function AIImageGenerateDialog({
   useEffect(() => {
     if (isOpen) {
       setPrompt(initialPrompt);
-      setRefImage(null);
-      if (refImagePreview) {
-        URL.revokeObjectURL(refImagePreview);
-      }
-      setRefImagePreview(null);
       setStatus('idle');
       setGeneratedImageUrl(null);
       setErrorMessage('');
+      // P3-24：清空参考图，防止上次选择残留
+      clearRefs();
+      // P3-22：重新加载历史图（dialog 重新打开时手动触发，仅当 ownerId 存在）
+      if (ownerId) {
+        loadHistory();
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialPrompt]);
+
+  // P3-24：@引用浮层 - 当无可引用的资产时自动关闭
+  useEffect(() => {
+    if (showAtDropdown && !refImages.some(r => r.source === 'asset' && r.assetName)) {
+      setShowAtDropdown(false);
+    }
+  }, [refImages, showAtDropdown]);
 
   // 根据平台过滤模型
   const filteredModels = availableModels.filter(m => m.provider === selectedProvider);
@@ -118,53 +165,56 @@ export default function AIImageGenerateDialog({
     }
   }, [selectedProvider, filteredModels, selectedModel]);
 
-  const handleRefImageSelect = (files: FileList | null) => {
+  // P3-24：prompt 输入变化，检测 @ 触发引用浮层
+  const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setPrompt(value);
+    // 检测 @ 触发（最后一个字符为 @，且存在可引用的资产参考图）
+    const lastChar = value[value.length - 1];
+    if (lastChar === '@' && refImages.some(r => r.source === 'asset' && r.assetName)) {
+      const textarea = e.target;
+      const rect = textarea.getBoundingClientRect();
+      setAtDropdownPos({ top: rect.bottom + 4, left: rect.left + 20 });
+      setShowAtDropdown(true);
+    } else {
+      setShowAtDropdown(false);
+    }
+  };
+
+  // P3-24：选择 @ 引用项
+  const handleSelectAtRef = (refImg: RefImage) => {
+    if (!refImg.assetName) return;
+    setPrompt(prev => prev.replace(/@$/, `@${refImg.assetName} `));
+    setShowAtDropdown(false);
+    setAtDropdownPos(null);
+  };
+
+  // P3-24：拖拽上传 - drop 时调用 addUploadRef
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
     const file = files[0];
     if (!file.type.startsWith('image/')) return;
-
-    setRefImage(file);
-    setRefImagePreview(URL.createObjectURL(file));
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    handleRefImageSelect(e.dataTransfer.files);
-  };
-
-  const handleRemoveRefImage = () => {
-    setRefImage(null);
-    if (refImagePreview) {
-      URL.revokeObjectURL(refImagePreview);
-      setRefImagePreview(null);
-    }
-  };
-
-  const uploadRefImage = async (): Promise<string | undefined> => {
-    if (!refImage) return undefined;
-
     try {
-      const formData = new FormData();
-      formData.append('file', refImage);
-      formData.append('reference', 'true');
-      formData.append('title', `ref_${Date.now()}`);
-
-      const response = await fetch('/api/video2/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error('上传参考图失败');
-      }
-
-      const data = await response.json();
-      return data.url;
+      await addUploadRef(file);
     } catch (err) {
-      console.error('上传参考图失败:', err);
-      throw err;
+      alert(err instanceof Error ? err.message : '上传参考图失败');
     }
+  };
+
+  // P3-24：文件选择上传
+  const handleUploadInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      try {
+        await addUploadRef(f);
+      } catch (err) {
+        alert(err instanceof Error ? err.message : '上传参考图失败');
+      }
+    }
+    e.target.value = '';
   };
 
   const startGeneration = async () => {
@@ -174,11 +224,8 @@ export default function AIImageGenerateDialog({
     setErrorMessage('');
 
     try {
-      // 上传参考图（如果有）
-      let refImageUrl: string | undefined;
-      if (refImage) {
-        refImageUrl = await uploadRefImage();
-      }
+      // P3-24：使用统一的参考图 URL 列表
+      const refUrls = getAllRefUrls();
 
       // 调用通用生图接口
       const response = await fetch('/api/video2/ai/generic-image-gen', {
@@ -186,11 +233,13 @@ export default function AIImageGenerateDialog({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: prompt.trim(),
-          refImageUrl,
+          refImages: refUrls,
           size: selectedSize,
           provider: selectedProvider,
           model: selectedModel.model,
           quality: selectedModel.quality || 'standard',
+          ownerType: 'asset',
+          ownerId: ownerId || undefined,
         }),
       });
 
@@ -222,6 +271,10 @@ export default function AIImageGenerateDialog({
             if (imageUrl) {
               setGeneratedImageUrl(imageUrl);
               setStatus('done');
+              // P3-22：生成成功后刷新历史图列表（仅当 ownerId 存在）
+              if (ownerId) {
+                loadHistory();
+              }
             } else {
               throw new Error('生成结果无效');
             }
@@ -301,60 +354,61 @@ export default function AIImageGenerateDialog({
                 <label className="block text-sm font-medium text-slate-300 mb-2">提示词</label>
                 <textarea
                   value={prompt}
-                  onChange={e => setPrompt(e.target.value)}
+                  onChange={handlePromptChange}
                   rows={3}
                   className="w-full px-4 py-3 rounded-xl border border-white/10 bg-white/5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50"
-                  placeholder="描述你想要生成的画面内容..."
+                  placeholder="描述你想要生成的画面内容...（输入 @ 可引用资产）"
                 />
               </div>
 
-              {/* 参考图上传（仅支持图生图的模型显示） */}
-              {selectedModel?.supportsImageRef && (
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-slate-300 mb-2">参考图（可选）</label>
-                  {refImagePreview ? (
-                    <div className="relative rounded-xl border border-white/10 overflow-hidden">
-                      <img
-                        src={refImagePreview}
-                        alt="参考图"
-                        className="w-full h-32 object-cover"
-                      />
-                      <button
-                        onClick={handleRemoveRefImage}
-                        className="absolute top-2 right-2 w-6 h-6 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white transition"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                      <div className="absolute bottom-2 left-2 px-2 py-1 rounded bg-black/60 text-white text-xs">
-                        本地上传
-                      </div>
+              {/* P3-24：已选参考图缩略图条（始终显示，含拖拽上传） */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  参考图 ({refImages.length}/{MAX_REF_IMAGES})
+                </label>
+                <div
+                  onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={handleDrop}
+                  className={`rounded-xl border-2 border-dashed transition ${
+                    isDragOver
+                      ? 'border-violet-400 bg-violet-500/10'
+                      : 'border-white/15 bg-white/[0.02]'
+                  }`}
+                >
+                  {refImages.length === 0 ? (
+                    <div className="p-4 text-center">
+                      <Upload className={`w-6 h-6 mx-auto mb-2 ${isDragOver ? 'text-violet-400' : 'text-white/40'}`} />
+                      <p className="text-sm text-slate-400">
+                        {projectId ? '点击 + 上传参考图（可选）' : '本对话框未配置 projectId，无法上传参考图'}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-1">支持拖拽图片到此处</p>
                     </div>
                   ) : (
-                    <div
-                      onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
-                      onDragLeave={() => setIsDragOver(false)}
-                      onDrop={handleDrop}
-                      onClick={() => fileInputRef.current?.click()}
-                      className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition ${
-                        isDragOver
-                          ? 'border-violet-400 bg-violet-500/10'
-                          : 'border-white/15 hover:border-violet-400/40 bg-white/[0.02] hover:bg-white/[0.04]'
-                      }`}
-                    >
-                      <Upload className={`w-6 h-6 mx-auto mb-2 ${isDragOver ? 'text-violet-400' : 'text-white/40'}`} />
-                      <p className="text-sm text-slate-400">点击或拖拽图片到此处</p>
-                      <p className="text-xs text-slate-500 mt-1">上传参考图帮助生成相似风格图片</p>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={e => handleRefImageSelect(e.target.files)}
-                      />
+                    <div className="flex gap-2 overflow-x-auto p-2">
+                      {refImages.map(r => (
+                        <RefThumb key={r.id} refImg={r} onRemove={() => removeRef(r.id)} />
+                      ))}
+                      {!isFull && projectId && (
+                        <button
+                          onClick={() => uploadInputRef.current?.click()}
+                          className="shrink-0 w-16 h-16 rounded-lg border-2 border-dashed border-white/20 hover:border-violet-400 flex items-center justify-center transition"
+                          title="上传参考图"
+                        >
+                          <Plus className="w-5 h-5 text-white/40" />
+                        </button>
+                      )}
                     </div>
                   )}
+                  <input
+                    ref={uploadInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleUploadInputChange}
+                  />
                 </div>
-              )}
+              </div>
 
               {/* 平台选择 */}
               <div className="mb-4">
@@ -399,6 +453,23 @@ export default function AIImageGenerateDialog({
                     </svg>
                   </div>
                 </div>
+                {/* P3-24：模型能力警告 */}
+                {selectedModel && !selectedModel.supportsImageRef && refImages.length > 0 && (
+                  <div className="mt-2 p-2 rounded-lg bg-orange-500/10 border border-orange-500/30 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-orange-300">
+                      当前模型不支持图生图，将仅以文字描述参考图风格生成
+                    </p>
+                  </div>
+                )}
+                {selectedModel?.supportsImageRef && refImages.length > 1 && (
+                  <div className="mt-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-start gap-2">
+                    <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-blue-300">
+                      当前模型仅支持单张参考图，将使用第一张（已选 {refImages.length} 张）
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* 图片尺寸 */}
@@ -485,6 +556,41 @@ export default function AIImageGenerateDialog({
               <AiErrorGuide error={errorMessage || '生成失败'} onOpenSettings={onOpenSettings} />
             </div>
           )}
+
+          {/* P3-22：历史图缩略图条（仅当 ownerId 存在时显示，持久化跨会话保留） */}
+          {ownerId && historyImages.length > 0 && (
+            <div className="mt-6 pt-4 border-t border-white/10">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-slate-400">
+                  历史生成 ({historyImages.length}/{MAX_HISTORY})
+                </p>
+                <p className="text-xs text-slate-500">点击缩略图重新选择</p>
+              </div>
+              <div className="flex gap-2 overflow-x-auto pb-2">
+                {historyImages.map((img) => (
+                  <HistoryThumb
+                    key={img.id}
+                    img={img}
+                    isSelected={generatedImageUrl === img.url}
+                    onSelect={() => {
+                      setGeneratedImageUrl(img.url);
+                      setStatus('done');
+                    }}
+                    onDelete={(e) => {
+                      e.stopPropagation();
+                      if (!confirm('确定要删除这张历史图吗？')) return;
+                      deleteHistory(img.id);
+                    }}
+                  />
+                ))}
+              </div>
+              {historyImages.length >= MAX_HISTORY && (
+                <p className="text-xs text-amber-400 mt-1">
+                  已达上限，请先删除旧图才能继续生成
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -559,6 +665,98 @@ export default function AIImageGenerateDialog({
           )}
         </div>
       </div>
+
+      {/* P3-24：@引用浮层 */}
+      {showAtDropdown && atDropdownPos && (
+        <div
+          className="fixed z-[70] bg-slate-800 border border-white/10 rounded-lg shadow-xl py-1 max-h-48 overflow-y-auto min-w-[200px]"
+          style={{ top: atDropdownPos.top, left: atDropdownPos.left }}
+        >
+          {refImages.filter(r => r.source === 'asset' && r.assetName).map(r => (
+            <button
+              key={r.id}
+              onClick={() => handleSelectAtRef(r)}
+              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-white/10 text-white"
+            >
+              @{r.assetName}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// P3-22：历史图缩略图组件（独立组件以使用 useSignedUrl hook）
+function HistoryThumb({
+  img,
+  isSelected,
+  onSelect,
+  onDelete,
+}: {
+  img: AiGeneratedImage;
+  isSelected: boolean;
+  onSelect: () => void;
+  onDelete: (e: React.MouseEvent) => void;
+}) {
+  const signedUrl = useSignedUrl(img.url);
+  return (
+    <div
+      onClick={onSelect}
+      className={`relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border cursor-pointer transition ${
+        isSelected ? 'border-violet-400 ring-2 ring-violet-400/50' : 'border-white/10 hover:border-white/30'
+      }`}
+      title={img.prompt || '历史生成图'}
+    >
+      <img
+        src={signedUrl || img.url}
+        alt="历史图"
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+      />
+      <button
+        onClick={onDelete}
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
+        title="删除此历史图"
+      >
+        <Trash2 className="w-2.5 h-2.5 text-white" />
+      </button>
+    </div>
+  );
+}
+
+// P3-24：已选参考图缩略图组件（独立组件以使用 useSignedUrl hook）
+function RefThumb({
+  refImg,
+  onRemove,
+}: {
+  refImg: RefImage;
+  onRemove: () => void;
+}) {
+  const signedUrl = useSignedUrl(refImg.url);
+  return (
+    <div
+      className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-white/10"
+      title={refImg.assetName || '参考图'}
+    >
+      <img
+        src={signedUrl || refImg.url}
+        alt={refImg.assetName || '参考图'}
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+      />
+      <button
+        onClick={onRemove}
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
+        title="移除参考图"
+      >
+        <X className="w-2.5 h-2.5 text-white" />
+      </button>
+      {refImg.assetName && (
+        <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
+          {refImg.assetName}
+        </div>
+      )}
     </div>
   );
 }

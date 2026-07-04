@@ -171,3 +171,45 @@ export interface DigitalAssetImage {
   sortOrder: number;
   createdAt: string;
 }
+
+// P3-22：AI 生图历史记录（持久化到 ai_generated_images 表）
+export interface AiGeneratedImage {
+  id: number;
+  ownerType: 'shot' | 'asset';
+  ownerId: number;
+  url: string;
+  prompt: string;
+  model: string;
+  provider: string;
+  size: string;
+  fileSize: number;
+  sortOrder: number;
+  createdAt: string;
+}
+
+// P3-24：统一的参考图（来自数字资产或用户上传），供 AI 生图使用
+export interface RefImage {
+  id: string;          // 唯一 key
+  url: string;         // 图片 URL（OSS）
+  source: 'asset' | 'upload';  // 来源
+  assetId?: number;    // 来自资产时记录
+  assetName?: string;  // 用于 @引用 显示
+  assetType?: 'actor' | 'prop' | 'scene';
+}
+
+// any-audit：挂起上传任务（ProjectListPage pendingUploadRef）
+export interface PendingUpload {
+  file: File;
+  index: number;
+  total: number;
+  successCount: number;
+  project: Project;
+  usage?: 'project-reference' | 'project-cover' | 'project-video' | string;
+}
+
+// any-audit：场次统计（StoryboardPage scene-stats API 响应）
+export interface SceneStat {
+  id: number | null;
+  done: number;
+  total: number;
+}

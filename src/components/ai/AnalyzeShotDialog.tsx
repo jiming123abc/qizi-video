@@ -25,6 +25,8 @@ interface AnalysisResult {
   shotAngle?: string;
   lighting?: string;
   cameraMovement?: string;
+  // 内部字段：供 AI 生图对话框使用，不在分析结果 UI 中展示
+  aiImagePrompt?: string;
 }
 
 export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia, onApply, onOpenSettings }: AnalyzeShotDialogProps) {
@@ -36,12 +38,39 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
   const [error, setError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // P3-1：120s 超时 ref，用于清理
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const signedUrl = useSignedUrl(currentMedia?.url);
   const displayUrl = signedUrl || currentMedia?.url;
 
   useEscapeKey(onClose, isOpen);
+
+  // P3-1：组件卸载或对话框关闭时清理所有 timer，防止内存泄漏
+  useEffect(() => {
+    if (!isOpen) {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      setIsAnalyzing(false);
+    }
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     if (isOpen) {
@@ -144,13 +173,15 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
         }
       }, 2000);
 
-      setTimeout(() => {
+      // P3-1：120s 超时，保存到 timeoutRef 以便关闭对话框时清理
+      timeoutRef.current = setTimeout(() => {
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
           setIsAnalyzing(false);
           setError('分析超时');
         }
+        timeoutRef.current = null;
       }, 120000);
     } catch (err) {
       console.error('AI分析失败:', err);
@@ -159,9 +190,25 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
     }
   };
 
+  // P3-7：取消分析，清理 timer 并停止前端轮询
+  // 注意：后端 ai_tasks 记录会保留为 processing 状态，但不影响功能（任务最终会被视为过期）
+  const cancelAnalysis = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    setIsAnalyzing(false);
+    setTaskId(null);
+  };
+
   const handleApply = () => {
     if (!analysisResult) return;
 
+    // 注意：单帧分析无法可靠判断 estimatedDuration/notes/narration，不回填这些字段
     const updates: Partial<Shot> = {
       sceneContent: analysisResult.sceneContent || '',
       location: analysisResult.location || '',
@@ -173,6 +220,8 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
       shotAngle: analysisResult.shotAngle || '',
       lighting: analysisResult.lighting || '',
       cameraMovement: analysisResult.cameraMovement || '',
+      // 内部回填：供 AI 生图对话框使用
+      aiImagePrompt: analysisResult.aiImagePrompt || '',
     };
 
     onApply(shot.id, updates);
@@ -285,23 +334,33 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
           </div>
 
           {/* 分析按钮 */}
-          <button
-            onClick={startAnalysis}
-            disabled={isAnalyzing || !selectedProvider || !selectedModel}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 hover:from-emerald-500/30 hover:to-teal-500/30 border border-emerald-400/30 text-emerald-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition min-h-[44px]"
-          >
-            {isAnalyzing ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                分析中...
-              </>
-            ) : (
-              <>
-                <Loader2 className="w-4 h-4" />
-                开始分析
-              </>
+          <div className="flex gap-2">
+            <button
+              onClick={startAnalysis}
+              disabled={isAnalyzing || !selectedProvider || !selectedModel}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 hover:from-emerald-500/30 hover:to-teal-500/30 border border-emerald-400/30 text-emerald-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition min-h-[44px]"
+            >
+              {isAnalyzing ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  分析中...
+                </>
+              ) : (
+                <>
+                  <Loader2 className="w-4 h-4" />
+                  开始分析
+                </>
+              )}
+            </button>
+            {isAnalyzing && (
+              <button
+                onClick={cancelAnalysis}
+                className="px-4 py-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm font-medium transition min-h-[44px]"
+              >
+                取消分析
+              </button>
             )}
-          </button>
+          </div>
 
           {/* 错误提示 + 操作引导 */}
           {error && (

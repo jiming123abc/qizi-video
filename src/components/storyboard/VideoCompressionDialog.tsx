@@ -34,7 +34,7 @@ export function VideoCompressionDialog({
   const isMultiple = compressionFiles.length > 1;
 
   return (
-    <div className="fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[70] p-4 bg-black/60 backdrop-blur-sm">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
           <h3 className="text-base font-semibold text-white">视频码率过高</h3>

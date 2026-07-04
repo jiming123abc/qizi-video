@@ -55,6 +55,10 @@ export function useUpload(options: UseUploadOptions) {
   const concurrentCountRef = useRef(0);
   const maxConcurrent = 5;
   const maxRetries = 2;
+  // P3-1：完成检测 interval 的 ref，用于 unmount 时清理
+  const completionCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // P3-1：重试 setTimeout 的 ref 集合，用于 unmount 时清理
+  const retryTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
@@ -63,6 +67,18 @@ export function useUpload(options: UseUploadOptions) {
       .then(res => res.json())
       .then(data => setAliyunConfigured(data.configured || false))
       .catch(() => {});
+  }, []);
+
+  // P3-1：unmount 时清理所有 timer，防止内存泄漏与对已卸载组件 setState
+  useEffect(() => {
+    return () => {
+      if (completionCheckRef.current) {
+        clearInterval(completionCheckRef.current);
+        completionCheckRef.current = null;
+      }
+      retryTimeoutsRef.current.forEach(t => clearTimeout(t));
+      retryTimeoutsRef.current.clear();
+    };
   }, []);
 
   const refreshAfterUpload = useCallback(async () => {
@@ -118,11 +134,13 @@ export function useUpload(options: UseUploadOptions) {
         const nextRetry = retry + 1;
         // 使用 'retrying' 状态，避免被 runUploadQueue 重复扫描启动
         setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, retryCount: nextRetry, progress: 0, status: 'retrying', message: `准备重试 ${nextRetry}/${maxRetries}` } : uf));
-        setTimeout(() => {
+        const retryTimer = setTimeout(() => {
           // 延迟结束后，改为 'pending' 并触发队列，由队列统一启动
+          retryTimeoutsRef.current.delete(retryTimer);
           setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'pending', message: `重试 ${nextRetry}/${maxRetries}` } : uf));
           runUploadQueueRef.current();
         }, 1000 * nextRetry);
+        retryTimeoutsRef.current.add(retryTimer);
         return;
       }
       
@@ -169,11 +187,18 @@ export function useUpload(options: UseUploadOptions) {
   runUploadQueueRef.current = runUploadQueue;
 
   const setupCompletionCheck = useCallback(() => {
+    // P3-1：清理上一次未完成的 interval，防止多个 interval 同时运行
+    if (completionCheckRef.current) {
+      clearInterval(completionCheckRef.current);
+    }
     const checkComplete = setInterval(() => {
       setUploadingFiles(current => {
         const isAllDone = current.every(f => f.status === 'done' || f.status === 'error' || f.status === 'cancelled');
         if (isAllDone && !compressionDecisionPendingRef.current && concurrentCountRef.current === 0) {
-          clearInterval(checkComplete);
+          if (completionCheckRef.current) {
+            clearInterval(completionCheckRef.current);
+            completionCheckRef.current = null;
+          }
           setTimeout(() => {
             refreshAfterUpload();
             const successCount = current.filter(f => f.status === 'done').length;
@@ -188,6 +213,7 @@ export function useUpload(options: UseUploadOptions) {
         return current;
       });
     }, 500);
+    completionCheckRef.current = checkComplete;
   }, [refreshAfterUpload, showToast]);
 
   const handleUploadFiles = useCallback(async (files: FileList | File[]) => {
@@ -204,7 +230,7 @@ export function useUpload(options: UseUploadOptions) {
     if (valid.length === 0) return;
 
     const initial: UploadingFile[] = valid.map(f => ({
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`,
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
       name: f.name, size: f.size, progress: 0, status: 'pending',
       retryCount: 0
     }));
@@ -317,7 +343,8 @@ export function useUpload(options: UseUploadOptions) {
     if (!url) return;
     const newItem: UploadingFile = {
       id: `${Date.now()}-url`,
-      name: url.substring(0, 50) + '...',
+      // P3-12：仅当 URL 超过 50 字符时才截断加省略号
+      name: url.length > 50 ? url.substring(0, 50) + '...' : url,
       size: 0,
       progress: 20,
       status: 'uploading',
@@ -334,7 +361,8 @@ export function useUpload(options: UseUploadOptions) {
       setUrlInputValue('');
       await refreshAfterUpload();
     } catch (e) {
-      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, status: 'error', message: String(e) } : uf));
+      // P3-11：显示具体错误信息而非 [object Error]
+      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, status: 'error', message: (e as Error).message || '转存失败' } : uf));
     }
   }, [urlInputValue, projectId, currentSceneId, refreshAfterUpload]);
 

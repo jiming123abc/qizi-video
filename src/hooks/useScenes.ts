@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, type Dispatch, type SetStateAction, type RefObject, type DragEvent } from 'react';
+import { useState, useCallback, useRef, useEffect, type Dispatch, type SetStateAction, type RefObject, type DragEvent } from 'react';
 import type { Scene } from '../lib/types';
 
 interface UseScenesOptions {
@@ -81,26 +81,40 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      await fetch(`/api/video2/scenes/${id}`, {
+      const res = await fetch(`/api/video2/scenes/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: trimmed })
       });
-      await loadScenes();
-      showToast('场次已重命名');
+      const data = await res.json();
+      // P3-9：检查响应，失败时提示用户且不调用 loadScenes 误导
+      if (res.ok && data.success !== false) {
+        await loadScenes();
+        showToast('场次已重命名');
+      } else {
+        showToast(data.message || '重命名失败', 'error');
+      }
     } catch (e) {
       console.error('重命名失败:', e);
+      showToast('重命名失败：' + (e as Error).message, 'error');
     }
   }, [loadScenes, showToast]);
 
   const deleteScene = useCallback(async (id: number) => {
     try {
-      await fetch(`/api/video2/scenes/${id}`, { method: 'DELETE' });
-      if (currentSceneId === id) setCurrentSceneId(null);
-      await loadScenes();
-      showToast('场次已删除');
+      const res = await fetch(`/api/video2/scenes/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      // P3-9：检查响应，失败时提示用户且不调用 loadScenes 误导
+      if (res.ok && data.success !== false) {
+        if (currentSceneId === id) setCurrentSceneId(null);
+        await loadScenes();
+        showToast('场次已删除');
+      } else {
+        showToast(data.message || '删除场次失败', 'error');
+      }
     } catch (e) {
       console.error('删除场次失败:', e);
+      showToast('删除场次失败：' + (e as Error).message, 'error');
     }
   }, [currentSceneId, loadScenes, showToast]);
 
@@ -177,6 +191,14 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     setCanScrollLeft(el.scrollLeft > 5);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 5);
   }, []);
+
+  // P3-15：scenes 变化后重新计算滚动指示器状态（修复初始状态未计算的问题）
+  useEffect(() => {
+    const rafId = requestAnimationFrame(() => {
+      updateSceneScrollState();
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [scenes, updateSceneScrollState]);
 
   const scrollSceneTabs = useCallback((direction: 'left' | 'right') => {
     const el = sceneTabRef.current;

@@ -58,9 +58,10 @@ export default function MediaManagerDialog({
   const [isDragOver, setIsDragOver] = useState(false);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const sceneRefInputRef = useRef<HTMLInputElement>(null);
+  // P3-23：sceneRefInputRef 已移除（场景参考图上传功能废弃）
 
   // 弹窗打开时批量签名所有媒体 URL
+  // 依赖 url 列表字符串（而非 length），确保删除一张又添加一张时新媒体也能签名
   useEffect(() => {
     if (!isOpen) return;
     const urls = mediaList.map(m => m.url).filter(Boolean);
@@ -79,7 +80,7 @@ export default function MediaManagerDialog({
         });
       });
     });
-  }, [isOpen, mediaList.length]);
+  }, [isOpen, mediaList.map(m => m.url).join(',')]);
 
   // 压缩选择对话框状态
   const [pendingVideo, setPendingVideo] = useState<File | null>(null);
@@ -197,7 +198,7 @@ export default function MediaManagerDialog({
     if (validFiles.length === 0) return;
 
     const initial: UploadingItem[] = validFiles.map(f => ({
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`,
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
       name: f.name,
       progress: 5,
       status: 'uploading' as const
@@ -306,7 +307,7 @@ export default function MediaManagerDialog({
 
     const file = pendingVideo;
     const isSceneRef = pendingIsSceneRef;
-    const fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+    const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
 
     setPendingVideo(null);
     setPendingDecision(null);
@@ -366,9 +367,7 @@ export default function MediaManagerDialog({
     handleFileSelect(e.dataTransfer.files);
   };
 
-  const handleSceneRefSelect = (files: FileList | null) => {
-    handleFileSelect(files, true);
-  };
+  // P3-23：handleSceneRefSelect 已移除（场景参考图上传功能废弃）
 
   if (!isOpen) return null;
 
@@ -383,7 +382,7 @@ export default function MediaManagerDialog({
           <h2 className="text-lg font-semibold">参考画面管理</h2>
           <button
             onClick={handleClose}
-            className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition"
+            className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition"
           >
             <X className="w-5 h-5" />
           </button>
@@ -435,7 +434,7 @@ export default function MediaManagerDialog({
                         {/* Delete button */}
                         <button
                           onClick={() => deleteMedia(media.id)}
-                          className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition text-xs"
+                          className="touch-target-44-lg absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition text-xs"
                           title="删除"
                         >
                           <X className="w-3 h-3" />
@@ -507,25 +506,7 @@ export default function MediaManagerDialog({
             />
           </div>
 
-          {/* Scene reference upload */}
-          <div
-            onClick={() => sceneRefInputRef.current?.click()}
-            className="mb-4 border border-white/10 rounded-2xl p-4 text-center cursor-pointer transition bg-white/[0.02] hover:bg-white/[0.04]"
-          >
-            <div className="flex items-center justify-center gap-2 mb-1">
-              <ImageIcon className="w-5 h-5 text-white/50" />
-              <p className="text-sm font-medium">上传场景参考图</p>
-            </div>
-            <p className="text-xs text-slate-500">用于 AI 生图时的场景参考（不影响镜头参考画面数量）</p>
-            <input
-              ref={sceneRefInputRef}
-              type="file"
-              multiple
-              accept="image/*"
-              className="hidden"
-              onChange={e => handleSceneRefSelect(e.target.files)}
-            />
-          </div>
+          {/* P3-23：移除无效的"上传场景参考图"区域（已被 P3-24 的统一参考图机制取代） */}
 
           {/* AI Generate button */}
           {onAiGenerate && (

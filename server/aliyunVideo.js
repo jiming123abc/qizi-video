@@ -95,10 +95,15 @@ async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT
 
     const result = await response.json();
 
-    if (!response.ok || result.Code) {
+    // P3-5：HTTP 错误时必须抛错，不能仅依赖 result.Code
+    if (!response.ok) {
       if (result.Code && result.Message) {
         throw new Error(`阿里云 API 错误: ${result.Code} - ${result.Message}`);
       }
+      throw new Error(`阿里云 API HTTP 错误: ${response.status} ${response.statusText}`);
+    }
+    if (result.Code) {
+      throw new Error(`阿里云 API 错误: ${result.Code} - ${result.Message || '未知错误'}`);
     }
 
     return result;
@@ -120,10 +125,13 @@ async function submitSplitVideoTask(videoUrl, options = {}) {
   if (options.Template) params.Template = options.Template;
 
   const result = await callAliyunApi('SplitVideoParts', params, VIDEORECOG_ENDPOINT);
-
+  const data = result.Data || {};
+  if (!data.JobId) {
+    throw new Error('阿里云拆条任务提交失败：未返回 JobId');
+  }
   return {
     requestId: result.RequestId,
-    jobId: result.RequestId,
+    jobId: data.JobId,
     message: result.Message
   };
 }
@@ -256,6 +264,12 @@ const DEFAULT_BITRATE_CONFIG = {
   '480p': 1000     // 480p 及以下
 };
 
+// P2-3：注入 index.js 的 getTargetBitrate 函数，统一码率来源（读取数据库设置）
+let _getTargetBitrateFn = null;
+function setBitrateProvider(fn) {
+  _getTargetBitrateFn = fn;
+}
+
 function getResolutionFromMaxRes(maxRes) {
   if (maxRes >= 1080) return '1080p';
   if (maxRes >= 720) return '720p';
@@ -263,13 +277,26 @@ function getResolutionFromMaxRes(maxRes) {
 }
 
 // 根据分辨率和外部传入的码率配置确定目标码率
-function determineBitrate(width, height, bitrateConfig = null) {
+// P2-3：优先使用注入的 getTargetBitrate（读数据库），回退到 DEFAULT_BITRATE_CONFIG
+async function determineBitrate(width, height, bitrateConfig = null) {
+  // 如果外部提供了静态配置，使用外部配置
+  if (bitrateConfig) {
+    const maxRes = Math.max(width, height);
+    const resolution = getResolutionFromMaxRes(maxRes);
+    return bitrateConfig[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
+  }
+  // 优先使用注入的数据库读取函数
+  if (_getTargetBitrateFn) {
+    try {
+      return await _getTargetBitrateFn(width, height);
+    } catch (e) {
+      console.warn('[aliyunVideo] 注入的 getTargetBitrate 调用失败，回退默认值:', e.message);
+    }
+  }
+  // 最终回退：使用默认配置
   const maxRes = Math.max(width, height);
   const resolution = getResolutionFromMaxRes(maxRes);
-
-  // 如果外部提供了配置，使用外部配置；否则使用默认配置
-  const config = bitrateConfig || DEFAULT_BITRATE_CONFIG;
-  return config[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
+  return DEFAULT_BITRATE_CONFIG[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
 }
 
 // 统一的码率阈值判断：原始码率 > 目标码率时需要压缩
@@ -319,20 +346,14 @@ async function submitTranscodeTask(videoUrl, options = {}) {
   }
 
   // 确定目标码率
-  const targetBitrate = options.targetBitrate || determineBitrate(options.width || 1920, options.height || 1080);
+  const targetBitrate = options.targetBitrate || await determineBitrate(options.width || 1920, options.height || 1080);
 
   // 生成输出 object key
   const outputObject = options.outputObject || generateOutputObject(inputObject, 'custom');
 
   // 构建转码配置（JSON 格式）
+  // P3-5：移除无效的 Inputs 字段（实际 Input 通过 params.Input 单独传递）
   const transcodingConfig = {
-    Inputs: [{
-      Input: {
-        Object: inputObject,
-        Location: ossConfig.location,
-        Bucket: ossConfig.bucket
-      }
-    }],
     Outputs: [{
       OutputObject: outputObject,
       Container: {
@@ -357,9 +378,9 @@ async function submitTranscodeTask(videoUrl, options = {}) {
     PipelineId: options.pipelineId || process.env.MPS_PIPELINE_ID || ''
   };
 
-  // 如果没有配置管道 ID，使用默认管道（需要用户在阿里云控制台创建）
+  // P3-5：未配置 PipelineId 时抛出明确错误，而非仅 warn 后继续（会导致 MPS 调用失败）
   if (!transcodingConfig.PipelineId) {
-    console.warn('[MPS] 未配置 MPS_PIPELINE_ID，请在环境变量中设置或手动指定');
+    throw new Error('未配置 MPS_PIPELINE_ID，请在环境变量中设置或在设置页指定转码管道 ID');
   }
 
   const params = {
@@ -476,5 +497,7 @@ module.exports = {
   // 统一码率配置
   DEFAULT_BITRATE_CONFIG,
   getResolutionFromMaxRes,
-  shouldCompress
+  shouldCompress,
+  // P2-3：注入码率来源
+  setBitrateProvider
 };

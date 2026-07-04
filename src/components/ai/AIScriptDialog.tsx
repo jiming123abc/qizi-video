@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { X, Upload, FileText, Loader2, CheckCircle2, AlertCircle, Info, Scissors, ImageOff, ChevronDown } from 'lucide-react';
+import { X, Upload, FileText, Loader2, CheckCircle2, AlertCircle, Info, Scissors, ImageOff, ChevronDown, Download, Lightbulb } from 'lucide-react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
-import type { ModelConfig, Settings } from '../../lib/types';
+import type { ModelConfig, Settings, DigitalAsset } from '../../lib/types';
 import { AiErrorGuide } from './AiErrorGuide';
 
 interface AIScriptDialogProps {
@@ -9,11 +9,30 @@ interface AIScriptDialogProps {
   onClose: () => void;
   projectId: number;
   sceneId?: number | null;
-  onSuccess?: (result: { shots: any[]; digitalAssets: { mainActors: any[]; keyProps: any[]; mainScenes: any[] } }) => void;
+  // any-audit：用 ShotData[] 和 DigitalAsset[] 替代 any[]（本文件已定义 ShotData，DigitalAsset 来自 types.ts）
+  onSuccess?: (result: { shots: ShotData[]; digitalAssets: { mainActors: DigitalAsset[]; keyProps: DigitalAsset[]; mainScenes: DigitalAsset[] } }) => void;
   onOpenSettings?: () => void;
 }
 
-type DialogState = 'initial' | 'analyzing' | 'shotcut_selection' | 'stock_selection' | 'completed';
+// P5-1：14 状态状态机（支持 A1/A2/B/C/D 五条路径）
+type DialogState =
+  | 'initial'
+  | 'analyzing_type'         // 路径A/B/D：AI 判断文档类型中
+  | 'intent_generating'      // 路径C：AI 根据制片意图生成视频文案中
+  | 'intent_preview'         // 路径C：用户确认视频文案
+  | 'scene_generating'       // 路径A2：AI 生成场次划分中
+  | 'scene_preview'          // 路径A2：用户确认场次划分
+  | 'storyboard_generating'  // 路径B/C 阶段1：生成分镜脚本中
+  | 'storyboard_preview'     // 路径B/C 阶段1：预览分镜脚本
+  | 'shooting_generating'    // 路径B/C 阶段2：生成拍摄脚本中
+  | 'shooting_preview'       // 路径B/C 阶段2：预览拍摄脚本
+  | 'final_parsing'          // 最终解析分镜数据
+  | 'shotcut_selection'      // 镜头切换选择
+  | 'stock_selection'        // 素材镜头选择
+  | 'completed';
+
+// P5-1：AI 任务输出类型（task.output.type）
+type ScriptOutputType = 'video_copy' | 'scene_division' | 'storyboard_script' | 'shooting_script' | 'shots';
 
 interface ShotData {
   shotIndex: number;
@@ -57,7 +76,7 @@ export default function AIScriptDialog({
   onOpenSettings,
 }: AIScriptDialogProps) {
   const [state, setState] = useState<DialogState>('initial');
-  const [mode, setMode] = useState<'script' | 'narration'>('script');
+  // P5-1：移除 mode（改为 AI 自动判断），textInput 改为"制片意图"输入
   const [textInput, setTextInput] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [generateImages, setGenerateImages] = useState(true);
@@ -66,7 +85,11 @@ export default function AIScriptDialog({
   const [shots, setShots] = useState<ShotData[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [digitalAssets, setDigitalAssets] = useState<{ mainActors: any[]; keyProps: any[]; mainScenes: any[] }>({
+  // P5-1：AI 生成的脚本文本（视频文案/场次划分/分镜脚本/拍摄脚本）+ 用户可编辑副本
+  const [scriptText, setScriptText] = useState('');
+  const [editingScriptText, setEditingScriptText] = useState('');
+  // any-audit：用 DigitalAsset[] 替代 any[]
+  const [digitalAssets, setDigitalAssets] = useState<{ mainActors: DigitalAsset[]; keyProps: DigitalAsset[]; mainScenes: DigitalAsset[] }>({
     mainActors: [],
     keyProps: [],
     mainScenes: []
@@ -103,7 +126,6 @@ export default function AIScriptDialog({
   // 重置状态
   const resetState = useCallback(() => {
     setState('initial');
-    setMode('script');
     setTextInput('');
     setFile(null);
     setGenerateImages(true);
@@ -112,6 +134,8 @@ export default function AIScriptDialog({
     setShots([]);
     setError(null);
     setTaskId(null);
+    setScriptText('');
+    setEditingScriptText('');
     setProvider('geekai');
     setModelId('deepseek-chat');
     setShotCutDecisions({});
@@ -169,6 +193,43 @@ export default function AIScriptDialog({
             pollIntervalRef.current = null;
           }
           setProgress(100);
+
+          // P5-1：根据 task.output.type 路由到不同状态
+          const outputType: ScriptOutputType = data.output?.type || 'shots';
+
+          if (outputType === 'video_copy') {
+            // 路径C：视频文案生成完成 → intent_preview
+            setScriptText(data.output.content || '');
+            setEditingScriptText(data.output.content || '');
+            setState('intent_preview');
+            return;
+          }
+
+          if (outputType === 'scene_division') {
+            // 路径A2：场次划分生成完成 → scene_preview
+            setScriptText(data.output.content || '');
+            setEditingScriptText(data.output.content || '');
+            setState('scene_preview');
+            return;
+          }
+
+          if (outputType === 'storyboard_script') {
+            // 路径B/C 阶段1：分镜脚本生成完成 → storyboard_preview
+            setScriptText(data.output.content || '');
+            setEditingScriptText(data.output.content || '');
+            setState('storyboard_preview');
+            return;
+          }
+
+          if (outputType === 'shooting_script') {
+            // 路径B/C 阶段2：拍摄脚本生成完成 → shooting_preview
+            setScriptText(data.output.content || '');
+            setEditingScriptText(data.output.content || '');
+            setState('shooting_preview');
+            return;
+          }
+
+          // outputType === 'shots'：最终分镜数据
           const outputShots = data.output?.shots || [];
           setShotCount(outputShots.length);
           // 保存完整的分镜数据（包括 hasShotCut 和 isStockOrEffect）
@@ -240,15 +301,16 @@ export default function AIScriptDialog({
     }, 2000);
   }, []);
 
-  // 开始分析
+  // P5-1：开始分析 - 根据用户输入选择 stage
+  // - 上传文件时：stage='auto'（AI 判断文档类型走 A1/A2/B/D）
+  // - 输入制片意图时：stage='intent'（路径C：AI 生成视频文案）
   const handleStartAnalysis = async () => {
     if (!textInput.trim() && !file) {
-      setError('请上传脚本文件或输入文本内容');
+      setError('请上传文档或输入制片意图');
       return;
     }
 
     setError(null);
-    setState('analyzing');
     setProgress(5);
 
     try {
@@ -257,15 +319,20 @@ export default function AIScriptDialog({
       if (sceneId !== null && sceneId !== undefined) {
         formData.append('sceneId', String(sceneId));
       }
-      formData.append('mode', mode);
       formData.append('generateImages', String(generateImages));
       formData.append('provider', provider);
       formData.append('model', modelId);
 
       if (file) {
+        // 上传文档 → stage='auto'
+        formData.append('stage', 'auto');
         formData.append('file', file);
+        setState('analyzing_type');
       } else {
+        // 输入制片意图 → stage='intent'
+        formData.append('stage', 'intent');
         formData.append('text', textInput);
+        setState('intent_generating');
       }
 
       const res = await fetch('/api/video2/ai/parse-script', {
@@ -278,8 +345,8 @@ export default function AIScriptDialog({
       if (data.taskId) {
         setTaskId(data.taskId);
         pollTaskStatus(data.taskId);
-      } else if (data.error) {
-        setError(data.error);
+      } else if (data.error || data.message) {
+        setError(data.error || data.message);
         setState('initial');
       }
     } catch (e) {
@@ -453,9 +520,115 @@ export default function AIScriptDialog({
     }
   };
 
+  // P5-1：脚本预览确认 - 用户在 intent_preview/scene_preview/storyboard_preview/shooting_preview 状态确认
+  // 根据当前状态提交对应的 stage 参数和脚本文本
+  const handleConfirmScript = async () => {
+    const contentToSubmit = editingScriptText.trim();
+    if (!contentToSubmit) {
+      setError('脚本内容不能为空');
+      return;
+    }
+
+    setError(null);
+    setProgress(5);
+
+    // 根据当前状态决定下一个 stage
+    let nextStage: 'intent_confirmed' | 'scene_confirmed' | 'storyboard' | 'shooting' = 'intent_confirmed';
+    let nextState: DialogState = 'storyboard_generating';
+    let scriptContentToSubmit = contentToSubmit;
+
+    if (state === 'intent_preview') {
+      // 路径C：用户确认视频文案后 → 生成分镜脚本（阶段1）
+      nextStage = 'intent_confirmed';
+      nextState = 'storyboard_generating';
+    } else if (state === 'scene_preview') {
+      // 路径A2：用户确认场次划分后 → 生成最终分镜
+      // scriptContent 为原文档 + 用户确认的场次划分
+      nextStage = 'scene_confirmed';
+      nextState = 'final_parsing';
+      // 拼接原文档（如果有）和场次划分
+      scriptContentToSubmit = scriptText + '\n\n【场次划分（用户确认）】\n' + contentToSubmit;
+    } else if (state === 'storyboard_preview') {
+      // 路径B/C 阶段1：用户确认叙事流后 → 生成拍摄脚本（阶段2）
+      nextStage = 'storyboard';
+      nextState = 'shooting_generating';
+    } else if (state === 'shooting_preview') {
+      // 路径B/C 阶段2：用户确认拍摄脚本后 → 生成最终分镜
+      nextStage = 'shooting';
+      nextState = 'final_parsing';
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('projectId', String(projectId));
+      if (sceneId !== null && sceneId !== undefined) {
+        formData.append('sceneId', String(sceneId));
+      }
+      formData.append('stage', nextStage);
+      formData.append('generateImages', String(generateImages));
+      formData.append('provider', provider);
+      formData.append('model', modelId);
+      formData.append('text', scriptContentToSubmit);
+
+      const res = await fetch('/api/video2/ai/parse-script', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+
+      if (data.taskId) {
+        setTaskId(data.taskId);
+        setState(nextState);
+        pollTaskStatus(data.taskId);
+      } else if (data.error || data.message) {
+        setError(data.error || data.message);
+      }
+    } catch (e) {
+      console.error('提交确认失败:', e);
+      setError('网络错误，请重试');
+    }
+  };
+
+  // P5-1：下载脚本 - 调用后端 /api/video2/ai/download-script
+  const handleDownloadScript = async () => {
+    const content = editingScriptText || scriptText;
+    if (!content) return;
+
+    try {
+      const res = await fetch('/api/video2/ai/download-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content,
+          filename: `script-${Date.now()}`,
+          format: 'txt'
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error('下载失败');
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `script-${Date.now()}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('下载脚本失败:', e);
+      setError('下载失败，请重试');
+    }
+  };
+
   if (!isOpen) return null;
 
-  const estimatedFee = estimateCost(shotCount > 0 ? shotCount : 8, generateImages);
+  // P3-7：费用按实际分镜数计算（shotCount 在分析完成后 > 0，无需硬编码兜底）
+  const estimatedFee = estimateCost(shotCount, generateImages);
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-2 sm:p-4">
@@ -473,42 +646,13 @@ export default function AIScriptDialog({
 
         {/* 内容区域 - 可滚动 */}
         <div className="flex-1 overflow-y-auto min-h-0">
-          {/* 初始状态 */}
+          {/* 初始状态 - P5-1：移除 mode，改造为上传文档 / 输入制片意图 */}
           {state === 'initial' && (
             <div className="space-y-5">
-              {/* 输入模式选择 */}
-              <div>
-                <label className="block text-sm text-slate-300 mb-2">选择输入方式：</label>
-                <div className="flex gap-4">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="mode"
-                      value="script"
-                      checked={mode === 'script'}
-                      onChange={() => setMode('script')}
-                      className="w-4 h-4 accent-violet-500"
-                    />
-                    <span className="text-sm text-slate-200">拍摄/分镜脚本</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="mode"
-                      value="narration"
-                      checked={mode === 'narration'}
-                      onChange={() => setMode('narration')}
-                      className="w-4 h-4 accent-violet-500"
-                    />
-                    <span className="text-sm text-slate-200">视频文案/旁白</span>
-                  </label>
-                </div>
-              </div>
-
               {/* 文件上传 */}
               <div>
                 <label className="block text-sm text-slate-300 mb-2">
-                  上传脚本文件 (.txt/.docx)
+                  上传文档（建议优先上传分镜脚本、拍摄脚本；也可上传解说词、旁白、视频策划案等）
                 </label>
                 <div
                   onClick={() => fileInputRef.current?.click()}
@@ -517,11 +661,12 @@ export default function AIScriptDialog({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".txt,.docx"
+                    accept=".txt,.md,.docx,.pdf"
                     className="hidden"
                     onChange={(e) => {
                       if (e.target.files?.[0]) {
                         setFile(e.target.files[0]);
+                        // P5-1：文件/意图互斥 - 上传文件时清空制片意图
                         setTextInput('');
                       }
                     }}
@@ -534,7 +679,7 @@ export default function AIScriptDialog({
                   ) : (
                     <>
                       <Upload className="w-8 h-8 mx-auto mb-2 text-slate-500" />
-                      <p className="text-sm text-slate-400">点击选择文件</p>
+                      <p className="text-sm text-slate-400">点击选择文件（支持 .txt / .md / .docx / .pdf）</p>
                     </>
                   )}
                 </div>
@@ -547,16 +692,30 @@ export default function AIScriptDialog({
                 <div className="flex-1 h-px bg-white/10" />
               </div>
 
-              {/* 文本输入 */}
+              {/* P5-1 路径C：制片意图输入 */}
               <div>
-                <label className="block text-sm text-slate-300 mb-2">文本输入（粘贴脚本内容）</label>
+                <label className="block text-sm text-slate-300 mb-2 flex items-center gap-2">
+                  <Lightbulb className="w-4 h-4 text-amber-400" />
+                  输入制片意图
+                </label>
+                {/* 输入规范提示 */}
+                <div className="mb-2 p-3 rounded-xl bg-amber-500/5 border border-amber-500/15">
+                  <p className="text-xs text-amber-300/90 mb-1.5 font-medium">制片意图示例：</p>
+                  <ul className="text-xs text-amber-200/70 space-y-1">
+                    <li>• 我想制作一个 2 分钟的企业宣传片，展示公司发展历程和核心业务</li>
+                    <li>• 我想制作一个 5 分钟的产品介绍视频，介绍新产品的功能和优势</li>
+                    <li>• 我想制作一个 1 分钟的短视频，用于社交媒体推广</li>
+                  </ul>
+                  <p className="text-xs text-slate-500 mt-2">输入内容相对简短（一句话描述视频类型、主题、时长等），AI 将根据意图生成完整视频文案供您确认。</p>
+                </div>
                 <textarea
                   value={textInput}
                   onChange={(e) => {
                     setTextInput(e.target.value);
+                    // P5-1：文件/意图互斥 - 输入意图时清空已选文件
                     if (e.target.value.trim()) setFile(null);
                   }}
-                  placeholder="在此粘贴脚本内容..."
+                  placeholder="请输入您的制片意图，例如：我想制作一个 3 分钟的产品介绍视频，介绍我们公司新推出的智能手表，突出其健康监测功能和时尚设计"
                   rows={5}
                   className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-slate-200 placeholder-slate-500 resize-none transition"
                 />
@@ -625,12 +784,20 @@ export default function AIScriptDialog({
             </div>
           )}
 
-          {/* 分析中状态 */}
-          {state === 'analyzing' && (
+          {/* P5-1：所有 AI 生成中状态共用 loading UI（analyzing_type/intent_generating/scene_generating/storyboard_generating/shooting_generating/final_parsing） */}
+          {(state === 'analyzing_type' || state === 'intent_generating' || state === 'scene_generating'
+            || state === 'storyboard_generating' || state === 'shooting_generating' || state === 'final_parsing') && (
             <div className="py-8 text-center">
               <div className="flex items-center justify-center gap-3 mb-6">
                 <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
-                <span className="text-base text-slate-200">正在分析脚本...</span>
+                <span className="text-base text-slate-200">
+                  {state === 'analyzing_type' && '正在判断文档类型...'}
+                  {state === 'intent_generating' && '正在根据制片意图生成视频文案...'}
+                  {state === 'scene_generating' && '正在生成场次划分...'}
+                  {state === 'storyboard_generating' && '正在生成分镜脚本...'}
+                  {state === 'shooting_generating' && '正在生成拍摄脚本...'}
+                  {state === 'final_parsing' && '正在解析分镜数据...'}
+                </span>
                 <span className="text-base text-violet-400 font-medium">{progress}%</span>
               </div>
 
@@ -647,6 +814,50 @@ export default function AIScriptDialog({
               )}
 
               <p className="text-xs text-slate-500 mb-8">请勿关闭页面</p>
+            </div>
+          )}
+
+          {/* P5-1：脚本预览状态共用 UI（intent_preview/scene_preview/storyboard_preview/shooting_preview） */}
+          {(state === 'intent_preview' || state === 'scene_preview' || state === 'storyboard_preview' || state === 'shooting_preview') && (
+            <div className="space-y-4">
+              {/* 标题提示 */}
+              <div className="flex items-center gap-3 p-4 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                <FileText className="w-5 h-5 text-violet-400 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-semibold text-violet-300">
+                    {state === 'intent_preview' && 'AI 已生成视频文案'}
+                    {state === 'scene_preview' && 'AI 已生成场次划分'}
+                    {state === 'storyboard_preview' && 'AI 已生成分镜脚本（按时间顺序）'}
+                    {state === 'shooting_preview' && 'AI 已生成拍摄脚本（按场次组织）'}
+                  </h3>
+                  <p className="text-xs text-violet-200/80 mt-1">
+                    请审阅以下内容，您可以直接编辑修改后确认，也可下载后离线修改再上传。
+                  </p>
+                </div>
+              </div>
+
+              {/* 可编辑文本区 */}
+              <textarea
+                value={editingScriptText}
+                onChange={(e) => setEditingScriptText(e.target.value)}
+                rows={12}
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-slate-200 resize-y font-mono"
+                placeholder="脚本内容..."
+              />
+
+              {/* 下载按钮 */}
+              <button
+                onClick={handleDownloadScript}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-sm font-medium transition"
+              >
+                <Download className="w-4 h-4" />
+                下载脚本（.txt）
+              </button>
+
+              {/* 错误提示 */}
+              {error && (
+                <AiErrorGuide error={error} onOpenSettings={onOpenSettings} />
+              )}
             </div>
           )}
 
@@ -826,9 +1037,12 @@ export default function AIScriptDialog({
               </div>
 
               {/* 费用信息 */}
-              <div className="flex items-center justify-between p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                <span className="text-sm text-slate-300">预估费用：</span>
-                <span className="text-base font-semibold text-green-400">¥{estimatedFee.toFixed(2)}</span>
+              <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-slate-300">预估费用：</span>
+                  <span className="text-base font-semibold text-green-400">¥{estimatedFee.toFixed(2)}</span>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">费用按实际分镜数计算</p>
               </div>
 
               {/* 分镜预览列表 */}
@@ -886,13 +1100,37 @@ export default function AIScriptDialog({
               </>
             )}
 
-            {state === 'analyzing' && (
+            {/* P5-1：所有生成中状态共用取消按钮 */}
+            {(state === 'analyzing_type' || state === 'intent_generating' || state === 'scene_generating'
+              || state === 'storyboard_generating' || state === 'shooting_generating' || state === 'final_parsing') && (
               <button
                 onClick={handleCancel}
                 className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
               >
                 取消处理
               </button>
+            )}
+
+            {/* P5-1：脚本预览状态 - 取消重新输入 + 确认并继续 */}
+            {(state === 'intent_preview' || state === 'scene_preview' || state === 'storyboard_preview' || state === 'shooting_preview') && (
+              <>
+                <button
+                  onClick={handleCancel}
+                  className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
+                >
+                  取消重新输入
+                </button>
+                <button
+                  onClick={handleConfirmScript}
+                  disabled={!editingScriptText.trim()}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 hover:shadow-lg hover:shadow-violet-500/30 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  {state === 'intent_preview' && '确认文案并继续'}
+                  {state === 'scene_preview' && '确认场次划分'}
+                  {state === 'storyboard_preview' && '确认叙事流'}
+                  {state === 'shooting_preview' && '确认拍摄脚本'}
+                </button>
+              </>
             )}
 
             {state === 'shotcut_selection' && (

@@ -159,4 +159,27 @@
     transform: translateZ(0);
     backface-visibility: hidden;
   }
+
+  /* P3-2：移动端 44px 点击区扩展工具类（仅移动端生效，桌面端无影响）
+     用于绝对定位浮层按钮：保持视觉尺寸不变，用 ::before 伪元素扩展透明点击区
+     - .touch-target-44：32px+ 按钮扩展 6px → 44px+
+     - .touch-target-44-lg：20px+ 小按钮扩展 12px → 44px+ */
+  @media (max-width: 768px) {
+    .touch-target-44,
+    .touch-target-44-lg {
+      position: relative;
+    }
+    .touch-target-44::before {
+      content: '';
+      position: absolute;
+      inset: -6px;
+      border-radius: inherit;
+    }
+    .touch-target-44-lg::before {
+      content: '';
+      position: absolute;
+      inset: -12px;
+      border-radius: inherit;
+    }
+  }
 }

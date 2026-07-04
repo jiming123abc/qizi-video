@@ -7,7 +7,7 @@ import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
 import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
-import { timeAgo, formatSize } from '../lib/utils';
+import { timeAgo, formatSize, getErrorMessage } from '../lib/utils';
 import type { ShotMedia } from '../lib/types';
 
 interface Project {
@@ -27,6 +27,17 @@ interface ReferenceItem {
   type: 'image' | 'video';
   url: string;
   title: string;
+}
+
+// any-audit：挂起上传任务（pendingUploadRef 的类型）
+// 修复 513/693/720 行的 as any 问题：原 ref 类型未声明 usage 字段
+interface PendingUpload {
+  file: File;
+  index: number;
+  total: number;
+  successCount: number;
+  project: Project;
+  usage?: 'project-reference' | 'project-cover' | 'project-video' | string;
 }
 
 // 蓝紫渐变默认封面（与服务端一致）
@@ -63,7 +74,13 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [deleteDeletedShots, setDeleteDeletedShots] = useState(0);
   const [deleteStatus, setDeleteStatus] = useState<'idle' | 'deleting' | 'done' | 'error'>('idle');
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // P4-3：记录删除过程中的清理警告（OSS/数字资产等子任务失败）
+  const [deleteWarnings, setDeleteWarnings] = useState<Array<{ stage: string; message: string }>>([]);
+  // P4-4：轮询定时器 ref，用于 mount 恢复时清理
+  const deletePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  // P3-1：toast 定时器 ref，防止内存泄漏
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [projectStats, setProjectStats] = useState<Record<number, { done: number; pending: number; total: number }>>({});
 
   // 分享提示
@@ -80,7 +97,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 视频压缩选择对话框
   const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
   const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const pendingUploadRef = useRef<{ file: File; index: number; total: number; successCount: number; project: Project } | null>(null);
+  const pendingUploadRef = useRef<PendingUpload | null>(null);
 
   // 阿里云配置状态
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
@@ -90,6 +107,15 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       .then(res => res.json())
       .then(data => setAliyunConfigured(data.configured || false))
       .catch(() => {});
+  }, []);
+
+  // P3-1：unmount 时清理 toast 定时器
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
 
   // 每个项目的参考文件缓存（含封面作为第一个元素）
@@ -110,7 +136,11 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message: msg, type });
-    setTimeout(() => setToast(null), 2500);
+    // P3-1：清理前一个定时器，避免快速连续调用时累积
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
   }, []);
 
   // 收集所有媒体 URL（含项目 coverUrl）并批量签名
@@ -318,6 +348,95 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     }
   };
 
+  // P4-4：抽出的轮询逻辑，handleDelete 和 mount 恢复复用
+  // projectId 用于 done 时从本地 projects 列表移除
+  const pollDeleteTask = useCallback((taskId: string, projectId: number) => {
+    if (deletePollRef.current) clearInterval(deletePollRef.current);
+    const interval = setInterval(async () => {
+      try {
+        const pollRes = await fetch(`/api/video2/projects/delete/${taskId}`);
+        const pollData = await pollRes.json();
+        // P4-4：任务不存在（服务端重启），清理 localStorage 并提示
+        if (pollRes.status === 404 || pollData.status === 'not_found') {
+          clearInterval(interval);
+          deletePollRef.current = null;
+          localStorage.removeItem('pendingDeleteTask');
+          setDeleteStatus('error');
+          setDeleteError('删除任务不存在（服务端可能已重启），请检查项目列表确认是否已删除');
+          setDeleteLoading(false);
+          showToast('删除任务状态丢失，请刷新项目列表确认', 'info');
+          return;
+        }
+        if (pollData.status === 'done') {
+          clearInterval(interval);
+          deletePollRef.current = null;
+          localStorage.removeItem('pendingDeleteTask');
+          setDeleteStatus('done');
+          setDeleteProgress(100);
+          setProjects(prev => prev.filter(p => p.id !== projectId));
+          // P4-3：有警告时提示用户部分清理失败
+          const warnings = pollData.warnings || [];
+          setDeleteWarnings(warnings);
+          if (warnings.length > 0) {
+            showToast(`项目已删除，但 ${warnings.length} 项清理失败，详情见控制台`, 'info');
+            console.warn('[deleteProject] 清理警告:', warnings);
+          } else {
+            showToast('项目已删除');
+          }
+          setTimeout(() => {
+            setDeleteTarget(null);
+            setDeleteTaskId(null);
+            setDeleteStatus('idle');
+            setDeleteWarnings([]);
+            setDeleteLoading(false);
+          }, 1200);
+        } else if (pollData.status === 'error') {
+          clearInterval(interval);
+          deletePollRef.current = null;
+          localStorage.removeItem('pendingDeleteTask');
+          setDeleteStatus('error');
+          setDeleteError(pollData.error || '删除失败');
+          setDeleteLoading(false);
+          showToast(pollData.error || '删除失败', 'error');
+        } else {
+          setDeleteProgress(pollData.progress || 0);
+          setDeleteTotalShots(pollData.totalShots || 0);
+          setDeleteDeletedShots(pollData.deletedShots || 0);
+        }
+      } catch (pollErr) {
+        console.error('轮询删除进度失败:', pollErr);
+      }
+    }, 1000);
+    deletePollRef.current = interval;
+  }, [showToast]);
+
+  // P4-4：mount 时检查未完成的删除任务，恢复轮询
+  useEffect(() => {
+    const pending = localStorage.getItem('pendingDeleteTask');
+    if (!pending) return;
+    try {
+      const { taskId, projectId, projectName } = JSON.parse(pending);
+      // 恢复 UI 状态
+      setDeleteStatus('deleting');
+      setDeleteLoading(true);
+      setDeleteTaskId(taskId);
+      setDeleteTarget({ id: projectId, name: projectName || '删除中的项目' } as Project);
+      // 启动轮询
+      pollDeleteTask(taskId, projectId);
+    } catch (e) {
+      console.error('恢复删除任务状态失败:', e);
+      localStorage.removeItem('pendingDeleteTask');
+    }
+    // 组件卸载时清理定时器
+    return () => {
+      if (deletePollRef.current) {
+        clearInterval(deletePollRef.current);
+        deletePollRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleteLoading(true);
@@ -326,42 +445,21 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     setDeleteDeletedShots(0);
     setDeleteTotalShots(0);
     setDeleteError(null);
+    setDeleteWarnings([]);
     try {
       const res = await fetch(`/api/video2/projects/${deleteTarget.id}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success && data.taskId) {
         setDeleteTaskId(data.taskId);
-        const pollInterval = setInterval(async () => {
-          try {
-            const pollRes = await fetch(`/api/video2/projects/delete/${data.taskId}`);
-            const pollData = await pollRes.json();
-            if (pollData.status === 'done') {
-              clearInterval(pollInterval);
-              setDeleteStatus('done');
-              setDeleteProgress(100);
-              setProjects(prev => prev.filter(p => p.id !== deleteTarget.id));
-              showToast('项目已删除');
-              setTimeout(() => {
-                setDeleteTarget(null);
-                setDeleteTaskId(null);
-                setDeleteStatus('idle');
-                setDeleteLoading(false);
-              }, 800);
-            } else if (pollData.status === 'error') {
-              clearInterval(pollInterval);
-              setDeleteStatus('error');
-              setDeleteError(pollData.error || '删除失败');
-              setDeleteLoading(false);
-              showToast(pollData.error || '删除失败', 'error');
-            } else {
-              setDeleteProgress(pollData.progress || 0);
-              setDeleteTotalShots(pollData.totalShots || 0);
-              setDeleteDeletedShots(pollData.deletedShots || 0);
-            }
-          } catch (pollErr) {
-            console.error('轮询删除进度失败:', pollErr);
-          }
-        }, 1000);
+        // P4-4：持久化到 localStorage，刷新后可恢复轮询
+        localStorage.setItem('pendingDeleteTask', JSON.stringify({
+          taskId: data.taskId,
+          projectId: deleteTarget.id,
+          projectName: deleteTarget.name,
+          startedAt: Date.now()
+        }));
+        // 启动轮询
+        pollDeleteTask(data.taskId, deleteTarget.id);
       } else {
         throw new Error(data.message || '删除失败');
       }
@@ -460,9 +558,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         await setProjectCover(project.id, result.url);
         setUploadDialogMessage('封面设置成功');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('封面上传失败:', err);
-      showToast(err.message || '封面上传失败，请重试', 'error');
+      showToast(getErrorMessage(err, '封面上传失败，请重试'), 'error');
       setUploadDialogMessage('上传失败');
     }
 
@@ -495,7 +593,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 检测视频信息...`);
         const decision = await checkVideoBitrate(file);
         if (decision.decision === 'must_compress') {
-          pendingUploadRef.current = { file, index: i, total: videoFiles.length, successCount, project, usage: 'project-reference' } as any;
+          pendingUploadRef.current = { file, index: i, total: videoFiles.length, successCount, project, usage: 'project-reference' };
           setPendingCompressionVideo(file);
           setPendingCompressionDecision(decision);
           setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 需选择压缩方式`);
@@ -514,9 +612,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         });
         successCount++;
         setUploadDialogMessage(`已上传 ${successCount} / ${videoFiles.length}`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('上传失败:', err);
-        showToast(err.message || '上传失败，请重试', 'error');
+        showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
       }
     }
 
@@ -551,9 +649,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       } else {
         throw new Error(data.error || '转存失败');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('URL转存失败:', err);
-      showToast(err.message || '转存失败，请重试', 'error');
+      showToast(getErrorMessage(err, '转存失败，请重试'), 'error');
       setUploadDialogMessage('转存失败');
     }
 
@@ -635,9 +733,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         }
         successCount++;
         setUploadDialogMessage(`已上传 ${successCount} / ${files.length}`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('上传失败:', err);
-        showToast(err.message || '上传失败，请重试', 'error');
+        showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
       }
     }
 
@@ -675,7 +773,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
     const { file, index, total, successCount, project } = pending;
     let currentSuccess = successCount;
-    const usage = (pending as any).usage || 'project-reference';
+    const usage = pending.usage || 'project-reference';
 
     try {
       await uploadVideo2Video(file, {
@@ -702,7 +800,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           setUploadDialogMessage(`视频 ${i + 1}/${total}: 检测视频信息...`);
           const nextDecision = await checkVideoBitrate(nextFile);
           if (nextDecision.decision === 'must_compress') {
-            pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project, usage } as any;
+            pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project, usage };
             setPendingCompressionVideo(nextFile);
             setPendingCompressionDecision(nextDecision);
             setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
@@ -720,9 +818,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           });
           currentSuccess++;
           setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
-        } catch (err: any) {
+        } catch (err: unknown) {
           console.error('上传失败:', err);
-          showToast(err.message || '上传失败，请重试', 'error');
+          showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
         }
       }
 
@@ -732,11 +830,11 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       setTimeout(() => setUploadDialogMessage(''), 3000);
       const fileInput = document.querySelector('input[type="file"][accept*="video"]') as HTMLInputElement;
       if (fileInput) fileInput.value = '';
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('压缩上传失败:', err);
-      setUploadDialogMessage('失败：' + (err.message || '压缩上传失败'));
+      setUploadDialogMessage('失败：' + getErrorMessage(err, '压缩上传失败'));
       setUploadDialogLoading(false);
-      showToast(err.message || '上传失败，请重试', 'error');
+      showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
     }
   };
 
@@ -1235,6 +1333,18 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             {deleteStatus === 'error' && (
               <div className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-400/30">
                 <p className="text-center text-sm text-red-400">{deleteError || '删除失败'}</p>
+              </div>
+            )}
+
+            {/* P4-3：展示清理警告（OSS/数字资产等子任务失败） */}
+            {deleteStatus === 'done' && deleteWarnings.length > 0 && (
+              <div className="mb-5 p-3 rounded-xl bg-amber-500/10 border border-amber-400/30">
+                <p className="text-center text-sm text-amber-300 mb-1">
+                  项目已删除，但 {deleteWarnings.length} 项清理失败
+                </p>
+                <p className="text-center text-xs text-amber-400/70">
+                  详情见浏览器控制台（F12），OSS 文件可能需要手动清理
+                </p>
               </div>
             )}
 

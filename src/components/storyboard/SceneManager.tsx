@@ -24,6 +24,8 @@ interface SceneManagerProps {
   moveScene: (id: number, direction: -1 | 1) => void;
   unclassifiedCount: number;
   onRequestDeleteConfirm: (sceneId: number, sceneName: string, onConfirm: () => void) => void;
+  isCreating: boolean;
+  isRenaming: boolean;
 }
 
 export function SceneManager({
@@ -46,6 +48,8 @@ export function SceneManager({
   moveScene,
   unclassifiedCount,
   onRequestDeleteConfirm,
+  isCreating,
+  isRenaming,
 }: SceneManagerProps) {
   if (!isOpen) return null;
 
@@ -77,7 +81,7 @@ export function SceneManager({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
       onClick={handleClose}
     >
       <div
@@ -90,7 +94,7 @@ export function SceneManager({
               <h2 className="text-base font-semibold">场次管理</h2>
               <button
                 onClick={handleClose}
-                className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -121,7 +125,7 @@ export function SceneManager({
                     <button
                       onClick={() => moveScene(scene.id, -1)}
                       disabled={sceneIdx <= 0}
-                      className={`w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
+                      className={`touch-target-44 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
                         sceneIdx <= 0
                           ? 'border-white/10 text-slate-600 cursor-not-allowed'
                           : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'
@@ -132,7 +136,7 @@ export function SceneManager({
                     <button
                       onClick={() => moveScene(scene.id, 1)}
                       disabled={sceneIdx >= scenes.length - 1}
-                      className={`w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
+                      className={`touch-target-44 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
                         sceneIdx >= scenes.length - 1
                           ? 'border-white/10 text-slate-600 cursor-not-allowed'
                           : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'
@@ -152,7 +156,7 @@ export function SceneManager({
                     </button>
                     <button
                       onClick={() => handleDeleteScene(scene.id, scene.name)}
-                      className="w-8 h-8 rounded-full border border-white/15 hover:border-red-400/50 hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-300 shrink-0 transition"
+                      className="touch-target-44 w-8 h-8 rounded-full border border-white/15 hover:border-red-400/50 hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-300 shrink-0 transition"
                       title="删除场次"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -174,7 +178,7 @@ export function SceneManager({
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={handleBackToList}
-                className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -199,10 +203,10 @@ export function SceneManager({
               </button>
               <button
                 onClick={onCreateScene}
-                disabled={!newSceneName.trim()}
-                className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
+                disabled={!newSceneName.trim() || isCreating}
+                className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
               >
-                创建
+                {isCreating ? '创建中...' : '创建'}
               </button>
             </div>
           </>
@@ -213,7 +217,7 @@ export function SceneManager({
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={handleBackToList}
-                className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -248,10 +252,10 @@ export function SceneManager({
                 </button>
                 <button
                   onClick={onRenameScene}
-                  disabled={!renameSceneName.trim()}
-                  className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 transition"
+                  disabled={!renameSceneName.trim() || isRenaming}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
                 >
-                  保存
+                  {isRenaming ? '保存中...' : '保存'}
                 </button>
               </div>
             </div>

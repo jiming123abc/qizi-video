@@ -37,7 +37,6 @@ interface UseShotsReturn {
   handleItemDragOver: (e: DragEvent, id: number) => void;
   handleItemDrop: (targetId: number, isMobile: boolean, scrollIntoView: (id: number) => void) => Promise<void>;
   moveItem: (itemId: number, dir: -1 | 1, scrollIntoView: (id: number) => void) => Promise<void>;
-  cloneShot: (id: number, onReload: () => Promise<void>) => Promise<void>;
 }
 
 export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsReturn {
@@ -72,16 +71,23 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
         const list: Shot[] = (data.data || []).slice();
         list.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
         setShots(list);
+      } else {
+        // P3-9：服务端返回失败时提示用户
+        showToast(data.message || '加载失败，请重试', 'error');
       }
     } catch (e) {
       console.error('加载列表失败:', e);
+      // P3-9：网络错误时提示用户
+      if (seq === loadSeqRef.current) {
+        showToast('加载失败，请检查网络', 'error');
+      }
     } finally {
       // 同样保护 loading 状态
       if (seq === loadSeqRef.current) {
         setShotsLoading(false);
       }
     }
-  }, [projectId]);
+  }, [projectId, showToast]);
 
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds(prev => {
@@ -109,72 +115,108 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
         body: JSON.stringify(fields)
       });
       const data = await res.json();
+      // P3-9：使用服务端返回的 data.data（可能含 trim/格式化），失败时提示用户
       if (data.success !== false) {
-        setShots(prev => prev.map(it => it.id === id ? { ...it, ...fields } : it));
+        setShots(prev => prev.map(it => it.id === id ? { ...it, ...(data.data || fields) } : it));
+      } else {
+        showToast(data.message || '更新失败', 'error');
       }
     } catch (e) {
       console.error('更新分镜失败:', e);
+      showToast('更新失败：' + (e as Error).message, 'error');
     }
-  }, []);
+  }, [showToast]);
 
   const updateShotStatus = useCallback(async (shotId: number, status: 'pending' | 'done', shotNo?: string) => {
     try {
-      const body: any = { status };
+      // any-audit：用具体类型替代 any
+      const body: { status: 'pending' | 'done'; shotNo?: string } = { status };
       if (shotNo !== undefined) body.shotNo = shotNo;
-      await fetch(`/api/video2/shots/${shotId}/status`, {
+      const res = await fetch(`/api/video2/shots/${shotId}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      setShots(prev => prev.filter(it => it.id !== shotId));
-      showToast(status === 'done' ? '已标记为已拍摄' : '已回到未拍摄');
+      const data = await res.json();
+      // P3-9：检查响应，失败时不 filter 本地、提示用户
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => it.id !== shotId));
+        showToast(status === 'done' ? '已标记为已拍摄' : '已回到未拍摄');
+      } else {
+        showToast(data.message || '更新状态失败', 'error');
+      }
     } catch (e) {
       console.error('更新状态失败:', e);
+      showToast('更新状态失败：' + (e as Error).message, 'error');
     }
   }, [showToast]);
 
   const updateShotNo = useCallback(async (shot: Shot, shotNo: string) => {
     try {
-      await fetch(`/api/video2/shots/${shot.id}`, {
+      const res = await fetch(`/api/video2/shots/${shot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ shotNo: shotNo.trim() })
       });
-      setShots(prev => prev.map(it => it.id === shot.id ? { ...it, shotNo: shotNo.trim() || undefined } : it));
-      showToast('镜头编号已更新');
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.map(it => it.id === shot.id ? { ...it, shotNo: shotNo.trim() || undefined } : it));
+        showToast('镜头编号已更新');
+      } else {
+        showToast(data.message || '更新镜头号失败', 'error');
+      }
     } catch (e) {
       console.error('更新镜头号失败:', e);
+      showToast('更新镜头号失败：' + (e as Error).message, 'error');
     }
   }, [showToast]);
 
   const softDelete = useCallback(async (id: number) => {
     try {
-      await fetch(`/api/video2/shots/${id}`, { method: 'DELETE' });
-      setShots(prev => prev.filter(it => it.id !== id));
-      showToast('已移到垃圾桶');
+      const res = await fetch(`/api/video2/shots/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => it.id !== id));
+        showToast('已移到垃圾桶');
+      } else {
+        showToast(data.message || '删除失败', 'error');
+      }
     } catch (e) {
       console.error('删除失败:', e);
+      showToast('删除失败：' + (e as Error).message, 'error');
     }
   }, [showToast]);
 
   const restoreItem = useCallback(async (id: number) => {
     try {
-      await fetch(`/api/video2/shots/${id}/restore`, { method: 'POST' });
-      setShots(prev => prev.filter(it => it.id !== id));
-      showToast('已恢复');
+      const res = await fetch(`/api/video2/shots/${id}/restore`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => it.id !== id));
+        showToast('已恢复');
+      } else {
+        showToast(data.message || '恢复失败', 'error');
+      }
     } catch (e) {
       console.error('恢复失败:', e);
+      showToast('恢复失败：' + (e as Error).message, 'error');
     }
   }, [showToast]);
 
   const hardDelete = useCallback((id: number, onConfirm: (fn: () => Promise<void>) => void) => {
     onConfirm(async () => {
       try {
-        await fetch(`/api/video2/shots/${id}/hard`, { method: 'DELETE' });
-        setShots(prev => prev.filter(it => it.id !== id));
-        showToast('已彻底删除');
+        const res = await fetch(`/api/video2/shots/${id}/hard`, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success !== false) {
+          setShots(prev => prev.filter(it => it.id !== id));
+          showToast('已彻底删除');
+        } else {
+          showToast(data.message || '彻底删除失败', 'error');
+        }
       } catch (e) {
         console.error('彻底删除失败:', e);
+        showToast('彻底删除失败：' + (e as Error).message, 'error');
       }
     });
   }, [showToast]);
@@ -183,16 +225,22 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/video2/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'softDelete' })
       });
-      setShots(prev => prev.filter(it => !ids.includes(it.id)));
-      setSelectedIds(new Set());
-      showToast(`已将 ${ids.length} 项移到垃圾桶`);
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => !ids.includes(it.id)));
+        setSelectedIds(new Set());
+        showToast(`已将 ${ids.length} 项移到垃圾桶`);
+      } else {
+        showToast(data.message || '批量删除失败', 'error');
+      }
     } catch (e) {
       console.error('批量删除失败:', e);
+      showToast('批量删除失败：' + (e as Error).message, 'error');
     }
   }, [selectedIds, showToast]);
 
@@ -200,16 +248,22 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/video2/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'restore' })
       });
-      setShots(prev => prev.filter(it => !ids.includes(it.id)));
-      setSelectedIds(new Set());
-      showToast(`已恢复 ${ids.length} 项`);
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => !ids.includes(it.id)));
+        setSelectedIds(new Set());
+        showToast(`已恢复 ${ids.length} 项`);
+      } else {
+        showToast(data.message || '批量恢复失败', 'error');
+      }
     } catch (e) {
       console.error('批量恢复失败:', e);
+      showToast('批量恢复失败：' + (e as Error).message, 'error');
     }
   }, [selectedIds, showToast]);
 
@@ -219,36 +273,91 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     const ids = Array.from(selectedIds);
     onConfirm(async () => {
       try {
-        await fetch('/api/video2/shots/batch-update', {
+        const res = await fetch('/api/video2/shots/batch-update', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids, action: 'hardDelete' })
         });
-        setShots(prev => prev.filter(it => !ids.includes(it.id)));
-        setSelectedIds(new Set());
-        showToast(`已彻底删除 ${ids.length} 项`);
+        const data = await res.json();
+        if (res.ok && data.success !== false) {
+          setShots(prev => prev.filter(it => !ids.includes(it.id)));
+          setSelectedIds(new Set());
+          showToast(`已彻底删除 ${ids.length} 项`);
+        } else {
+          showToast(data.message || '批量彻底删除失败', 'error');
+        }
       } catch (e) {
         console.error('批量彻底删除失败:', e);
+        showToast('批量彻底删除失败：' + (e as Error).message, 'error');
       }
     });
+  }, [selectedIds, showToast]);
+
+  const batchUpdateStatus = useCallback(async (status: 'pending' | 'done') => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    try {
+      const res = await fetch('/api/video2/shots/batch-update', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, action: 'updateStatus', status })
+      });
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => !ids.includes(it.id)));
+        setSelectedIds(new Set());
+        showToast(status === 'done' ? `已将 ${ids.length} 项标记为已拍摄` : `已将 ${ids.length} 项移回未拍摄`);
+      } else {
+        showToast(data.message || '批量更新状态失败', 'error');
+      }
+    } catch (e) {
+      console.error('批量更新状态失败:', e);
+      showToast('批量更新状态失败：' + (e as Error).message, 'error');
+    }
   }, [selectedIds, showToast]);
 
   const batchMoveToScene = useCallback(async (sceneId: number | null) => {
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/video2/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'changeScene', sceneId })
       });
-      setShots(prev => prev.filter(it => !ids.includes(it.id)));
-      setSelectedIds(new Set());
-      showToast(`已移动 ${ids.length} 项`);
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => !ids.includes(it.id)));
+        setSelectedIds(new Set());
+        showToast(`已移动 ${ids.length} 项`);
+      } else {
+        showToast(data.message || '批量移动失败', 'error');
+      }
     } catch (e) {
       console.error('批量移动失败:', e);
+      showToast('批量移动失败：' + (e as Error).message, 'error');
     }
   }, [selectedIds, showToast]);
+
+  const moveShotToScene = useCallback(async (shotId: number, sceneId: number | null) => {
+    try {
+      const res = await fetch('/api/video2/shots/batch-update', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [shotId], action: 'changeScene', sceneId })
+      });
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setShots(prev => prev.filter(it => it.id !== shotId));
+        showToast('已移动场次');
+      } else {
+        showToast(data.message || '移动场次失败', 'error');
+      }
+    } catch (e) {
+      console.error('移动场次失败:', e);
+      showToast('移动场次失败：' + (e as Error).message, 'error');
+    }
+  }, [showToast]);
 
   const batchMergeShots = useCallback(async (onReload: () => Promise<void>) => {
     if (selectedIds.size < 2) {
@@ -263,13 +372,16 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
         body: JSON.stringify({ shotIds: ids })
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         showToast(`已合并 ${ids.length} 个分镜为 1 个`);
         setSelectedIds(new Set());
         await onReload();
+      } else {
+        showToast(data.message || '合并分镜失败', 'error');
       }
     } catch (e) {
       console.error('合并分镜失败:', e);
+      showToast('合并分镜失败：' + (e as Error).message, 'error');
     }
   }, [selectedIds, showToast]);
 
@@ -313,8 +425,10 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
       });
     } catch (e) {
       console.error('更新排序失败:', e);
+      // P3-9：排序保存失败提示用户（本地已是乐观更新，下次刷新会恢复服务端顺序）
+      showToast('排序保存失败，刷新后将恢复原顺序', 'error');
     }
-  }, [shots]);
+  }, [shots, showToast]);
 
   const handleItemDrop = useCallback(async (targetId: number, isMobile: boolean, scrollIntoView: (id: number) => void) => {
     if (dragItemId === null || dragItemId === targetId) {
@@ -348,25 +462,10 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
       });
     } catch (e) {
       console.error('更新排序失败:', e);
+      showToast('排序保存失败，刷新后将恢复原顺序', 'error');
     }
     window.requestAnimationFrame(() => scrollIntoView(itemId));
-  }, [shots]);
-
-  const cloneShot = useCallback(async (id: number, onReload: () => Promise<void>) => {
-    try {
-      const res = await fetch(`/api/video2/shots/${id}/clone`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast('已克隆分镜');
-        await onReload();
-      }
-    } catch (e) {
-      console.error('克隆分镜失败:', e);
-    }
-  }, [showToast]);
+  }, [shots, showToast]);
 
   return {
     shots,
@@ -393,12 +492,13 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     batchRestore,
     batchHardDelete,
     batchMoveToScene,
+    batchUpdateStatus,
+    moveShotToScene,
     batchMergeShots,
     handleItemDragStart,
     handleDragHandleMouseDown,
     handleItemDragOver,
     handleItemDrop,
     moveItem,
-    cloneShot,
   };
 }

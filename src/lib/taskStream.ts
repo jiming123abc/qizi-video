@@ -20,7 +20,7 @@ export function subscribeToTask(
     try {
       const data = JSON.parse(event.data);
       onUpdate(data);
-      if (data.status === 'completed' || data.status === 'failed' || data.status === 'error') {
+      if (data.status === 'done' || data.status === 'failed' || data.status === 'error') {
         eventSource.close();
       }
     } catch (e) {
