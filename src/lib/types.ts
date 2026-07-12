@@ -67,6 +67,7 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
   videoCount?: number;
+  shotCount?: number;
   totalSize?: number;
 }
 

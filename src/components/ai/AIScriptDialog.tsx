@@ -10,7 +10,7 @@ interface AIScriptDialogProps {
   projectId: number;
   sceneId?: number | null;
   // any-audit：用 ShotData[] 和 DigitalAsset[] 替代 any[]（本文件已定义 ShotData，DigitalAsset 来自 types.ts）
-  onSuccess?: (result: { shots: ShotData[]; digitalAssets: { mainActors: DigitalAsset[]; keyProps: DigitalAsset[]; mainScenes: DigitalAsset[] } }) => void;
+  onSuccess?: (result: { shots: ShotData[]; digitalAssets: { mainActors: DigitalAsset[]; keyProps: DigitalAsset[]; mainScenes: DigitalAsset[] } | null }) => void;
   onOpenSettings?: () => void;
 }
 
@@ -58,13 +58,10 @@ interface ShotData {
   sceneId?: number | null;
 }
 
-// 简单费用估算（基于分镜数量和是否生成图片）
-function estimateCost(shotCount: number, generateImages: boolean): number {
+// 简单费用估算（基于分镜数量）
+function estimateCost(shotCount: number): number {
   // 文本分析费用：约 0.1 元 per shot
-  const analysisCost = shotCount * 0.1;
-  // 图片生成费用：约 0.05 元 per shot
-  const imageCost = generateImages ? shotCount * 0.05 : 0;
-  return analysisCost + imageCost;
+  return shotCount * 0.1;
 }
 
 export default function AIScriptDialog({
@@ -79,7 +76,7 @@ export default function AIScriptDialog({
   // P5-1：移除 mode（改为 AI 自动判断），textInput 改为"制片意图"输入
   const [textInput, setTextInput] = useState('');
   const [file, setFile] = useState<File | null>(null);
-  const [generateImages, setGenerateImages] = useState(true);
+  const [generateDigitalAssets, setGenerateDigitalAssets] = useState(false);
   const [progress, setProgress] = useState(0);
   const [shotCount, setShotCount] = useState(0);
   const [shots, setShots] = useState<ShotData[]>([]);
@@ -128,7 +125,7 @@ export default function AIScriptDialog({
     setState('initial');
     setTextInput('');
     setFile(null);
-    setGenerateImages(true);
+    setGenerateDigitalAssets(false);
     setProgress(0);
     setShotCount(0);
     setShots([]);
@@ -319,7 +316,6 @@ export default function AIScriptDialog({
       if (sceneId !== null && sceneId !== undefined) {
         formData.append('sceneId', String(sceneId));
       }
-      formData.append('generateImages', String(generateImages));
       formData.append('provider', provider);
       formData.append('model', modelId);
 
@@ -469,7 +465,7 @@ export default function AIScriptDialog({
       if (data.success) {
         setState('completed');
         if (onSuccess) {
-          onSuccess({ shots: data.shots || finalShots, digitalAssets });
+          onSuccess({ shots: data.shots || finalShots, digitalAssets: generateDigitalAssets ? digitalAssets : null });
         }
       } else {
         setError(data.message || '创建分镜失败');
@@ -508,7 +504,7 @@ export default function AIScriptDialog({
 
       if (data.success) {
         if (onSuccess) {
-          onSuccess({ shots: data.shots || shots, digitalAssets });
+          onSuccess({ shots: data.shots || shots, digitalAssets: generateDigitalAssets ? digitalAssets : null });
         }
         onClose();
       } else {
@@ -565,7 +561,6 @@ export default function AIScriptDialog({
         formData.append('sceneId', String(sceneId));
       }
       formData.append('stage', nextStage);
-      formData.append('generateImages', String(generateImages));
       formData.append('provider', provider);
       formData.append('model', modelId);
       formData.append('text', scriptContentToSubmit);
@@ -628,7 +623,7 @@ export default function AIScriptDialog({
   if (!isOpen) return null;
 
   // P3-7：费用按实际分镜数计算（shotCount 在分析完成后 > 0，无需硬编码兜底）
-  const estimatedFee = estimateCost(shotCount, generateImages);
+  const estimatedFee = estimateCost(shotCount);
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-2 sm:p-4">
@@ -721,17 +716,17 @@ export default function AIScriptDialog({
                 />
               </div>
 
-              {/* AI 参考图选项 */}
+              {/* 生成数字资产数据选项 */}
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={generateImages}
-                  onChange={(e) => setGenerateImages(e.target.checked)}
+                  checked={generateDigitalAssets}
+                  onChange={(e) => setGenerateDigitalAssets(e.target.checked)}
                   className="w-4 h-4 mt-0.5 accent-violet-500"
                 />
                 <div>
-                  <span className="text-sm text-slate-200">自动生成 AI 参考图</span>
-                  <p className="text-xs text-slate-500 mt-0.5">不勾选则仅生成分镜数据</p>
+                  <span className="text-sm text-slate-200">生成数字资产数据</span>
+                  <p className="text-xs text-slate-500 mt-0.5">勾选后在分镜生成时提取主要演员/道具/场景数据（含生图提示词），不自动生图，需在数字资产管理中手动生成</p>
                 </div>
               </label>
 
@@ -749,10 +744,10 @@ export default function AIScriptDialog({
                         const firstModel = llmModels.find(m => m.provider === newProvider);
                         if (firstModel) setModelId(firstModel.model);
                       }}
-                      className="px-3 py-2 pr-8 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-slate-200 cursor-pointer appearance-none"
+                      className="px-3 py-2 pr-8 rounded-xl bg-slate-800 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-white cursor-pointer appearance-none"
                     >
                       {(settings?.ai_platforms || [{ id: 'geekai', name: 'GeekAI' }, { id: 'siliconflow', name: 'SiliconFlow' }]).map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
+                        <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
                       ))}
                     </select>
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
@@ -763,10 +758,10 @@ export default function AIScriptDialog({
                     <select
                       value={modelId}
                       onChange={(e) => setModelId(e.target.value)}
-                      className="w-full px-3 py-2 pr-8 rounded-xl bg-white/5 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-slate-200 cursor-pointer appearance-none"
+                      className="w-full px-3 py-2 pr-8 rounded-xl bg-slate-800 border border-white/10 focus:border-violet-400/50 outline-none text-sm text-white cursor-pointer appearance-none"
                     >
                       {llmModels.filter(m => m.provider === provider).map((m) => (
-                        <option key={m.model} value={m.model}>{m.model}</option>
+                        <option key={m.model} value={m.model} className="bg-slate-800 text-slate-100">{m.model}</option>
                       ))}
                     </select>
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />

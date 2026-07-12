@@ -2,7 +2,6 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   uploadVideo2Image,
   uploadVideo2Video,
-  uploadVideo2FromUrl,
   detectFileType,
   checkVideoBitrate,
 } from '../lib/ossUtils';
@@ -37,10 +36,7 @@ export interface UseUploadOptions {
 export function useUpload(options: UseUploadOptions) {
   const { projectId, currentSceneId, showToast, onUploadComplete, loadShots, loadStats, loadProject } = options;
 
-  const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
-  const [urlInputValue, setUrlInputValue] = useState('');
-  const [urlError, setUrlError] = useState('');
 
   const [pendingCompressionFiles, setPendingCompressionFiles] = useState<FileCompressionInfo[]>([]);
   const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
@@ -288,14 +284,14 @@ export function useUpload(options: UseUploadOptions) {
 
     // 由队列统一调度上传，避免重复启动
     runUploadQueueRef.current();
-
-    uploadAbortControllerRef.current = null;
+    // 不清除 uploadAbortControllerRef，保留 AbortController 以便用户取消时能 abort 在途 fetch
   }, [projectId, currentSceneId, showToast, refreshAfterUpload, uploadSingleFile, setupCompletionCheck]);
 
   const cancelUpload = useCallback(() => {
     uploadCancelledRef.current = true;
     if (uploadAbortControllerRef.current) {
       uploadAbortControllerRef.current.abort();
+      uploadAbortControllerRef.current = null;
     }
     setPendingCompressionFiles([]);
     setPendingCompressionDecision(null);
@@ -334,37 +330,11 @@ export function useUpload(options: UseUploadOptions) {
     setPendingCompressionDecision(null);
     setPendingUploadIndex(-1);
 
+    // 创建新的 AbortController，以便用户取消时能 abort 在途 fetch
+    uploadAbortControllerRef.current = new AbortController();
     // 由队列统一调度上传，避免与队列逻辑重复启动导致重复上传
     runUploadQueueRef.current();
   }, [pendingCompressionFiles]);
-
-  const handleUploadFromUrl = useCallback(async () => {
-    const url = urlInputValue.trim();
-    if (!url) return;
-    const newItem: UploadingFile = {
-      id: `${Date.now()}-url`,
-      // P3-12：仅当 URL 超过 50 字符时才截断加省略号
-      name: url.length > 50 ? url.substring(0, 50) + '...' : url,
-      size: 0,
-      progress: 20,
-      status: 'uploading',
-      retryCount: 0
-    };
-    setUploadingFiles(prev => [...prev, newItem]);
-    try {
-      await uploadVideo2FromUrl(url, {
-        projectId,
-        sceneId: currentSceneId !== null ? currentSceneId : undefined,
-        title: url
-      });
-      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, progress: 100, status: 'done', message: '转存完成' } : uf));
-      setUrlInputValue('');
-      await refreshAfterUpload();
-    } catch (e) {
-      // P3-11：显示具体错误信息而非 [object Error]
-      setUploadingFiles(prev => prev.map(uf => uf.id === newItem.id ? { ...uf, status: 'error', message: (e as Error).message || '转存失败' } : uf));
-    }
-  }, [urlInputValue, projectId, currentSceneId, refreshAfterUpload]);
 
   const clearUploadingFiles = useCallback(() => {
     setUploadingFiles([]);
@@ -374,6 +344,7 @@ export function useUpload(options: UseUploadOptions) {
     compressionDecisionPendingRef.current = false;
     pendingCompressionMethodRef.current = null;
     pendingCompressionIndicesRef.current = new Set();
+    uploadAbortControllerRef.current = null;
   }, []);
 
   const retryFailedFiles = useCallback(() => {
@@ -399,17 +370,10 @@ export function useUpload(options: UseUploadOptions) {
   return {
     uploadingFiles,
     setUploadingFiles,
-    uploadTab,
-    setUploadTab,
-    urlInputValue,
-    setUrlInputValue,
-    urlError,
-    setUrlError,
     pendingCompressionVideo: pendingCompressionFiles.length > 0 ? pendingCompressionFiles[0].file : null,
     pendingCompressionDecision,
     pendingCompressionFiles,
     handleUploadFiles,
-    handleUploadFromUrl,
     cancelUpload,
     handleCompressionDecision,
     aliyunConfigured,

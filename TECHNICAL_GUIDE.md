@@ -232,7 +232,6 @@ qizi-video/
 | PUT | `/api/video2/shots/:id/status` | 更新分镜状态 |
 | POST | `/api/video2/upload/image` | 图片上传 |
 | POST | `/api/video2/upload/video` | 视频上传（异步） |
-| POST | `/api/video2/from-url` | URL 转存 |
 | GET | `/api/video2/stats` | 统计数据 |
 | GET | `/api/video2/settings` | 获取系统设置（API Key 脱敏） |
 | PUT | `/api/video2/settings` | 更新系统设置 |

@@ -746,7 +746,7 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
-                  className="touch-target-44 absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  className="touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
                   style={{ opacity: 0.7 }}
                 >
                   <ChevronLeft className="w-4 h-4 text-white" />
@@ -757,7 +757,7 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
-                  className="touch-target-44 absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  className="touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
                   style={{ opacity: 0.7 }}
                 >
                   <ChevronRight className="w-4 h-4 text-white" />
@@ -836,7 +836,9 @@ export function ShotCard({
         {/* 左上角：选择按钮 */}
         <button
           onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-          className={`touch-target-44 absolute top-3 left-3 z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+          className={`touch-target-36 absolute z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+            isMobile ? 'top-2 left-2' : 'top-3 left-3'
+          } ${
             isSelected
               ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
               : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
@@ -848,10 +850,10 @@ export function ShotCard({
 
         {/* 右上角：全屏按钮 + 删除按钮（无媒体时显示上传区域） */}
         {hasMedia && (
-          <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5">
+          <div className={`absolute z-20 flex items-center gap-1.5 ${isMobile ? 'top-2 right-2' : 'top-3 right-3'}`}>
             <button
               onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
-              className="touch-target-44 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              className="touch-target-36 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
               title="全屏查看"
             >
               <Maximize2 className="w-4 h-4 text-white/90" />
@@ -864,7 +866,7 @@ export function ShotCard({
                     onDeleteMedia(shot.id, currentMedia.id);
                   }
                 }}
-                className="touch-target-44 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
+                className="touch-target-36 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
                 title="删除素材"
               >
                 <Trash2 className="w-3.5 h-3.5 text-white/90" />
@@ -874,7 +876,7 @@ export function ShotCard({
         )}
 
         {/* 左下角：状态标签 / 恢复按钮 */}
-        <div className="absolute bottom-3 left-3 z-20">
+        <div className={`absolute z-20 ${isMobile ? 'bottom-2 left-2' : 'bottom-3 left-3'}`}>
           {currentTab === 'trash' ? (
             <button
               onClick={(e) => { e.stopPropagation(); onRestore?.(shot.id); }}
@@ -909,14 +911,26 @@ export function ShotCard({
           )}
         </div>
 
-        {/* 右下角：镜头编号（仅已拍摄 tab 显示） */}
+        {/* 右下角：镜头编号（仅已拍摄 tab 显示） / AI分析（仅未拍摄 tab + 桌面端显示） */}
         {currentTab === 'done' && (
-          <div className="absolute bottom-3 right-3 z-20">
+          <div className={`absolute z-20 ${isMobile ? 'bottom-2 right-2' : 'bottom-3 right-3'}`}>
             <button
               onClick={(e) => { e.stopPropagation(); onShotNoClick?.(shot); }}
               className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border bg-black/40 backdrop-blur border-white/25 text-white/80 cursor-pointer hover:bg-black/60 hover:border-white/40 transition"
             >
               {shot.shotNo ? `编号${shot.shotNo}` : '无编号'}
+            </button>
+          </div>
+        )}
+        {currentTab === 'pending' && !isMobile && currentMedia && (
+          <div className="absolute bottom-3 right-3 z-20">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleAnalyzeShot(); }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 text-emerald-200 backdrop-blur transition"
+              title="AI分析画面内容，自动填充各项信息"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              AI分析
             </button>
           </div>
         )}
@@ -937,16 +951,6 @@ export function ShotCard({
               enableAutocomplete={false}
             />
           </div>
-          {currentMedia && (
-            <button
-              onClick={(e) => { e.stopPropagation(); handleAnalyzeShot(); }}
-              className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-400/30 text-xs text-emerald-300 transition"
-              title="AI分析画面内容，自动填充各项信息"
-            >
-              <Sparkles className="w-3 h-3" />
-              AI分析
-            </button>
-          )}
         </div>
       </div>
 
@@ -1095,7 +1099,7 @@ export function ShotCard({
           />
 
           {/* 视频分割按钮 */}
-          {(shot.type === 'video' || media.some(m => m.type === 'video')) && (
+          {media.some(m => m.type === 'video') && (
             <button
               onClick={() => onSplitVideo?.(shot)}
               className="w-full mt-2 py-2 rounded-xl border border-dashed border-amber-400/30 bg-amber-500/10 hover:bg-amber-500/20 text-xs font-medium text-amber-200 transition flex items-center justify-center gap-2"
@@ -1105,24 +1109,14 @@ export function ShotCard({
             </button>
           )}
 
-          {/* 管理参考画面 + AI 生成按钮（P3-23：AI 生图入口常驻） */}
-          <div className="flex gap-2 mt-2">
-            <button
-              onClick={() => onManageMedia?.(shot)}
-              className="flex-1 py-2 rounded-xl border border-dashed border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition flex items-center justify-center gap-2"
-            >
-              <ImageIcon className="w-4 h-4" />
-              管理参考画面 ({media.length}/10)
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onAiGenerate?.(shot); }}
-              className="py-2 px-3 rounded-xl border border-dashed border-pink-400/30 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition flex items-center justify-center gap-1.5"
-              title="AI 生成参考画面"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              AI生成
-            </button>
-          </div>
+          {/* 管理参考画面按钮 */}
+          <button
+            onClick={() => onManageMedia?.(shot)}
+            className="mt-2 w-full py-2 rounded-xl border border-dashed border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition flex items-center justify-center gap-2"
+          >
+            <ImageIcon className="w-4 h-4" />
+            管理参考画面 ({media.length}/10)
+          </button>
         </div>
       )}
 
@@ -1134,7 +1128,7 @@ export function ShotCard({
               <button
                 onClick={() => onSort?.(shot.id, 'up')}
                 disabled={isFirst}
-                className={`touch-target-44 w-9 h-9 rounded-full border flex items-center justify-center transition ${
+                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isFirst
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'
@@ -1146,7 +1140,7 @@ export function ShotCard({
               <button
                 onClick={() => onSort?.(shot.id, 'down')}
                 disabled={isLast}
-                className={`touch-target-44 w-9 h-9 rounded-full border flex items-center justify-center transition ${
+                className={`w-9 h-9 rounded-full border flex items-center justify-center transition ${
                   isLast
                     ? 'border-white/10 text-slate-600 cursor-not-allowed'
                     : 'border-white/20 bg-white/5 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50 hover:text-white'

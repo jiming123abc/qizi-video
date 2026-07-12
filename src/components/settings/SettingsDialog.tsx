@@ -422,7 +422,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                     className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-white/10 focus:border-violet-400/50 outline-none text-white appearance-none cursor-pointer"
                   >
                     {IMAGE_SIZES.map(size => (
-                      <option key={size} value={size}>{size}</option>
+                      <option key={size} value={size} className="bg-slate-800 text-slate-100">{size}</option>
                     ))}
                   </select>
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
@@ -565,7 +565,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                               className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
                             >
                               {(settings.ai_platforms || []).map(p => (
-                                <option key={p.id} value={p.id}>{p.name}</option>
+                                <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
                               ))}
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
@@ -576,11 +576,11 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                               onChange={(e) => updateModel('llm', index, 'cost', e.target.value)}
                               className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
                             >
-                              <option value="free">免费</option>
-                              <option value="low">低</option>
-                              <option value="mid">中</option>
-                              <option value="mid_high">中高</option>
-                              <option value="high">高</option>
+                              <option value="free" className="bg-slate-800 text-slate-100">免费</option>
+                              <option value="low" className="bg-slate-800 text-slate-100">低</option>
+                              <option value="mid" className="bg-slate-800 text-slate-100">中</option>
+                              <option value="mid_high" className="bg-slate-800 text-slate-100">中高</option>
+                              <option value="high" className="bg-slate-800 text-slate-100">高</option>
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                           </div>
@@ -642,7 +642,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                               className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
                             >
                               {(settings.ai_platforms || []).map(p => (
-                                <option key={p.id} value={p.id}>{p.name}</option>
+                                <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
                               ))}
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
@@ -653,9 +653,9 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                               onChange={(e) => updateModel('image', index, 'quality', e.target.value)}
                               className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
                             >
-                              <option value="standard">标准</option>
-                              <option value="hd">高清</option>
-                              <option value="ultra">超清</option>
+                              <option value="standard" className="bg-slate-800 text-slate-100">标准</option>
+                              <option value="hd" className="bg-slate-800 text-slate-100">高清</option>
+                              <option value="ultra" className="bg-slate-800 text-slate-100">超清</option>
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                           </div>
@@ -665,11 +665,11 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                               onChange={(e) => updateModel('image', index, 'cost', e.target.value)}
                               className="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50"
                             >
-                              <option value="free">免费</option>
-                              <option value="low">低</option>
-                              <option value="mid">中</option>
-                              <option value="mid_high">中高</option>
-                              <option value="high">高</option>
+                              <option value="free" className="bg-slate-800 text-slate-100">免费</option>
+                              <option value="low" className="bg-slate-800 text-slate-100">低</option>
+                              <option value="mid" className="bg-slate-800 text-slate-100">中</option>
+                              <option value="mid_high" className="bg-slate-800 text-slate-100">中高</option>
+                              <option value="high" className="bg-slate-800 text-slate-100">高</option>
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                           </div>

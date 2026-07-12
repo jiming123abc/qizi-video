@@ -251,14 +251,15 @@ export async function compressVideoInBrowser(
     await ffmpeg.writeFile(inputFileName, new Uint8Array(await file.arrayBuffer()));
 
     // 构建 ffmpeg 命令
+    // ABR 模式（-b:v + -maxrate + -bufsize，无 CRF）：实际码率尽量接近目标码率
+    // 使用 fast 预设（比 ultrafast 压缩效率更高，实际码率更贴近目标值，与阿里云 High Profile 接近）
     const ffmpegArgs = [
       '-i', inputFileName,
       '-c:v', 'libx264',
-      '-preset', 'ultrafast',
+      '-preset', 'fast',
       '-b:v', `${targetBitrate}k`,
       '-maxrate', `${targetBitrate}k`,
       '-bufsize', `${targetBitrate * 2}k`,
-      '-crf', '28',
       '-movflags', '+faststart',
       '-y',
       outputFileName,

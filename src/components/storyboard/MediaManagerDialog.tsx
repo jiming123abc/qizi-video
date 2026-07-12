@@ -13,6 +13,7 @@ interface MediaManagerDialogProps {
   shot: Shot;
   onMediaChange?: (shot: Shot) => void;
   onAiGenerate?: (shot: Shot) => void;
+  refreshTrigger?: number;
 }
 
 const MAX_MEDIA_COUNT = 10;
@@ -49,7 +50,8 @@ export default function MediaManagerDialog({
   onClose,
   shot,
   onMediaChange,
-  onAiGenerate
+  onAiGenerate,
+  refreshTrigger = 0
 }: MediaManagerDialogProps) {
   const [mediaList, setMediaList] = useState<ShotMedia[]>(shot?.media || []);
   const [uploadingFiles, setUploadingFiles] = useState<UploadingItem[]>([]);
@@ -59,6 +61,30 @@ export default function MediaManagerDialog({
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   // P3-23：sceneRefInputRef 已移除（场景参考图上传功能废弃）
+
+  // 从 API 拉取最新媒体列表
+  const fetchMediaList = async () => {
+    if (!shot?.id) return;
+    try {
+      const res = await fetch(`/api/video2/shots/${shot.id}/media`);
+      const data = await res.json();
+      if (data && data.success && Array.isArray(data.data)) {
+        const sorted = [...data.data].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+        setMediaList(sorted);
+        if (onMediaChange) {
+          onMediaChange({ ...shot, media: sorted });
+        }
+      }
+    } catch (e) {
+      console.error('[MediaManager] 拉取媒体列表失败:', e);
+    }
+  };
+
+  // 弹窗打开时 / refreshTrigger 变化时，从 API 拉取最新媒体列表
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchMediaList();
+  }, [isOpen, shot.id, refreshTrigger]);
 
   // 弹窗打开时批量签名所有媒体 URL
   // 依赖 url 列表字符串（而非 length），确保删除一张又添加一张时新媒体也能签名
@@ -118,10 +144,10 @@ export default function MediaManagerDialog({
   const saveMediaOrder = async (list: ShotMedia[]) => {
     const orders = list.map((m, idx) => ({ id: m.id, sortOrder: idx }));
     try {
-      await fetch(`/api/video2/shots/${shot.id}/media/reorder`, {
+      await fetch(`/api/video2/shots/${shot.id}/media/sort`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orders })
+        body: JSON.stringify({ items: orders })
       });
       if (onMediaChange) {
         onMediaChange({ ...shot, media: list });
@@ -382,7 +408,7 @@ export default function MediaManagerDialog({
           <h2 className="text-lg font-semibold">参考画面管理</h2>
           <button
             onClick={handleClose}
-            className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition"
+            className="touch-target-36 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition"
           >
             <X className="w-5 h-5" />
           </button>
@@ -434,7 +460,7 @@ export default function MediaManagerDialog({
                         {/* Delete button */}
                         <button
                           onClick={() => deleteMedia(media.id)}
-                          className="touch-target-44-lg absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition text-xs"
+                          className="touch-target-36-lg absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition text-xs"
                           title="删除"
                         >
                           <X className="w-3 h-3" />
@@ -481,43 +507,55 @@ export default function MediaManagerDialog({
             {mediaList.length}/{MAX_MEDIA_COUNT} 已添加
           </div>
 
-          {/* Upload zone */}
-          <div
-            onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={handleDropZone}
-            onClick={() => fileInputRef.current?.click()}
-            className={`mb-4 border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition ${
-              isDragOver
-                ? 'border-violet-400 bg-violet-500/10'
-                : 'border-white/15 hover:border-violet-400/40 bg-white/[0.02] hover:bg-white/[0.04]'
-            }`}
-          >
-            <Upload className={`w-8 h-8 mx-auto mb-2 ${isDragOver ? 'text-violet-400' : 'text-white/40'}`} />
-            <p className="text-sm font-medium mb-1">上传参考画面</p>
-            <p className="text-xs text-slate-500">点击或拖拽文件到此处（图片或视频）</p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,video/*"
-              className="hidden"
-              onChange={e => handleFileSelect(e.target.files)}
-            />
+          {/* 添加参考画面 */}
+          <div className="mb-4">
+            <p className="text-sm font-medium text-slate-300 mb-3">添加参考画面</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* 上传方式 */}
+              <div
+                onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={handleDropZone}
+                onClick={() => fileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded-2xl p-5 text-center cursor-pointer transition ${
+                  isDragOver
+                    ? 'border-violet-400 bg-violet-500/10'
+                    : 'border-white/15 hover:border-violet-400/40 bg-white/[0.02] hover:bg-white/[0.04]'
+                }`}
+              >
+                <Upload className={`w-7 h-7 mx-auto mb-1.5 ${isDragOver ? 'text-violet-400' : 'text-white/40'}`} />
+                <p className="text-sm font-medium mb-0.5">上传</p>
+                <p className="text-xs text-slate-500">点击或拖拽文件</p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/*,video/*"
+                  className="hidden"
+                  onChange={e => handleFileSelect(e.target.files)}
+                />
+              </div>
+
+              {/* AI 生成方式 */}
+              {onAiGenerate && (
+                <button
+                  onClick={() => onAiGenerate(shot)}
+                  disabled={mediaList.length >= MAX_MEDIA_COUNT}
+                  className={`border-2 border-dashed rounded-2xl p-5 text-center transition ${
+                    mediaList.length >= MAX_MEDIA_COUNT
+                      ? 'border-white/10 bg-white/[0.02] text-slate-600 cursor-not-allowed'
+                      : 'border-pink-400/30 bg-pink-500/10 hover:bg-pink-500/20 text-pink-200 hover:border-pink-400/50'
+                  }`}
+                >
+                  <Sparkles className={`w-7 h-7 mx-auto mb-1.5 ${mediaList.length >= MAX_MEDIA_COUNT ? 'text-slate-600' : ''}`} />
+                  <p className="text-sm font-medium mb-0.5">AI 生成</p>
+                  <p className="text-xs text-slate-500">
+                    {mediaList.length >= MAX_MEDIA_COUNT ? '已达上限' : '智能生成参考画面'}
+                  </p>
+                </button>
+              )}
+            </div>
           </div>
-
-          {/* P3-23：移除无效的"上传场景参考图"区域（已被 P3-24 的统一参考图机制取代） */}
-
-          {/* AI Generate button */}
-          {onAiGenerate && (
-            <button
-              onClick={() => onAiGenerate(shot)}
-              className="w-full py-3 rounded-2xl border border-dashed border-yellow-400/30 bg-yellow-500/10 hover:bg-yellow-500/20 transition flex items-center justify-center gap-2 text-yellow-200"
-            >
-              <Sparkles className="w-5 h-5" />
-              <span className="font-medium">AI 生成参考画面</span>
-            </button>
-          )}
 
           {/* Upload progress */}
           {uploadingFiles.length > 0 && (

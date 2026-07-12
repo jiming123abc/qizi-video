@@ -10,7 +10,7 @@ export const MAX_HISTORY = 20;
  * - 管理 refImages（数字资产选择 + 用户上传）单一 state
  * - 管理 historyImages（ai_generated_images 表持久化的历史图）
  * - @引用解析（prompt 中的 @资产名 → 对应 refImage URL）
- * - 供 AIImageGenDialog 和 AIImageGenerateDialog 共用
+ * - 供 AIImageGenerateDialog 共用（统一对话框，支持 shot 和 asset 两种上下文）
  */
 export function useRefImages(options: {
   ownerType: 'shot' | 'asset';
@@ -157,6 +157,21 @@ export function useRefImages(options: {
     return refImages.map(r => r.url);
   }, [refImages]);
 
+  // 直接添加 URL 作为参考图（用于分镜图片等无 File 的场景）
+  const addUrlRef = useCallback((url: string, label?: string) => {
+    setRefImages(prev => {
+      if (prev.some(r => r.url === url)) return prev;  // 去重
+      if (prev.length >= MAX_REF_IMAGES) return prev;   // 上限
+      const newRef: RefImage = {
+        id: `url-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        url,
+        source: 'upload',  // 复用 upload source 类型
+        assetName: label,  // 可选标签（如分镜标题）
+      };
+      return [...prev, newRef];
+    });
+  }, []);
+
   const isFull = refImages.length >= MAX_REF_IMAGES;
 
   return {
@@ -168,6 +183,7 @@ export function useRefImages(options: {
     addAssetRef,
     toggleAssetRef,
     addUploadRef,
+    addUrlRef,
     removeRef,
     clearRefs,
     isRefSelected,

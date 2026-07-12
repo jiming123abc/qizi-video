@@ -307,9 +307,9 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                   className="w-full px-3 py-2.5 sm:py-2 pr-8 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50 min-h-[44px]"
                   disabled={isAnalyzing}
                 >
-                  <option value="">选择平台</option>
+                  <option value="" className="bg-slate-800 text-slate-100">选择平台</option>
                   {settings?.ai_platforms?.map(p => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
+                    <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
                   ))}
                 </select>
                 <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
@@ -321,9 +321,9 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                   className="w-full px-3 py-2.5 sm:py-2 pr-8 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50 min-h-[44px]"
                   disabled={isAnalyzing}
                 >
-                  <option value="">选择模型</option>
+                  <option value="" className="bg-slate-800 text-slate-100">选择模型</option>
                   {filteredModels.map(m => (
-                    <option key={m.model} value={m.model}>
+                    <option key={m.model} value={m.model} className="bg-slate-800 text-slate-100">
                       {m.model} {m.supportsVision ? '(视觉)' : ''}
                     </option>
                   ))}

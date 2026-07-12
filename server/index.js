@@ -468,6 +468,24 @@ async function deleteOssFileIfNotReferenced(url, options = {}) {
   await deleteOssFile(url);
 }
 
+// 判断是否为 OSS 派生 URL（视频截图/图片处理），这类 URL 不是独立文件，
+// 直接 delete 会误删源文件，必须跳过
+function isDerivedOssUrl(url) {
+  if (!url) return false;
+  return String(url).includes('x-oss-process=');
+}
+
+// 删除独立 OSS 文件（派生 URL 跳过 + 引用计数感知）
+// 用于封面/资产主图等「可能被替换或清除」的场景
+async function deleteStandaloneOssFile(url, options = {}) {
+  if (!url) return;
+  if (isDerivedOssUrl(url)) {
+    console.log('[video2] 跳过派生 OSS URL，不删除源文件:', url);
+    return;
+  }
+  await deleteOssFileIfNotReferenced(url, options);
+}
+
 async function compressImage(buffer, maxSizeKB = 300) {
   const maxSizeBytes = maxSizeKB * 1024;
   
@@ -569,13 +587,17 @@ async function getVideoInfo(inputPath) {
 // 根据分辨率获取目标码率（使用 aliuyunVideo 中的统一配置）
 // 从数据库读取视频压缩目标码率（分辨率阶梯判断）
 async function getTargetBitrate(width, height) {
+  // 分辨率判断使用短边（与前端 getResolutionTier 一致）：横屏视频用 height，竖屏视频用 width
   const maxRes = Math.max(width, height);
+  const minRes = Math.min(width, height);
+  // 短边决定清晰度阶梯：≥1080 → 1080p，≥720 → 720p，≥480 → 480p，更低用 480p
+  const shortSide = minRes > 0 ? minRes : maxRes;
   let key;
-  if (maxRes >= 1080) {
+  if (shortSide >= 1080) {
     key = 'video_target_bitrate_1080p';
-  } else if (maxRes >= 720) {
+  } else if (shortSide >= 720) {
     key = 'video_target_bitrate_720p';
-  } else if (maxRes >= 480) {
+  } else if (shortSide >= 480) {
     key = 'video_target_bitrate_480p';
   } else {
     // 低于 480p 的情况，使用 480p 的设置值（和图片压缩逻辑一致）
@@ -643,10 +665,9 @@ async function compressVideoFile(inputPath, targetBitrateKbps, onProgress) {
           `-b:v ${targetBitrateKbps}k`,                      // 平均目标码率
           `-maxrate ${targetBitrateKbps}k`,                   // 最大码率 = 目标码率（和浏览器端保持一致）
           `-bufsize ${targetBitrateKbps * 2}k`,
-          '-preset ultrafast',                                // 和浏览器端保持一致
+          '-preset fast',                                 // 和浏览器端保持一致
           '-c:v libx264',
           '-c:a aac',
-          '-crf 28',
           '-movflags +faststart'
         ])
         .on('progress', (progress) => {
@@ -696,6 +717,11 @@ const deleteProjectTasks = new Map();
 const MAX_CONCURRENT_COMPRESSIONS = 2;
 let currentCompressions = 0;
 const pendingCompressions = [];
+
+// 心跳超时阈值：完成时检查，若用户超过此时间未查询状态，视为已离开，清理 OSS 文件避免残留
+const HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;  // 5 分钟
+// 孤儿任务兜底扫描阈值：超过此时间的 pending/processing 任务视为孤儿，定时清理
+const ORPHAN_TASK_TIMEOUT_MS = 30 * 60 * 1000;  // 30 分钟
 
 // P4-7：任务终态后延迟清理 Map 条目，避免长期运行内存累积
 // 延迟 10 分钟给前端轮询窗口（前端 1 秒轮询，600 次足够）
@@ -1149,7 +1175,7 @@ app.get('/api/video2/ai/task/:taskId/stream', (req, res) => {
 // - 新增 stage 参数：auto / intent / intent_confirmed / scene_confirmed / storyboard / shooting
 app.post('/api/video2/ai/parse-script', scriptUpload.array('file', 1), async (req, res) => {
   try {
-    const { projectId, sceneId, generateImages, provider, model, stage = 'auto' } = req.body;
+    const { projectId, sceneId, provider, model, stage = 'auto' } = req.body;
     const file = req.files && req.files[0];
 
     let scriptContent = '';
@@ -1176,11 +1202,11 @@ app.post('/api/video2/ai/parse-script', scriptUpload.array('file', 1), async (re
       type: 'script_parse',
       status: 'processing',
       projectId: projectId ? parseInt(projectId) : null,
-      input: { stage, generateImages: generateImages === 'true', textLength: scriptContent.length, provider, model }
+      input: { stage, textLength: scriptContent.length, provider, model }
     });
 
     // 异步处理（后台执行）
-    processScriptParse(task.id, scriptContent, stage, generateImages === 'true', {
+    processScriptParse(task.id, scriptContent, stage, {
       projectId: projectId ? parseInt(projectId) : null,
       sceneId: sceneId !== undefined && sceneId !== null ? parseInt(sceneId) : null,
       provider: provider || 'geekai',
@@ -1450,7 +1476,7 @@ async function deleteAiGeneratedByOwner(ownerType, ownerId) {
 // AI 视频分割
 app.post('/api/video2/ai/split-video', async (req, res) => {
   try {
-    const { videoUrl, projectId, sceneId, mode, splitPoints } = req.body;
+    const { videoUrl, projectId, sceneId, mode, splitPoints, filterNonShots, autoAssignScenes } = req.body;
 
     if (!videoUrl) {
       return res.status(400).json({ success: false, message: '缺少 videoUrl' });
@@ -1470,7 +1496,9 @@ app.post('/api/video2/ai/split-video', async (req, res) => {
       projectId: projectId ? parseInt(projectId) : null,
       sceneId: sceneId !== undefined && sceneId !== null ? parseInt(sceneId) : null,
       mode,
-      splitPoints: splitPoints || []
+      splitPoints: splitPoints || [],
+      filterNonShots: filterNonShots !== undefined ? !!filterNonShots : false,
+      autoAssignScenes: autoAssignScenes !== undefined ? !!autoAssignScenes : true
     });
     
     res.json({ success: true, taskId: task.id });
@@ -1592,7 +1620,7 @@ async function autoAssignScenesByNames(projectId, sceneNames, manualSceneId) {
 
 // P5-1：重构 processScriptParse，支持五条路径（A1/A2/B/C/D）
 // 参数 stage 取值：auto / intent / intent_confirmed / scene_confirmed / storyboard / shooting
-async function processScriptParse(taskId, scriptContent, stage, generateImages, params) {
+async function processScriptParse(taskId, scriptContent, stage, params) {
   try {
     const settings = await db.video2Settings.getAll();
     const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
@@ -1808,6 +1836,8 @@ async function processFinalShots(taskId, scriptContent, mode, settings, params, 
 }
 
 async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size, provider, model, quality) {
+  // 跟踪已上传到项目 OSS 的图片 URL（用于失败时清理，避免残留）
+  let uploadedOssUrl = '';
   try {
     const settings = await db.video2Settings.getAll();
     
@@ -1920,6 +1950,7 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
           const ossKey = `${folder}/${fileName}`;
           const ossResult = await ossClient.put(ossKey, Buffer.from(buffer));
           imageUrl = ossResult.url;
+          uploadedOssUrl = imageUrl;
           console.log(`[AI] 参考图已上传到 OSS: ${ossKey}`);
         }
       } catch (e) {
@@ -1937,6 +1968,8 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
       sortOrder: 0,
       source: 'ai_generated'
     });
+    // DB 写入成功：OSS 文件已被 shot_media 引用，后续失败不再清理
+    uploadedOssUrl = '';
 
     // P3-22：同步写入 ai_generated_images 历史记录（ownerType='shot'）
     try {
@@ -1968,6 +2001,15 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
     console.log(`[AI] 参考图生成完成: ${imageUrl}`);
   } catch (error) {
     console.error('[AI] 参考图生成失败:', error.message);
+    // 失败时清理已上传到项目 OSS 的图片文件，避免残留
+    if (uploadedOssUrl) {
+      try {
+        await deleteStandaloneOssFile(uploadedOssUrl);
+        console.log('[AI] 生成失败，已清理 OSS 图片:', uploadedOssUrl);
+      } catch (cleanupErr) {
+        console.error('[AI] 清理 OSS 图片失败:', cleanupErr.message);
+      }
+    }
     await db.video2AiTasks.update(taskId, {
       status: 'error',
       error: aiClient.friendlyAiError(error)
@@ -2142,9 +2184,10 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
   }
   
   const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
+  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
   let sceneMap = new Map();
-  
-  if (autoAssignScene && splitPoints.length > 0) {
+
+  if (enableAutoScenes && splitPoints.length > 0) {
     sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
   }
   
@@ -2338,24 +2381,31 @@ async function processVideoSplitAIFrame(taskId, videoUrl, params, settings) {
     }
     
     // 7. 调用多模态模型分析
-    const splitPoints = await analyzeVideoShots(framesWithTime, duration, settings, taskId);
-    
+    const analyzeResult = await analyzeVideoShots(framesWithTime, duration, settings, taskId);
+    const splitPoints = analyzeResult.splitPoints;
+
     await db.video2AiTasks.update(taskId, {
       progress: 80,
       output: { stage: 'creating_shots', splitPointsCount: splitPoints.length }
     });
-    
+
     // 8. 按分割点创建分镜
     const sortedPoints = [...splitPoints].sort((a, b) => a - b);
     const allPoints = [0, ...sortedPoints];
-    
-    const shots = allPoints.map((startTime, i) => ({
-      beginTime: startTime,
-      endTime: allPoints[i + 1] || duration,
-      type: 'shot',
-      theme: ''
-    }));
-    
+
+    // 如果 LLM 返回了 segments 信息，使用它；否则按分割点构建
+    let shots;
+    if (analyzeResult.segments && analyzeResult.segments.length > 0) {
+      shots = analyzeResult.segments;
+    } else {
+      shots = allPoints.map((startTime, i) => ({
+        startTime,
+        endTime: allPoints[i + 1] || duration,
+        type: 'shot',
+        scene: ''
+      }));
+    }
+
     await createShotsFromSplitData(taskId, videoUrl, shots, params, videoBuffer ? videoBuffer.length : 0);
     
     // 清理临时文件
@@ -2379,12 +2429,29 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
   });
 
   const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
+  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
+  const enableFilter = params.filterNonShots === true;
   let defaultSceneId = params.sceneId;
+  let sceneMap = new Map();
 
-  // 如果启用自动分配场次，创建单一默认场次 "视频分割"
-  if (autoAssignScene && shots.length > 0) {
-    const sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
-    defaultSceneId = sceneMap.values().next().value;
+  // 自动划分场次：使用阿里云返回的主题片段名称
+  if (enableAutoScenes && shots.length > 0) {
+    if (themeSegments && themeSegments.length > 0) {
+      // 使用主题片段的 Theme 作为场次名
+      const sceneNames = themeSegments
+        .map(seg => (seg.theme || '').trim())
+        .filter(name => name.length > 0);
+      const uniqueNames = [...new Set(sceneNames)];
+      if (uniqueNames.length > 0) {
+        sceneMap = await autoAssignScenesByNames(params.projectId, uniqueNames, null);
+      } else {
+        sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
+      }
+    } else {
+      // 没有主题片段时，使用默认场次
+      sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
+    }
+    defaultSceneId = sceneMap.size > 0 ? sceneMap.values().next().value : params.sceneId;
   }
 
   /**
@@ -2402,10 +2469,19 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
     return null;
   }
 
+  // 滤除非实拍分镜：阿里云模式中，type === 'theme' 的主题片段可能是非实拍内容
+  let filteredShots = shots;
+  if (enableFilter) {
+    // 阿里云的 type='theme' 片段是主题分组，不一定是非实拍
+    // 这里不直接过滤 type='theme'，而是保留所有 shots
+    // 非实拍过滤在阿里云模式下需要额外的 LLM 调用，暂不支持
+    console.log('[AI] 阿里云模式暂不支持自动滤除非实拍分镜');
+  }
+
   const createdShots = [];
 
-  // 按 beginTime 升序排列，确保分镜顺序与原始视频一致
-  const sortedShots = [...shots].sort((a, b) => (a.beginTime || 0) - (b.beginTime || 0));
+  // 按 beginTime 升序排列
+  const sortedShots = [...filteredShots].sort((a, b) => (a.beginTime || 0) - (b.beginTime || 0));
 
   for (let i = 0; i < sortedShots.length; i++) {
     const shotInfo = sortedShots[i];
@@ -2416,6 +2492,18 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
     let sceneContent = '';
     let notes = `时间范围: ${formatTime(startTime)} - ${formatTime(endTime)}`;
 
+    // 确定场次 ID
+    let shotSceneId = defaultSceneId;
+    if (enableAutoScenes && themeSegments && themeSegments.length > 0) {
+      const theme = findThemeForTime(startTime, endTime, themeSegments);
+      if (theme && theme.theme) {
+        const sceneKey = theme.theme.toLowerCase();
+        if (sceneMap.has(sceneKey)) {
+          shotSceneId = sceneMap.get(sceneKey);
+        }
+      }
+    }
+
     if (shotInfo.type === 'theme' && shotInfo.theme) {
       sceneContent = shotInfo.theme;
       notes += `\n类型: 主题片段 - ${shotInfo.theme}`;
@@ -2423,7 +2511,6 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
       sceneContent = `镜头 ${i + 1}`;
       notes += `\n类型: 镜头转场`;
 
-      // 如果有对应的主题片段，追加到备注供用户参考
       if (themeSegments && themeSegments.length > 0) {
         const theme = findThemeForTime(startTime, endTime, themeSegments);
         if (theme) {
@@ -2434,7 +2521,7 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
 
     const shot = await db.video2Items.createShot({
       projectId: params.projectId,
-      sceneId: defaultSceneId,
+      sceneId: shotSceneId,
       sceneContent: sceneContent,
       notes: notes,
       estimatedDuration: Math.round(duration).toString(),
@@ -2473,31 +2560,61 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
 
 async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSize) {
   const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
-  let sceneMap = new Map();
-  
-  if (autoAssignScene && shots.length > 0) {
-    sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
+  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
+  const enableFilter = params.filterNonShots === true;
+
+  // 滤除非实拍分镜
+  let filteredShots = shots;
+  if (enableFilter) {
+    filteredShots = shots.filter(s => s.type !== 'non_shot');
+    if (filteredShots.length < shots.length) {
+      console.log(`[AI] 滤除了 ${shots.length - filteredShots.length} 个非实拍分镜`);
+    }
   }
-  
+
+  // 自动划分场次
+  let sceneMap = new Map();
+  if (enableAutoScenes && filteredShots.length > 0) {
+    // 收集 LLM 返回的场次名称
+    const sceneNames = filteredShots
+      .map(s => (s.scene || '').trim())
+      .filter(name => name.length > 0);
+    const uniqueNames = [...new Set(sceneNames)];
+    if (uniqueNames.length > 0) {
+      sceneMap = await autoAssignScenesByNames(params.projectId, uniqueNames, null);
+    } else {
+      // 没有场次名称时，使用默认场次
+      sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
+    }
+  }
+
   const defaultSceneId = sceneMap.size > 0 ? sceneMap.values().next().value : params.sceneId;
-  
   const createdShots = [];
-  
-  for (let i = 0; i < shots.length; i++) {
-    const shotInfo = shots[i];
-    const startTime = shotInfo.beginTime || 0;
+
+  for (let i = 0; i < filteredShots.length; i++) {
+    const shotInfo = filteredShots[i];
+    const startTime = shotInfo.startTime || shotInfo.beginTime || 0;
     const endTime = shotInfo.endTime || 0;
     const duration = endTime - startTime;
-    
+
+    // 根据是否有场次信息决定 sceneId
+    let shotSceneId = defaultSceneId;
+    if (enableAutoScenes && shotInfo.scene) {
+      const sceneKey = shotInfo.scene.toLowerCase();
+      if (sceneMap.has(sceneKey)) {
+        shotSceneId = sceneMap.get(sceneKey);
+      }
+    }
+
     const shot = await db.video2Items.createShot({
       projectId: params.projectId,
-      sceneId: defaultSceneId,
+      sceneId: shotSceneId,
       sceneContent: `镜头 ${i + 1}（AI 自动分割）`,
       notes: `时间范围: ${formatTime(startTime)} - ${formatTime(endTime)}`,
       estimatedDuration: Math.round(duration).toString(),
       status: 'pending'
     });
-    
+
     const media = await db.video2ShotMedia.create({
       shotId: shot.id,
       url: videoUrl,
@@ -2508,14 +2625,14 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
       sortOrder: 0,
       source: 'video_split_ai'
     });
-    
+
     createdShots.push({ ...shot, media: [media] });
-    
+
     await db.video2AiTasks.update(taskId, {
-      progress: 80 + Math.round(((i + 1) / shots.length) * 20)
+      progress: 80 + Math.round(((i + 1) / filteredShots.length) * 20)
     });
   }
-  
+
   await db.video2AiTasks.update(taskId, {
     status: 'done',
     progress: 100,
@@ -2523,7 +2640,8 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
       shots: createdShots,
       total: createdShots.length,
       provider: 'ai_frame',
-      scenesCreated: sceneMap.size
+      scenesCreated: sceneMap.size,
+      filteredOut: shots.length - filteredShots.length
     }
   });
 }
@@ -2562,28 +2680,45 @@ async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId
   const maxImagesPerRequest = 30;
   const frames = framesWithTime.slice(0, maxImagesPerRequest);
   const actualInterval = frames.length > 1 ? frames[1].time - frames[0].time : 3;
-  
+
   // 构建图片内容数组
   const content = [];
-  
+
   // 添加文本提示
   content.push({
     type: 'text',
-    text: `请分析以下视频截图序列，找出镜头切换（场景转换）的时间点。
+    text: `请分析以下视频截图序列，找出镜头切换点，并判断每个分镜的类型和所属场次。
 
 视频总时长：${totalDuration.toFixed(1)} 秒
 截图间隔：约 ${actualInterval} 秒
 共 ${frames.length} 张截图
 
-请找出明显的镜头切换点，要求：
-1. 只返回时间点（秒数），精确到整数
-2. 只返回明显的场景/镜头转换，忽略轻微的镜头移动
-3. 如果不确定某帧是否是切换点，就不要返回
-4. 返回格式：JSON 数组，例如 [3, 8, 15, 22]
+请分析以下内容：
+1. 找出明显的镜头切换点（时间戳，精确到整数秒）
+2. 判断每个分镜的类型：
+   - "shot"：实际拍摄内容（有人物、场景、动作等）
+   - "non_shot"：非实拍内容（标题卡、字幕板、黑屏过渡、片尾字幕、纯文字画面等）
+3. 为每个实拍分镜判断所属场次（基于画面环境，如"室内-客厅"、"室外-街道"、"办公室"等）
+
+返回 JSON 格式：
+{
+  "splitPoints": [3, 8, 15, 22],
+  "segments": [
+    { "startTime": 0, "endTime": 3, "type": "non_shot", "scene": "标题" },
+    { "startTime": 3, "endTime": 8, "type": "shot", "scene": "室内-客厅" },
+    { "startTime": 8, "endTime": 15, "type": "shot", "scene": "室外-街道" }
+  ]
+}
+
+要求：
+- 只返回明显的场景/镜头转换，忽略轻微的镜头移动
+- splitPoints 不包含 0 和视频结尾时间
+- segments 的 startTime/endTime 与 splitPoints 对应（首段从 0 开始，末段到视频结束）
+- 非实拍分镜的 scene 填写内容描述（如"标题"、"字幕"等）
 
 截图列表（时间戳 + 图片）：`
   });
-  
+
   // 添加每张图片及其时间戳
   for (const frame of frames) {
     content.push({
@@ -2598,50 +2733,71 @@ async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId
       }
     });
   }
-  
+
   content.push({
     type: 'text',
-    text: `请返回镜头切换的时间点（秒数）数组，JSON 格式，不要任何额外说明。`
+    text: `请返回 JSON 格式结果，不要任何额外说明。`
   });
-  
+
   const messages = [
     {
       role: 'user',
       content
     }
   ];
-  
+
   // 使用支持视觉的多模态模型降级链（从用户配置读取）
   const multimodalChain = (settings.llm_fallback_chain || [])
     .filter(m => m.supportsVision)
     .map(m => ({ model: m.model, provider: m.provider, cost: m.cost }));
-  
+
   try {
     const result = await aiClient.callChatWithFallback(messages, multimodalChain, settings, {
       temperature: 0.2,
-      max_tokens: 2000,
+      max_tokens: 3000,
       json: true,
       taskId
     });
-    
+
     // 解析返回的 JSON
-    let splitPoints = [];
+    let parsed = null;
     try {
-      const jsonMatch = result.content.match(/\[[\s\S]*?\]/);
+      const jsonMatch = result.content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        splitPoints = JSON.parse(jsonMatch[0]);
+        parsed = JSON.parse(jsonMatch[0]);
       }
     } catch (e) {
-      console.warn('[AI] 解析分割点 JSON 失败:', e.message);
+      console.warn('[AI] 解析分割结果 JSON 失败:', e.message);
     }
-    
+
+    // 提取分割点
+    let splitPoints = [];
+    if (parsed && Array.isArray(parsed.splitPoints)) {
+      splitPoints = parsed.splitPoints;
+    } else if (Array.isArray(parsed)) {
+      // 兼容旧格式（纯数组）
+      splitPoints = parsed;
+    }
+
     // 过滤和验证
     const validPoints = splitPoints
       .map(t => Math.round(Number(t)))
       .filter(t => !isNaN(t) && t > 0 && t < totalDuration);
-    
-    // 去重并排序
-    return [...new Set(validPoints)].sort((a, b) => a - b);
+
+    const uniquePoints = [...new Set(validPoints)].sort((a, b) => a - b);
+
+    // 提取分镜段落信息
+    let segments = null;
+    if (parsed && Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+      segments = parsed.segments.map(seg => ({
+        startTime: Math.round(Number(seg.startTime) || 0),
+        endTime: Math.round(Number(seg.endTime) || totalDuration),
+        type: seg.type === 'non_shot' ? 'non_shot' : 'shot',
+        scene: (seg.scene || '').trim().substring(0, 50)
+      }));
+    }
+
+    return { splitPoints: uniquePoints, segments };
   } catch (error) {
     console.error('[AI] 视频分析失败:', error.message);
     // 如果所有模型都失败了，返回一个粗略的分割（每 15 秒一个）
@@ -2649,7 +2805,7 @@ async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId
     for (let t = 15; t < totalDuration; t += 15) {
       fallbackPoints.push(Math.round(t));
     }
-    return fallbackPoints;
+    return { splitPoints: fallbackPoints, segments: null };
   }
 }
 
@@ -2684,7 +2840,7 @@ app.get('/api/video2/aliyun/status', (req, res) => {
 // 提交转码任务
 app.post('/api/video2/aliyun/transcode', async (req, res) => {
   try {
-    const { videoUrl, originalBitrate, targetBitrate, width, height, pipelineId, projectId } = req.body;
+    const { videoUrl, originalBitrate, targetBitrate, width, height, pipelineId, projectId, reference } = req.body;
 
     if (!videoUrl) {
       return res.status(400).json({ success: false, message: '缺少 videoUrl 参数' });
@@ -2698,8 +2854,9 @@ app.post('/api/video2/aliyun/transcode', async (req, res) => {
     let finalTargetBitrate = targetBitrate;
     if (originalBitrate && (width || height)) {
       finalTargetBitrate = await getTargetBitrate(width || 0, height || 0);
-      const maxRes = Math.max(width || 0, height || 0);
-      const resolution = aliyunVideo.getResolutionFromMaxRes(maxRes);
+      // 分辨率判断使用短边（与前端 getResolutionTier 一致）
+      const shortSide = Math.min(width || 0, height || 0) || Math.max(width || 0, height || 0);
+      const resolution = aliyunVideo.getResolutionFromMaxRes(shortSide);
 
       // 如果原始码率不超过目标码率，不需要压缩
       if (!aliyunVideo.shouldCompress(originalBitrate, finalTargetBitrate)) {
@@ -2720,12 +2877,13 @@ app.post('/api/video2/aliyun/transcode', async (req, res) => {
     const taskId = `transcode-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
 
     // 初始化任务状态（持久化到数据库）
-    const options = { targetBitrate: finalTargetBitrate, width, height, pipelineId, projectId };
+    const options = { targetBitrate: finalTargetBitrate, width, height, pipelineId, projectId, reference };
     await db.video2TranscodeTasks.create({
       id: taskId,
       status: 'pending',
       progress: 0,
       videoUrl,
+      projectId: projectId || null,
       options
     });
 
@@ -2741,7 +2899,8 @@ app.post('/api/video2/aliyun/transcode', async (req, res) => {
     await db.video2TranscodeTasks.update(taskId, {
       jobId: result.jobId,
       requestId: result.requestId,
-      outputObject: result.outputObject
+      outputObject: result.outputObject,
+      lastQueriedAt: new Date().toISOString()  // 心跳：提交时初始化
     });
 
     console.log(`[MPS] 转码任务已提交: ${taskId}, jobId: ${result.jobId}`);
@@ -2757,6 +2916,64 @@ app.post('/api/video2/aliyun/transcode', async (req, res) => {
   }
 });
 
+// 转码失败后清理原始视频：删除 DB 记录（shot_media / shots / videos / transcode_tasks）+ OSS 文件
+// 由前端 uploadVideoWithAliyunCompression 在转码失败（提交失败/转码失败/超时）时调用
+app.post('/api/video2/aliyun/transcode-cleanup', async (req, res) => {
+  try {
+    const { videoUrl } = req.body || {};
+    if (!videoUrl) {
+      return res.status(400).json({ success: false, message: '缺少 videoUrl 参数' });
+    }
+
+    console.log(`[MPS] 转码失败清理开始: ${videoUrl}`);
+
+    // 1. 收集 shot_media 中的 shotId（用于后续清理孤立 shots）
+    const mediaRows = await db.video2Async.all(
+      'SELECT shotId FROM shot_media WHERE url = ?',
+      [videoUrl]
+    );
+    const shotIds = mediaRows.map(r => r.shotId).filter(Boolean);
+
+    // 2. 删除 shot_media 行
+    try {
+      await db.video2Async.run('DELETE FROM shot_media WHERE url = ?', [videoUrl]);
+    } catch (e) { console.error('[MPS] 清理 shot_media 失败:', e.message); }
+
+    // 3. 删除因上一步而变得无媒体的 shots（刚创建的 shot 只有一个媒体，必然命中）
+    if (shotIds.length > 0) {
+      try {
+        const placeholders = shotIds.map(() => '?').join(',');
+        await db.video2Async.run(
+          `DELETE FROM shots WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
+          shotIds
+        );
+      } catch (e) { console.error('[MPS] 清理孤立 shots 失败:', e.message); }
+    }
+
+    // 4. 删除 videos 行（参考视频上传时创建）
+    try {
+      await db.video2Async.run('DELETE FROM videos WHERE url = ?', [videoUrl]);
+    } catch (e) { console.error('[MPS] 清理 videos 失败:', e.message); }
+
+    // 5. 删除转码任务记录
+    try {
+      await db.video2Async.run('DELETE FROM transcode_tasks WHERE videoUrl = ?', [videoUrl]);
+    } catch (e) { console.error('[MPS] 清理 transcode_tasks 失败:', e.message); }
+
+    // 6. 删除 OSS 原始文件（前面已删除所有 DB 引用，此处引用计数为 0，可安全删除）
+    try {
+      await deleteOssFileIfNotReferenced(videoUrl);
+      console.log(`[MPS] 已删除原始 OSS 文件: ${videoUrl}`);
+    } catch (e) { console.error('[MPS] 删除 OSS 文件失败:', e.message); }
+
+    console.log(`[MPS] 转码失败清理完成: ${videoUrl}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[MPS] 转码失败清理异常:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // 查询转码任务状态
 app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
   try {
@@ -2765,6 +2982,13 @@ app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
 
     if (!task) {
       return res.status(404).json({ success: false, message: '任务不存在' });
+    }
+
+    // 心跳：前端查询时刷新 lastQueriedAt（非终态任务才更新，避免无谓写入）
+    if (task.status === 'pending' || task.status === 'processing') {
+      try {
+        await db.video2TranscodeTasks.update(taskId, { lastQueriedAt: new Date().toISOString() });
+      } catch (e) { /* 心跳更新失败不影响主流程 */ }
     }
 
     // 如果任务还在处理中,查询阿里云状态
@@ -2776,10 +3000,17 @@ app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
           status: result.status,
           progress: result.progress
         };
+        // 标记转码输出是否已上传到项目 OSS（用于 DB 更新失败时清理新文件）
+        let isOurOssOutput = false;
+        // 压缩后视频大小（字节）；在内层 try 下载成功后赋值，用于更新 DB 的 size 字段
+        let compressedSize = 0;
+        // MPS 输出文件 URL（转码完成后保存在此变量，用于后续清理）
+        let mpsOutputUrl = '';
 
         if (result.status === 'done' && result.outputUrl) {
           // 转码完成,下载输出视频并上传到项目 OSS
           console.log(`[MPS] 转码完成: ${taskId}, 输出 URL: ${result.outputUrl}`);
+          mpsOutputUrl = result.outputUrl;
 
           try {
             // P2-4：MPS 输出 URL 在私有 bucket 下不可直接访问，需先签名再下载
@@ -2801,17 +3032,22 @@ app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
             }
             const arrayBuffer = await response.arrayBuffer();
             const buffer = Buffer.from(arrayBuffer);
+            compressedSize = buffer.length;
 
-            // 上传到项目 OSS
+            // 上传到项目 OSS（参考视频放 project-references，分镜视频放 videos）
             const ossConfig = aliyunVideo.getOSSConfig();
             const ext = 'mp4';
             const fileName = `transcode-${Date.now()}-${Math.random().toString(36).substr(2, 8)}.${ext}`;
-            const folder = task.options && task.options.projectId ? `projects/${task.options.projectId}/videos` : 'projects/default/videos';
+            const isReference = task.options && task.options.reference;
+            const folder = task.options && task.options.projectId
+              ? (isReference ? `projects/${task.options.projectId}/project-references` : `projects/${task.options.projectId}/videos`)
+              : (isReference ? 'projects/default/project-references' : 'projects/default/videos');
             const ossKey = `${folder}/${fileName}`;
 
             if (isOSSConfigured && ossClient) {
               const ossResult = await ossClient.put(ossKey, buffer);
               updates.outputUrl = ossResult.url;
+              isOurOssOutput = true;
               console.log(`[MPS] 转码视频已上传到 OSS: ${ossKey}`);
             } else {
               // 如果 OSS 未配置,使用 MPS 输出的 URL
@@ -2827,6 +3063,109 @@ app.get('/api/video2/aliyun/transcode/:taskId', async (req, res) => {
         if (result.status === 'error') {
           updates.error = result.error;
           console.error(`[MPS] 转码失败: ${taskId}, error: ${result.error}`);
+        }
+
+        // 转码成功：更新 videos/shot_media 行的 url 和 size，并删除 OSS 原始文件 + MPS 输出文件
+        if (updates.outputUrl && task.videoUrl && updates.outputUrl !== task.videoUrl) {
+          // 心跳检查：若用户已离开（超过 5 分钟未查询状态），清理所有 OSS 文件，不写 DB
+          const lastQueriedAt = task.lastQueriedAt ? new Date(task.lastQueriedAt).getTime() : Date.now();
+          const lastQueryAge = Date.now() - lastQueriedAt;
+          if (lastQueryAge > HEARTBEAT_TIMEOUT_MS) {
+            console.log(`[MPS] 用户已离开（${Math.round(lastQueryAge / 1000 / 60)}分钟未查询），清理孤儿任务 OSS 文件: ${taskId}`);
+            // 清理新上传到项目 OSS 的转码文件
+            if (isOurOssOutput && updates.outputUrl) {
+              try {
+                await deleteStandaloneOssFile(updates.outputUrl);
+                console.log('[MPS] 孤儿任务：已清理新转码 OSS 文件:', updates.outputUrl);
+              } catch (e) { console.warn('[MPS] 孤儿任务：清理新转码 OSS 文件失败:', e.message); }
+            }
+            // 清理 MPS 输出文件
+            if (mpsOutputUrl && mpsOutputUrl !== task.videoUrl && mpsOutputUrl !== updates.outputUrl) {
+              try {
+                await deleteOssFile(mpsOutputUrl);
+                console.log('[MPS] 孤儿任务：已清理 MPS 输出文件:', mpsOutputUrl);
+              } catch (e) { console.warn('[MPS] 孤儿任务：清理 MPS 输出文件失败:', e.message); }
+            }
+            // 清理原始 OSS 源文件
+            try {
+              await deleteOssFileIfNotReferenced(task.videoUrl);
+              console.log('[MPS] 孤儿任务：已清理原始 OSS 文件:', task.videoUrl);
+            } catch (e) { console.warn('[MPS] 孤儿任务：清理原始 OSS 文件失败:', e.message); }
+            // 标记任务为已取消，跳过 DB 写入
+            updates.status = 'cancelled';
+            updates.error = '用户已离开，任务已取消';
+            await db.video2TranscodeTasks.update(taskId, updates);
+            task = await db.video2TranscodeTasks.get(taskId);
+            res.json({
+              success: false,
+              status: 'cancelled',
+              message: '用户已离开，任务已取消',
+              outputUrl: null,
+              url: null,
+              error: '用户已离开，任务已取消'
+            });
+            return;
+          }
+
+          try {
+            // 更新前先查出 oldUrl 对应的 videos 行 id，用于删除时排除自身（避免 coverUrl 误判阻止删除）
+            const videoRows = await db.video2Async.all(
+              'SELECT id FROM videos WHERE url = ?', [task.videoUrl]
+            );
+            await db.video2Items.updateMediaUrlAndSize(task.videoUrl, updates.outputUrl, compressedSize);
+            console.log(`[MPS] 已更新媒体记录: ${task.videoUrl} → ${updates.outputUrl}, size=${compressedSize}`);
+
+            // 删除原始 OSS 源文件：排除刚更新的 videos 行，避免 coverUrl 字段误判
+            let sourceDeleted = false;
+            if (videoRows.length > 0) {
+              for (const row of videoRows) {
+                const stillRef = await isUrlReferenced(task.videoUrl, { excludeVideoId: row.id });
+                if (!stillRef) {
+                  await deleteOssFile(task.videoUrl);
+                  console.log(`[MPS] 已删除原始 OSS 文件: ${task.videoUrl}`);
+                  sourceDeleted = true;
+                  break;
+                }
+              }
+            } else {
+              await deleteOssFileIfNotReferenced(task.videoUrl);
+              sourceDeleted = true;
+            }
+            if (!sourceDeleted) {
+              console.log(`[MPS] 原始 OSS 文件仍被引用，跳过删除: ${task.videoUrl}`);
+            }
+
+            // 清理 MPS 输出文件（已下载并重新上传到项目 OSS，MPS 输出文件不再需要）
+            if (mpsOutputUrl && mpsOutputUrl !== task.videoUrl && mpsOutputUrl !== updates.outputUrl) {
+              try {
+                await deleteOssFile(mpsOutputUrl);
+                console.log(`[MPS] 已清理 MPS 输出文件: ${mpsOutputUrl}`);
+              } catch (e) {
+                console.warn('[MPS] 清理 MPS 输出文件失败:', e.message);
+              }
+            }
+          } catch (e) {
+            console.error('[MPS] 更新媒体记录或删除原文件失败:', e.message);
+            // DB 更新失败：清理新上传到项目 OSS 的转码文件，避免残留
+            // DB 仍指向旧 URL（task.videoUrl），旧文件保留；新文件（updates.outputUrl）无 DB 引用，需清理
+            if (isOurOssOutput && updates.outputUrl) {
+              try {
+                await deleteStandaloneOssFile(updates.outputUrl);
+                console.log('[MPS] DB 更新失败，已清理新转码 OSS 文件:', updates.outputUrl);
+              } catch (cleanupErr) {
+                console.error('[MPS] 清理新转码 OSS 文件失败:', cleanupErr.message);
+              }
+            }
+            // DB 更新失败时也尝试清理 MPS 输出文件
+            if (mpsOutputUrl && mpsOutputUrl !== task.videoUrl && mpsOutputUrl !== updates.outputUrl) {
+              try {
+                await deleteOssFile(mpsOutputUrl);
+                console.log('[MPS] DB 更新失败，已清理 MPS 输出文件:', mpsOutputUrl);
+              } catch (e2) {
+                console.warn('[MPS] 清理 MPS 输出文件失败:', e2.message);
+              }
+            }
+          }
         }
 
         await db.video2TranscodeTasks.update(taskId, updates);
@@ -3579,6 +3918,13 @@ app.put('/api/video2/projects/:id', async (req, res) => {
       description: description !== undefined ? description : undefined,
       coverUrl: coverUrl !== undefined ? coverUrl : undefined
     });
+    if (coverUrl !== undefined) {
+      const oldCoverUrl = existing.coverUrl || '';
+      if (oldCoverUrl && oldCoverUrl !== coverUrl) {
+        try { await deleteStandaloneOssFile(oldCoverUrl); }
+        catch (e) { console.error('[video2] 清理旧封面 OSS 失败:', e.message); }
+      }
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[video2] 更新项目失败:', error.message);
@@ -3732,11 +4078,26 @@ app.delete('/api/video2/projects/:id', async (req, res) => {
           allUrls.push(project.coverUrl);
         }
 
+        // 收集转码任务中的 videoUrl 和 outputUrl（含 MPS 输出文件，避免孤立残留）
+        try {
+          const transcodeRows = await db.video2Async.all(
+            'SELECT videoUrl, outputUrl FROM transcode_tasks WHERE projectId = ? OR options LIKE ?',
+            [id, `%"projectId":${id}%`]
+          );
+          for (const row of transcodeRows) {
+            if (row.videoUrl) allUrls.push(row.videoUrl);
+            if (row.outputUrl) allUrls.push(row.outputUrl);
+          }
+        } catch (e) {
+          console.error('[video2] 收集转码任务 URL 失败:', e.message);
+        }
+
         task.message = '正在删除场景和项目...';
         task.progress = 92;
         deleteProjectTasks.set(taskId, task);
 
         await db.video2Async.run('DELETE FROM scenes WHERE projectId = ?', [id]);
+        await db.video2Async.run('DELETE FROM transcode_tasks WHERE projectId = ? OR options LIKE ?', [id, `%"projectId":${id}%`]);
         await db.video2Async.run('DELETE FROM projects WHERE id = ?', [id]);
 
         task.message = '正在清理云端文件...';
@@ -3853,11 +4214,16 @@ app.put('/api/video2/projects/:projectId/assets/:id', async (req, res) => {
     if (asset.projectId !== projectId) {
       return res.status(400).json({ success: false, message: '数字资产不属于该项目' });
     }
+    const oldImageUrl = asset.imageUrl || '';
     await db.video2DigitalAssets.update(id, {
       name: name !== undefined ? name.trim() : undefined,
       imagePrompt: imagePrompt !== undefined ? imagePrompt : undefined,
       imageUrl: imageUrl !== undefined ? imageUrl : undefined
     });
+    if (imageUrl !== undefined && oldImageUrl && oldImageUrl !== imageUrl) {
+      try { await deleteStandaloneOssFile(oldImageUrl); }
+      catch (e) { console.error('[video2] 清理旧资产主图 OSS 失败:', e.message); }
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[video2] 更新数字资产失败:', error.message);
@@ -4204,36 +4570,49 @@ app.post('/api/video2/upload/image', upload.single('file'), async (req, res) => 
       console.log(`[video2] 图片本地上传: ${fileName}`);
     }
     let item;
-    if (createShot && projectId) {
-      const shot = await db.video2Items.createShot({
-        projectId: parseInt(projectId),
-        sceneId: sceneId ? parseInt(sceneId) : null,
-        sceneContent: title,
-        status: 'pending',
-        type: 'image',
-        filename: fileName,
-        url: fileUrl,
-        size: req.file.size,
-      });
-      await db.video2ShotMedia.create({
-        shotId: shot.id,
-        url: fileUrl,
-        type: 'image',
-        filename: fileName,
-        size: req.file.size,
-        source: reference ? 'reference' : 'upload'
-      });
-      item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: fileName, isShot: true };
-    } else {
-      item = await db.video2Items.create({
-        title, filename: fileName, url: fileUrl,
-        size: req.file.size,
-        status: 'pending',
-        projectId: projectId ? parseInt(projectId) : null,
-        sceneId: sceneId ? parseInt(sceneId) : null,
-        type: 'image',
-        reference: reference ? 1 : 0
-      });
+    try {
+      if (createShot && projectId) {
+        const shot = await db.video2Items.createShot({
+          projectId: parseInt(projectId),
+          sceneId: sceneId ? parseInt(sceneId) : null,
+          sceneContent: title,
+          status: 'pending',
+          type: 'image',
+          filename: fileName,
+          url: fileUrl,
+          size: fileBuffer.length,
+        });
+        await db.video2ShotMedia.create({
+          shotId: shot.id,
+          url: fileUrl,
+          type: 'image',
+          filename: fileName,
+          size: fileBuffer.length,
+          source: reference ? 'reference' : 'upload'
+        });
+        item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: fileName, isShot: true };
+      } else {
+        item = await db.video2Items.create({
+          title, filename: fileName, url: fileUrl,
+          size: fileBuffer.length,
+          status: 'pending',
+          projectId: projectId ? parseInt(projectId) : null,
+          sceneId: sceneId ? parseInt(sceneId) : null,
+          type: 'image',
+          reference: reference ? 1 : 0
+        });
+      }
+    } catch (dbError) {
+      // DB 写入失败：清理已上传的 OSS 文件，避免残留
+      if (fileUrl && fileUrl.startsWith('http')) {
+        try {
+          await deleteStandaloneOssFile(fileUrl);
+          console.log('[video2] 图片 DB 写入失败，已清理 OSS 文件:', fileUrl);
+        } catch (e) {
+          console.warn('[video2] 清理 OSS 文件失败:', e.message);
+        }
+      }
+      throw dbError;
     }
     if (projectId && !reference) {
       trySetProjectCoverIfDefault(parseInt(projectId), fileUrl, 'image').catch(() => {});
@@ -4468,7 +4847,8 @@ app.post('/api/video2/upload/video', upload.single('file'), async (req, res) => 
       createShot: req.body && req.body.createShot ? true : false,
       title: req.body && req.body.title ? req.body.title : null,
       fileSize: req.file.size,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      lastQueriedAt: Date.now()  // 心跳：前端查询状态时刷新，用于检测孤儿任务
     });
     res.json({ taskId, status: 'queued' });
 
@@ -4556,44 +4936,92 @@ app.post('/api/video2/upload/video', upload.single('file'), async (req, res) => 
           task.ossKey = '';
         }
 
+        // 用户取消上传：清理已上传的 OSS 文件，跳过 DB 写入
+        if (task.cancelled) {
+          if (fileUrl && fileUrl.startsWith('http')) {
+            try {
+              await deleteStandaloneOssFile(fileUrl);
+              console.log('[video2] 任务已取消，清理 OSS 文件:', fileUrl);
+            } catch (e) {
+              console.warn('[video2] 取消后清理 OSS 失败:', e.message);
+            }
+          }
+          task.status = 'cancelled';
+          task.message = '已取消';
+          video2VideoTasks.set(taskId, task);
+          scheduleTaskCleanup(video2VideoTasks, taskId);
+          return;
+        }
+
         task.uploadProgress = 100;
         task.status = 'done';
         task.message = '上传成功';
         task.result = { url: fileUrl, compressed, fileName: task.fileName, ossKey: task.ossKey, fileSize: task.fileSize };
 
+        // 心跳检查：若用户已离开（超过 5 分钟未查询状态），清理 OSS 文件，不写 DB
+        const lastQueryAge = Date.now() - (task.lastQueriedAt || task.createdAt || Date.now());
+        if (lastQueryAge > HEARTBEAT_TIMEOUT_MS) {
+          console.log(`[video2] 用户已离开（${Math.round(lastQueryAge / 1000 / 60)}分钟未查询），清理 OSS 文件: ${fileUrl}`);
+          if (fileUrl && fileUrl.startsWith('http')) {
+            try {
+              await deleteStandaloneOssFile(fileUrl);
+              console.log('[video2] 孤儿任务 OSS 文件已清理:', fileUrl);
+            } catch (e) {
+              console.warn('[video2] 清理孤儿任务 OSS 文件失败:', e.message);
+            }
+          }
+          task.message = '用户已离开，任务已取消';
+          video2VideoTasks.set(taskId, task);
+          scheduleTaskCleanup(video2VideoTasks, taskId);
+          return;
+        }
+
         let item;
-        if (task.createShot && task.projectId) {
-          const shot = await db.video2Items.createShot({
-            projectId: task.projectId,
-            sceneId: task.sceneId,
-            sceneContent: task.title || task.fileName,
-            status: 'pending',
-            type: 'video',
-            filename: task.fileName,
-            url: fileUrl,
-            size: task.fileSize,
-          });
-          await db.video2ShotMedia.create({
-            shotId: shot.id,
-            url: fileUrl,
-            type: 'video',
-            filename: task.fileName,
-            size: task.fileSize,
-            source: task.reference ? 'reference' : 'upload'
-          });
-          item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: task.fileName, isShot: true };
-        } else {
-          item = await db.video2Items.create({
-            title: task.title || task.fileName,
-            filename: task.fileName,
-            url: fileUrl,
-            size: task.fileSize,
-            status: 'pending',
-            projectId: task.projectId,
-            sceneId: task.sceneId,
-            type: 'video',
-            reference: task.reference
-          });
+        try {
+          if (task.createShot && task.projectId) {
+            const shot = await db.video2Items.createShot({
+              projectId: task.projectId,
+              sceneId: task.sceneId,
+              sceneContent: task.title || task.fileName,
+              status: 'pending',
+              type: 'video',
+              filename: task.fileName,
+              url: fileUrl,
+              size: task.fileSize,
+            });
+            await db.video2ShotMedia.create({
+              shotId: shot.id,
+              url: fileUrl,
+              type: 'video',
+              filename: task.fileName,
+              size: task.fileSize,
+              source: task.reference ? 'reference' : 'upload'
+            });
+            item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: task.fileName, isShot: true };
+          } else {
+            item = await db.video2Items.create({
+              title: task.title || task.fileName,
+              filename: task.fileName,
+              url: fileUrl,
+              size: task.fileSize,
+              status: 'pending',
+              projectId: task.projectId,
+              sceneId: task.sceneId,
+              type: 'video',
+              reference: task.reference
+            });
+          }
+        } catch (dbError) {
+          // DB 写入失败：清理已上传的 OSS 文件，避免残留
+          if (fileUrl && fileUrl.startsWith('http')) {
+            try {
+              await deleteStandaloneOssFile(fileUrl);
+              console.log('[video2] 视频 DB 写入失败，已清理 OSS 文件:', fileUrl);
+            } catch (e) {
+              console.warn('[video2] 清理 OSS 文件失败:', e.message);
+            }
+          }
+          throw dbError;
         }
         if (task.projectId && !task.reference) {
           trySetProjectCoverIfDefault(task.projectId, fileUrl, 'video').catch(() => {});
@@ -4629,6 +5057,8 @@ app.post('/api/video2/upload/video', upload.single('file'), async (req, res) => 
 app.get('/api/video2/upload/status/:taskId', async (req, res) => {
   const task = video2VideoTasks.get(req.params.taskId);
   if (!task) return res.status(404).json({ status: 'not_found' });
+  // 心跳：前端查询时刷新，用于完成时检测用户是否仍在线
+  task.lastQueriedAt = Date.now();
   res.json({
     status: task.status,
     progress: task.progress,
@@ -4637,6 +5067,53 @@ app.get('/api/video2/upload/status/:taskId', async (req, res) => {
     error: task.error,
     errorCode: task.errorCode || null
   });
+});
+
+// 取消上传任务：标记任务为已取消；若任务已完成（OSS + DB），清理残留记录和文件
+// 由前端在用户取消上传时调用，避免后端异步任务完成后遗留孤儿文件
+app.post('/api/video2/upload/cancel/:taskId', async (req, res) => {
+  try {
+    const task = video2VideoTasks.get(req.params.taskId);
+    if (!task) {
+      return res.json({ success: true, message: '任务不存在或已清理' });
+    }
+    task.cancelled = true;
+
+    // 如果任务已完成（OSS 上传 + DB 写入），清理 DB 记录 + OSS 文件
+    if (task.status === 'done' && task.result && task.result.url) {
+      const fileUrl = task.result.url;
+      console.log(`[video2] 取消已完成任务，清理: ${fileUrl}`);
+      try {
+        // 删除 shot_media 行
+        const mediaRows = await db.video2Async.all(
+          'SELECT shotId FROM shot_media WHERE url = ?',
+          [fileUrl]
+        );
+        const shotIds = mediaRows.map(r => r.shotId).filter(Boolean);
+        await db.video2Async.run('DELETE FROM shot_media WHERE url = ?', [fileUrl]);
+        // 删除因上一步而变得无媒体的 shots
+        if (shotIds.length > 0) {
+          const placeholders = shotIds.map(() => '?').join(',');
+          await db.video2Async.run(
+            `DELETE FROM shots WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
+            shotIds
+          );
+        }
+        // 删除 videos 行
+        await db.video2Async.run('DELETE FROM videos WHERE url = ?', [fileUrl]);
+        // 删除 OSS 文件
+        await deleteOssFileIfNotReferenced(fileUrl);
+        console.log(`[video2] 已清理取消任务的残留: ${fileUrl}`);
+      } catch (e) {
+        console.error('[video2] 清理已取消任务失败:', e.message);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[video2] 取消上传任务失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 // P2-11：清理视频分割对话框未使用的孤儿视频（用户上传后未分割就关闭）
@@ -4655,113 +5132,6 @@ app.delete('/api/video2/upload/orphan', async (req, res) => {
   }
 });
 
-app.post('/api/video2/upload/from-url', async (req, res) => {
-  try {
-    const { url, type, projectId, sceneId, title, reference } = req.body;
-    if (!url) return res.status(400).json({ success: false, message: '缺少 url' });
-
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return res.status(400).json({ success: false, message: 'URL 格式无效' });
-    }
-    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-      return res.status(400).json({ success: false, message: '仅支持 HTTP/HTTPS 链接' });
-    }
-
-    // SSRF 防护：解析主机名，禁止指向内网/环回/链路本地/保留地址
-    // （云元数据 169.254.169.254、本机 127.0.0.1、内网 10/192.168/172.16-31、CGNAT 100.64/8 等）
-    const dns = require('dns').promises;
-    const isPrivateIp = (ip) => {
-      if (!ip) return true;
-      if (/^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip)) return true;
-      if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-      if (/^169\.254\./.test(ip) || /^0\./.test(ip) || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true;
-      if (/^::1$/.test(ip) || /^fe80/i.test(ip) || /^fc00/i.test(ip) || /^fd/i.test(ip)) return true;
-      return false;
-    };
-    try {
-      const addresses = await dns.resolve4(parsedUrl.hostname);
-      if (addresses.length === 0 || addresses.some(isPrivateIp)) {
-        return res.status(400).json({ success: false, message: '禁止访问内网地址' });
-      }
-    } catch (e) {
-      // DNS 解析失败也拒绝（避免依赖外部 DNS 的 SSRF）
-      return res.status(400).json({ success: false, message: '目标地址解析失败' });
-    }
-
-    let probeOk = false;
-    let detectedType = null;
-    let probeError = null;
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      const probe = await fetch(url, {
-        method: 'HEAD',
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (probe.ok) {
-        probeOk = true;
-        const contentType = probe.headers.get('content-type') || '';
-        if (contentType.startsWith('image/')) detectedType = 'image';
-        else if (contentType.startsWith('video/')) detectedType = 'video';
-      } else {
-        probeError = `HTTP ${probe.status}`;
-      }
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        probeError = '探测超时';
-      } else {
-        probeError = err.message;
-      }
-    }
-
-    if (!probeOk) {
-      return res.status(400).json({ success: false, message: `URL 无法访问：${probeError || '未知错误'}` });
-    }
-
-    const actualType = type === 'image' ? 'image' : (detectedType || 'video');
-    const folder = projectId ? `projects/${projectId}/${actualType}s` : `projects/default/${actualType}s`;
-    const ext = (url.split('.').pop() || '').split('?')[0] || (actualType === 'image' ? 'jpg' : 'mp4');
-    const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 8)}.${ext}`;
-
-    let fileUrl = '';
-    if (isOSSConfigured && ossClient) {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`无法下载远程文件: HTTP ${response.status}`);
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const ossKey = `${folder}/${fileName}`;
-      console.log(`[video2] URL 转存到 OSS (${folder}): ${url}`);
-      const result = await ossClient.put(ossKey, buffer);
-      fileUrl = result.url;
-      console.log(`[video2] URL 转存成功: ${url} -> ${ossKey}`);
-    } else {
-      fileUrl = url;
-    }
-
-    const item = await db.video2Items.create({
-      title: title || fileName,
-      filename: fileName,
-      url: fileUrl,
-      status: 'pending',
-      projectId: projectId ? parseInt(projectId) : null,
-      sceneId: sceneId ? parseInt(sceneId) : null,
-      type: actualType,
-      reference: reference ? 1 : 0
-    });
-    if (projectId && !reference) {
-      trySetProjectCoverIfDefault(parseInt(projectId), fileUrl, actualType).catch(() => {});
-    }
-    res.json({ success: true, url: fileUrl, id: item.id, filename: fileName, type: actualType });
-  } catch (error) {
-    console.error('[video2] URL 转存失败:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
 app.put('/api/video2/projects/:id/cover', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -4769,7 +5139,18 @@ app.put('/api/video2/projects/:id/cover', async (req, res) => {
     if (!coverUrl) return res.status(400).json({ success: false, message: 'coverUrl 不能为空' });
     const project = await db.video2Projects.getById(id);
     if (!project) return res.status(404).json({ success: false, message: '项目不存在' });
+    const oldCoverUrl = project.coverUrl || '';
     await db.video2Projects.update(id, { coverUrl });
+    if (oldCoverUrl && oldCoverUrl !== coverUrl) {
+      try {
+        await db.video2Async.run(
+          'DELETE FROM videos WHERE reference = 1 AND type = ? AND url = ? AND projectId = ?',
+          ['image', oldCoverUrl, id]
+        );
+      } catch (e) { console.error('[video2] 清理旧封面 videos 行失败:', e.message); }
+      try { await deleteStandaloneOssFile(oldCoverUrl); }
+      catch (e) { console.error('[video2] 清理旧封面 OSS 失败:', e.message); }
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[video2] 更新项目封面失败:', error.message);
@@ -4782,7 +5163,20 @@ app.delete('/api/video2/projects/:id/cover', async (req, res) => {
     const id = parseInt(req.params.id);
     const project = await db.video2Projects.getById(id);
     if (!project) return res.status(404).json({ success: false, message: '项目不存在' });
+    const oldCoverUrl = project.coverUrl || '';
     await db.video2Projects.update(id, { coverUrl: '' });
+    if (oldCoverUrl) {
+      // 先删上传封面图对应的 videos 行（reference=1, type='image'），
+      // 使 isUrlReferenced 不再计数该行，从而允许 OSS 文件被删除
+      try {
+        await db.video2Async.run(
+          'DELETE FROM videos WHERE reference = 1 AND type = ? AND url = ? AND projectId = ?',
+          ['image', oldCoverUrl, id]
+        );
+      } catch (e) { console.error('[video2] 删除封面 videos 行失败:', e.message); }
+      try { await deleteStandaloneOssFile(oldCoverUrl); }
+      catch (e) { console.error('[video2] 删除封面 OSS 失败:', e.message); }
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[video2] 删除项目封面失败:', error.message);
@@ -4926,7 +5320,13 @@ app.put('/api/video2/videos/:id/set-cover', async (req, res) => {
     if (item.type !== 'image' && coverUrl && (coverUrl.includes('aliyuncs.com') || coverUrl.includes('qiziwenhua.top'))) {
       coverUrl = coverUrl + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
     }
+    const project = await db.video2Projects.getById(item.projectId);
+    const oldCoverUrl = project?.coverUrl || '';
     const ok = await db.video2Items.setCoverWithProject(item.projectId, id, coverUrl);
+    if (oldCoverUrl && oldCoverUrl !== coverUrl) {
+      try { await deleteStandaloneOssFile(oldCoverUrl); }
+      catch (e) { console.error('[video2] 清理旧封面 OSS 失败:', e.message); }
+    }
     res.json({ success: true, coverUrl });
   } catch (error) {
     console.error('[video2] 设置封面失败:', error.message);
@@ -5038,6 +5438,88 @@ app.use((err, req, res, next) => {
     error: errorMessage
   });
 });
+
+// ========== 孤儿任务兜底扫描 ==========
+// 每 10 分钟扫描一次：清理用户已离开（超过 30 分钟未查询）的 pending/processing 任务
+// 覆盖场景：用户关闭浏览器后，后端异步任务完成但无人查询 → OSS 文件残留
+async function cleanupOrphanTasks() {
+  const now = Date.now();
+
+  // 1. 扫描内存中的视频上传任务（服务器压缩路径）
+  for (const [taskId, task] of video2VideoTasks.entries()) {
+    if (task.status !== 'processing') continue;
+    const lastQueryAge = now - (task.lastQueriedAt || task.createdAt || now);
+    if (lastQueryAge > ORPHAN_TASK_TIMEOUT_MS) {
+      console.log(`[orphan-scan] 发现孤儿上传任务: ${taskId}, ${Math.round(lastQueryAge / 1000 / 60)}分钟未查询`);
+      // 若任务已有 OSS URL，尝试清理
+      if (task.result && task.result.url && task.result.url.startsWith('http')) {
+        try {
+          await deleteStandaloneOssFile(task.result.url);
+          console.log(`[orphan-scan] 已清理孤儿任务 OSS 文件: ${task.result.url}`);
+        } catch (e) {
+          console.warn(`[orphan-scan] 清理孤儿任务 OSS 文件失败: ${e.message}`);
+        }
+      }
+      task.status = 'cancelled';
+      task.message = '孤儿任务已清理（用户长时间未查询）';
+      task.error = '用户已离开，任务已取消';
+      scheduleTaskCleanup(video2VideoTasks, taskId);
+    }
+  }
+
+  // 2. 扫描 transcode_tasks 表（阿里云 MPS 转码路径）
+  try {
+    const pendingTasks = await db.video2TranscodeTasks.getPendingAndProcessing();
+    for (const task of pendingTasks) {
+      const lastQueriedAt = task.lastQueriedAt ? new Date(task.lastQueriedAt).getTime() : task.createdAt ? new Date(task.createdAt).getTime() : now;
+      const lastQueryAge = now - lastQueriedAt;
+      if (lastQueryAge > ORPHAN_TASK_TIMEOUT_MS) {
+        console.log(`[orphan-scan] 发现孤儿转码任务: ${task.id}, ${Math.round(lastQueryAge / 1000 / 60)}分钟未查询`);
+        // 清理 OSS 原始文件
+        if (task.videoUrl) {
+          try {
+            await deleteOssFileIfNotReferenced(task.videoUrl);
+            console.log(`[orphan-scan] 已清理原始 OSS 文件: ${task.videoUrl}`);
+          } catch (e) {
+            console.warn(`[orphan-scan] 清理原始 OSS 文件失败: ${e.message}`);
+          }
+        }
+        // 清理转码输出文件
+        if (task.outputUrl && task.outputUrl !== task.videoUrl) {
+          try {
+            await deleteStandaloneOssFile(task.outputUrl);
+            console.log(`[orphan-scan] 已清理输出 OSS 文件: ${task.outputUrl}`);
+          } catch (e) {
+            console.warn(`[orphan-scan] 清理输出 OSS 文件失败: ${e.message}`);
+          }
+        }
+        // 清理 videos 表记录
+        if (task.videoUrl) {
+          try {
+            await db.video2Async.run('DELETE FROM videos WHERE url = ?', [task.videoUrl]);
+          } catch (e) { console.warn(`[orphan-scan] 清理 videos 记录失败: ${e.message}`); }
+        }
+        // 标记任务为已取消
+        try {
+          await db.video2TranscodeTasks.update(task.id, {
+            status: 'cancelled',
+            error: '孤儿任务已清理（用户长时间未查询）'
+          });
+        } catch (e) {
+          console.warn(`[orphan-scan] 更新转码任务状态失败: ${e.message}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[orphan-scan] 扫描 transcode_tasks 失败:', e.message);
+  }
+}
+
+// 启动定时扫描（每 10 分钟一次）
+setInterval(cleanupOrphanTasks, 10 * 60 * 1000);
+// 启动后 1 分钟执行一次首次扫描，清理上次服务重启前遗留的孤儿任务
+setTimeout(cleanupOrphanTasks, 60 * 1000);
+console.log('[orphan-scan] 孤儿任务扫描已启动（每 10 分钟一次）');
 
 const server = app.listen(port, () => {
   console.log(`Video2 server running on http://localhost:${port}`);

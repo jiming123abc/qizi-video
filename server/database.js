@@ -593,6 +593,12 @@ function initVideo2Database() {
     `);
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_status ON transcode_tasks(status)');
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_project ON transcode_tasks(projectId)');
+    // 心跳字段：前端最后一次查询状态的时间，用于检测孤儿任务（用户已离开）
+    video2Db.run('ALTER TABLE transcode_tasks ADD COLUMN lastQueriedAt DATETIME', function(err) {
+      if (err && String(err.message).indexOf('duplicate column name') === -1) {
+        console.error('[video2] ALTER TABLE transcode_tasks.lastQueriedAt 失败:', err.message);
+      }
+    });
 
     // ========== digital_assets 表（数字资产：演员/道具/场景） ==========
     video2Db.run(`
@@ -692,94 +698,24 @@ function initVideo2Database() {
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_scene ON videos(sceneId)');
     video2Db.run('CREATE INDEX IF NOT EXISTS idx_scenes_project ON scenes(projectId)');
 
-    // 6. 迁移：sortOrder 回填 + 默认项目创建 + 分镜数据迁移
-    //    用最后一条 run() 的回调确保所有上述 DDL 已完成
+    // 6. 初始化系统设置（首次启动插入默认值，已存在则跳过）
     video2Db.get('SELECT 1 as ok', function(_err, _row) {
-      // 先确保 sortOrder 有值
-      video2Db.get('SELECT COUNT(*) as cnt FROM videos WHERE sortOrder IS NULL', function(err2, r) {
-        if (!err2 && r && r.cnt > 0) {
-          fillSortOrder();
-        }
-        // 迁移默认项目
-        migrateDefaultProject(function() {
-          // 分镜升级数据迁移
-          migrateShotData(function() {
-            // 初始化系统设置
-            initDefaultSettings(function() {
-              video2DbSetReady();
-            });
-          });
-        });
+      initDefaultSettings(function() {
+        video2DbSetReady();
       });
     });
   });
 }
 
-function fillSortOrder() {
-  video2Db.all('SELECT id FROM videos ORDER BY createdAt ASC, id ASC', function(err2, rows) {
-    if (err2) {
-      console.error('[video2] 查询视频列表失败:', err2.message);
-      return;
-    }
-    (rows || []).forEach(function(r, i) {
-      video2Db.run('UPDATE videos SET sortOrder = ? WHERE id = ?', [i, r.id]);
-    });
-    console.log('[video2] sortOrder 填充完成，共 ' + (rows ? rows.length : 0) + ' 条');
-  });
-}
-
-// ========== 分镜数据迁移 ==========
-function migrateShotData(callback) {
-  // 1. 将 title 迁移到 sceneContent
-  video2Db.run(
-    'UPDATE videos SET sceneContent = title WHERE sceneContent IS NULL OR sceneContent = ?',
-    [''],
-    function(err) {
-      if (err) console.error('[video2] 迁移 sceneContent 失败:', err.message);
-      else if (this.changes > 0) console.log('[video2] 已迁移 sceneContent: ' + this.changes + ' 条');
-    }
-  );
-
-  // 2. 将有 url 的视频迁移到 shot_media 表
+// 重新计算指定项目内分镜的 shotIndex（按需触发，仅重算单个项目，避免全表扫描）
+function recalcShotIndex(callback, projectId) {
+  const whereClause = projectId != null
+    ? 'WHERE deleted = 0 AND projectId = ?'
+    : 'WHERE deleted = 0';
+  const params = projectId != null ? [projectId] : [];
   video2Db.all(
-    "SELECT id, url, type, filename, size, duration FROM videos WHERE url IS NOT NULL AND url != ''",
-    function(err, rows) {
-      if (err) {
-        console.error('[video2] 查询待迁移视频失败:', err.message);
-        callback && callback();
-        return;
-      }
-
-      // 检查是否已经迁移过
-      video2Db.get('SELECT COUNT(*) as cnt FROM shot_media', function(err2, r) {
-        if (!err2 && r && r.cnt === 0 && rows && rows.length > 0) {
-          let migrated = 0;
-          const stmt = video2Db.prepare(
-            'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, 0, \'upload\')'
-          );
-          rows.forEach(function(row) {
-            if (row.url) {
-              stmt.run(row.id, row.url, row.type || 'video', row.filename || '', row.size || 0, row.duration || null, function(err3) {
-                if (!err3) migrated++;
-              });
-            }
-          });
-          stmt.finalize(function() {
-            console.log('[video2] 已迁移 shot_media: ' + migrated + ' 条');
-            recalcShotIndex(callback);
-          });
-        } else {
-          recalcShotIndex(callback);
-        }
-      });
-    }
-  );
-}
-
-// 重新计算所有分镜的 shotIndex
-function recalcShotIndex(callback) {
-  video2Db.all(
-    'SELECT id, projectId, sceneId FROM videos WHERE deleted = 0 ORDER BY projectId ASC, sceneId ASC, sortOrder ASC, id ASC',
+    'SELECT id, projectId, sceneId FROM ' + 'videos ' + whereClause + ' ORDER BY projectId ASC, sceneId ASC, sortOrder ASC, id ASC',
+    params,
     function(err, rows) {
       if (err) {
         console.error('[video2] 计算 shotIndex 失败:', err.message);
@@ -804,7 +740,7 @@ function recalcShotIndex(callback) {
       });
 
       stmt.finalize(function() {
-        console.log('[video2] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条');
+        console.log('[video2] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条' + (projectId != null ? ' (projectId=' + projectId + ')' : ''));
         callback && callback();
       });
     }
@@ -875,44 +811,6 @@ function initDefaultSettings(callback) {
         }
       }
     });
-  });
-}
-
-function migrateDefaultProject(callback) {
-  video2Db.get('SELECT COUNT(*) as cnt FROM projects', function(err, row) {
-    if (err) {
-      console.error('[video2] 检查 projects 表失败:', err.message);
-      callback && callback();
-      return;
-    }
-    if (row && row.cnt === 0) {
-      // 插入"默认项目"
-      video2Db.run(
-        "INSERT INTO projects (name, description, sortOrder) VALUES ('默认项目', '自动创建的默认项目，所有历史视频归入此处', 0)",
-        function(insErr) {
-          if (insErr) {
-            console.error('[video2] 创建默认项目失败:', insErr.message);
-            callback && callback();
-            return;
-          }
-          const defaultProjectId = this.lastID;
-          video2Db.run(
-            'UPDATE videos SET projectId = ? WHERE projectId IS NULL',
-            [defaultProjectId],
-            function(upErr) {
-              if (upErr) {
-                console.error('[video2] 迁移历史视频到默认项目失败:', upErr.message);
-              } else {
-                console.log('[video2] 已创建默认项目(ID=' + defaultProjectId + ')，历史视频已迁移');
-              }
-              callback && callback();
-            }
-          );
-        }
-      );
-    } else {
-      callback && callback();
-    }
   });
 }
 
@@ -1044,6 +942,7 @@ const video2Projects = {
       const ah = aiHistMap.get(p.id) || { cnt: 0, totalSize: 0 };
       return {
         ...p,
+        shotCount: v.cnt,
         videoCount: v.cnt + r.cnt,
         totalSize: v.totalSize + r.totalSize + sm.totalSize + ai.totalSize + ah.totalSize
       };
@@ -1574,6 +1473,19 @@ const video2Items = {
     return r.changes > 0;
   },
 
+  // 压缩/转码完成后更新媒体 URL 和 size（用于阿里云 MPS 流程）
+  updateMediaUrlAndSize: async (oldUrl, newUrl, newSize) => {
+    const r1 = await video2Async.run(
+      'UPDATE videos SET url = ?, size = ?, updatedAt = CURRENT_TIMESTAMP WHERE url = ?',
+      [newUrl, newSize, oldUrl]
+    );
+    const r2 = await video2Async.run(
+      'UPDATE shot_media SET url = ?, size = ? WHERE url = ?',
+      [newUrl, newSize, oldUrl]
+    );
+    return { videosUpdated: r1.changes, mediaUpdated: r2.changes };
+  },
+
   // 分镜升级：创建空白分镜（无参考画面）
   createShot: async (item) => {
     // P4-2：用事务包裹 MAX+1 与 INSERT，防御并发请求分配到相同 sortOrder
@@ -1999,7 +1911,7 @@ const video2TranscodeTasks = {
   update: async (id, updates) => {
     const sets = [];
     const vals = [];
-    const fields = ['status', 'progress', 'outputUrl', 'outputObject', 'error'];
+    const fields = ['jobId', 'requestId', 'status', 'progress', 'outputUrl', 'outputObject', 'error', 'lastQueriedAt'];
     fields.forEach(f => {
       if (updates[f] !== undefined) {
         sets.push(f + ' = ?');
@@ -2022,7 +1934,7 @@ const video2TranscodeTasks = {
 // 辅助：Promise 版重新计算 shotIndex
 function recalcShotIndexPromise(projectId) {
   return new Promise(function(resolve) {
-    recalcShotIndex(resolve);
+    recalcShotIndex(resolve, projectId);
   });
 }
 

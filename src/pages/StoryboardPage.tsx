@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Link2, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
+import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
 import { uploadVideo2Video, detectFileType } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
@@ -27,7 +27,7 @@ import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
 
 // AI 组件
 import AIScriptDialog from '../components/ai/AIScriptDialog';
-import AIImageGenDialog from '../components/ai/AIImageGenDialog';
+import AIImageGenerateDialog from '../components/ai/AIImageGenerateDialog';
 import AIUsagePanel from '../components/ai/AIUsagePanel';
 
 // 设置组件
@@ -179,7 +179,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [renameSceneName, setRenameSceneName] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [dragShotId, setDragShotId] = useState<number | null>(null);
-  const [dragOverSceneForShot, setDragOverSceneForShot] = useState<number | null>(null);
+  const [dragOverSceneForShot, setDragOverSceneForShot] = useState<number | null | undefined>(undefined);
   const [isCreatingScene, setIsCreatingScene] = useState(false);
   const [isRenamingScene, setIsRenamingScene] = useState(false);
 
@@ -247,6 +247,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
   const [showMediaManager, setShowMediaManager] = useState(false);
   const [selectedShotForMedia, setSelectedShotForMedia] = useState<Shot | null>(null);
+  const [mediaRefreshTrigger, setMediaRefreshTrigger] = useState(0);
   const [selectedShotForAIGen, setSelectedShotForAIGen] = useState<Shot | null>(null);
   const [selectedVideoForSplit, setSelectedVideoForSplit] = useState<string | null>(null);
   const [showDigitalAssetDialog, setShowDigitalAssetDialog] = useState(false);
@@ -399,17 +400,10 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const {
     uploadingFiles,
     setUploadingFiles,
-    uploadTab,
-    setUploadTab,
-    urlInputValue,
-    setUrlInputValue,
-    urlError,
-    setUrlError,
     pendingCompressionVideo,
     pendingCompressionDecision,
     pendingCompressionFiles,
     handleUploadFiles,
-    handleUploadFromUrl,
     cancelUpload,
     handleCompressionDecision,
     aliyunConfigured,
@@ -775,13 +769,13 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     if (dragShotId === null) return;
     if (sceneId === currentSceneId) {
       setDragShotId(null);
-      setDragOverSceneForShot(null);
+      setDragOverSceneForShot(undefined);
       return;
     }
     await moveShotToScene(dragShotId, sceneId);
     await loadStats();
     setDragShotId(null);
-    setDragOverSceneForShot(null);
+    setDragOverSceneForShot(undefined);
   };
 
   // 将指定卡片滚动到可视区（垂直居中）
@@ -807,7 +801,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }
 
     setShowUploadDialog(true);
-    setUploadTab('file');
     const uploadId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
     setUploadingFiles([{
       id: uploadId,
@@ -877,24 +870,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }
   };
 
-  const handleUrlInputChange = (val: string) => {
-    setUrlInputValue(val);
-    if (val.trim()) {
-      try {
-        const u = new URL(val);
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-          setUrlError('仅支持 HTTP/HTTPS 链接');
-        } else {
-          setUrlError('');
-        }
-      } catch {
-        setUrlError('请输入有效的 URL 地址');
-      }
-    } else {
-      setUrlError('');
-    }
-  };
-
   // ============ 分享 ============
   const handleShare = async () => {
     const shareUrl = window.location.origin + `/share/video2/project/${projectId}`;
@@ -915,6 +890,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     } else {
       window.history.back();
     }
+  };
+
+  const handleAiGenerate = (s: Shot) => {
+    setSelectedShotForAIGen(s);
+    setShowAIImageGenDialog(true);
   };
 
   // ============ 分镜渲染 ============
@@ -990,13 +970,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       setFullscreenItem(media);
     };
 
-    const handleAiGenerate = (s: Shot) => {
-      setSelectedShotForAIGen(s);
-      setShowAIImageGenDialog(true);
-    };
-
     const handleSplitVideo = (s: Shot) => {
-      const videoUrl = s.type === 'video' ? s.url : (s.media?.find(m => m.type === 'video')?.url || '');
+      const videoUrl = s.media?.find(m => m.type === 'video')?.url || '';
       if (videoUrl) {
         setSelectedVideoForSplit(videoUrl);
         setShowVideoSplitDialog(true);
@@ -1127,7 +1102,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         <>
           {/* 顶部栏 */}
       <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/80 border-b border-white/10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center gap-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2 sm:py-3 flex items-center gap-3">
           <button
             onClick={backToProjectList}
             className="w-9 h-9 rounded-full border border-white/20 bg-white/5 hover:bg-white/10 flex items-center justify-center transition"
@@ -1314,7 +1289,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         </div>
 
         {/* 场次 Tab 栏（sticky 常驻顶部） */}
-        <div className="sticky top-0 z-20 bg-gradient-to-br from-slate-900 via-violet-950/50 to-pink-950/30 pt-2 pb-1">
+        <div className="sticky top-0 z-20 bg-gradient-to-br from-slate-900 via-violet-950/50 to-pink-950/30 pt-1 pb-0">
           <SceneTabs
             scenes={scenes}
             sortedScenes={sortedScenes}
@@ -1352,7 +1327,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             dragOverSceneForShot={dragOverSceneForShot}
             onShotDragOverScene={handleShotDragOverScene}
             onShotDropOnScene={handleShotDropOnScene}
-            onShotDragLeaveScene={() => setDragOverSceneForShot(null)}
+            onShotDragLeaveScene={() => setDragOverSceneForShot(undefined)}
           />
         </div>
 
@@ -1709,14 +1684,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       <UploadDialog
         isOpen={showUploadDialog}
         onClose={handleCloseUploadDialog}
-        uploadTab={uploadTab}
-        setUploadTab={setUploadTab}
         uploadingFiles={uploadingFiles}
-        urlInputValue={urlInputValue}
-        setUrlInputValue={handleUrlInputChange}
-        urlError={urlError}
         onUploadFiles={handleUploadFiles}
-        onUploadFromUrl={handleUploadFromUrl}
         onCancelUpload={cancelUpload}
         pendingCompressionVideo={pendingCompressionVideo}
         pendingCompressionDecision={pendingCompressionDecision}
@@ -1821,14 +1790,24 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onOpenSettings={() => setShowSettingsDialog(true)}
       />
 
-      {/* AI 生图 */}
+      {/* AI 生图（统一对话框：分镜模式） */}
       {showAIImageGenDialog && selectedShotForAIGen && (
-        <AIImageGenDialog
+        <AIImageGenerateDialog
           isOpen={showAIImageGenDialog}
           onClose={() => { setShowAIImageGenDialog(false); setSelectedShotForAIGen(null); }}
           shot={selectedShotForAIGen}
-          onGenerated={async (media) => {
+          ownerType="shot"
+          projectId={projectId}
+          sceneShots={shots.filter(s => s.sceneId === selectedShotForAIGen.sceneId)}
+          onUseImage={async (imageUrl) => {
+            const shotId = selectedShotForAIGen.id;
+            await fetch(`/api/video2/shots/${shotId}/media`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: imageUrl, type: 'image', source: 'ai_generated' })
+            });
             await loadShots();
+            setMediaRefreshTrigger(prev => prev + 1);
             showToast('AI 生图成功');
           }}
           onOpenSettings={() => setShowSettingsDialog(true)}
@@ -1890,6 +1869,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           isOpen={showMediaManager}
           onClose={() => { setShowMediaManager(false); setSelectedShotForMedia(null); }}
           shot={selectedShotForMedia}
+          refreshTrigger={mediaRefreshTrigger}
+          onAiGenerate={handleAiGenerate}
           onMediaChange={(updatedShot) => {
             setShots(prev => prev.map(item =>
               item.id === updatedShot.id ? { ...item, ...updatedShot } : item

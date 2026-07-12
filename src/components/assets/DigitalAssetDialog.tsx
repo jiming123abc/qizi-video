@@ -14,6 +14,7 @@ import {
 import type { DigitalAsset } from '../../lib/types';
 import AIImageGenerateDialog from '../ai/AIImageGenerateDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
 
 interface DigitalAssetDialogProps {
   isOpen: boolean;
@@ -196,18 +197,21 @@ export default function DigitalAssetDialog({
       formData.append('file', file);
       formData.append('title', `asset_${assetId}_${Date.now()}`);
 
-      const res = await fetch('/api/video2/upload', {
+      const res = await fetch('/api/video2/upload/image', {
         method: 'POST',
         body: formData,
       });
 
-      if (res.ok) {
-        const data = await res.json();
+      const data = await res.json();
+      if (data.success !== false && data.url) {
         // 添加到资产图片列表
         await addAssetImage(assetId, data.url);
+      } else {
+        alert(data.message || '上传失败');
       }
     } catch (err) {
       console.error('上传图片失败:', err);
+      alert('上传图片失败，请重试');
     } finally {
       setUploadingAssetId(null);
     }
@@ -516,11 +520,7 @@ export default function DigitalAssetDialog({
                         onClick={() => setExpandedAssetId(isExpanded ? null : asset.id)}
                       >
                         {coverUrl ? (
-                          <img
-                            src={coverUrl}
-                            alt={asset.name}
-                            className="w-full h-full object-cover"
-                          />
+                          <AssetCoverImage url={coverUrl} alt={asset.name} />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-slate-500">
                             <ImageIcon className="w-12 h-12" />
@@ -535,19 +535,19 @@ export default function DigitalAssetDialog({
                         )}
 
                         {/* 悬浮操作按钮 */}
-                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
+                        <div className="absolute inset-0 bg-black/40 transition flex items-center justify-center gap-2">
                           {/* 上传图片 */}
                           {canAddImage && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setUploadingAssetId(asset.id);
                                 const input = document.createElement('input');
                                 input.type = 'file';
                                 input.accept = 'image/*';
                                 input.onchange = (e) => {
                                   const files = (e.target as HTMLInputElement).files;
                                   if (files && files[0]) {
+                                    setUploadingAssetId(asset.id);
                                     handleUploadImage(asset.id, files[0]);
                                   }
                                 };
@@ -634,11 +634,7 @@ export default function DigitalAssetDialog({
                                 key={img.id}
                                 className="relative aspect-square rounded-lg overflow-hidden bg-black/30 group/img"
                               >
-                                <img
-                                  src={img.imageUrl}
-                                  alt=""
-                                  className="w-full h-full object-cover"
-                                />
+                                <AssetImage url={img.imageUrl} />
                                 <button
                                   onClick={() => handleDeleteImage(asset.id, img.id)}
                                   className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-red-500/70 opacity-0 group-hover/img:opacity-100 flex items-center justify-center transition"
@@ -702,5 +698,31 @@ export default function DigitalAssetDialog({
         }}
       />
     </div>
+  );
+}
+
+// 数字资产封面图组件（使用签名 URL）
+function AssetCoverImage({ url, alt }: { url: string; alt: string }) {
+  const signedUrl = useSignedUrl(url);
+  return (
+    <img
+      src={signedUrl || url}
+      alt={alt}
+      className="w-full h-full object-cover"
+      onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+    />
+  );
+}
+
+// 数字资产图片列表项组件（使用签名 URL）
+function AssetImage({ url }: { url: string }) {
+  const signedUrl = useSignedUrl(url);
+  return (
+    <img
+      src={signedUrl || url}
+      alt=""
+      className="w-full h-full object-cover"
+      onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+    />
   );
 }

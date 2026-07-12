@@ -614,6 +614,7 @@ export async function uploadVideo2Video(
       title: options?.title,
       createShot: options?.createShot,
       targetBitrate: options?.targetBitrate || await getBitrateAsync(videoInfo.resolution || '480p'),
+      signal: options?.signal,
       onProgress: (p) => {
         options?.onProgress?.({
           phase: p.phase,
@@ -647,6 +648,7 @@ export async function uploadVideo2Video(
 
   const useServerCompress = method === 'server';
 
+  let uploadTaskId = '';
   try {
     options?.onProgress?.({ phase: 'uploading', progress: 70, message: '上传视频中...' });
 
@@ -655,14 +657,18 @@ export async function uploadVideo2Video(
       { method: 'POST', body: formData, signal: options?.signal }
     );
     if (!taskResp.ok) throw new Error(`上传失败: HTTP ${taskResp.status}`);
-    const { taskId } = await taskResp.json();
+    const taskRespData = await taskResp.json();
+    uploadTaskId = taskRespData.taskId;
     options?.onProgress?.({ phase: 'uploading', progress: 75, message: '文件已提交，等待处理...' });
 
     let attempts = 0;
     const maxAttempts = 180;
     while (attempts < maxAttempts) {
+      if (options?.signal?.aborted) throw new Error('上传已取消');
       await new Promise(r => setTimeout(r, 1000));
-      const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${taskId}`);
+      const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`, {
+        signal: options?.signal
+      });
       if (!statusResp.ok) throw new Error('状态查询失败');
       const status = await statusResp.json();
 
@@ -698,6 +704,17 @@ export async function uploadVideo2Video(
     }
     throw new Error('上传超时');
   } catch (err) {
+    // 失败或取消时通知后端取消异步上传任务，避免遗留孤儿 OSS 文件 + DB 记录
+    if (uploadTaskId) {
+      try {
+        await fetch(`${API_BASE_URL}/api/video2/upload/cancel/${uploadTaskId}`, {
+          method: 'POST'
+        });
+        console.log('[video2] 已取消后端上传任务:', uploadTaskId);
+      } catch (cancelErr) {
+        console.error('[video2] 取消后端上传任务失败:', cancelErr);
+      }
+    }
     options?.onProgress?.({ phase: 'idle', progress: 0, message: String(err) });
     throw err;
   }
@@ -714,12 +731,13 @@ export async function uploadVideoWithAliyunCompression(
     createShot?: boolean;
     targetBitrate?: number;
     onProgress?: (p: UploadProgress) => void;
+    signal?: AbortSignal;
   }
 ): Promise<UploadResult & { id?: number; filename?: string; ossKey?: string }> {
   // 0. 获取视频信息（码率、分辨率）用于后端码率阈值判断
   const { estimateVideoBitrate } = await import('./videoCompressor');
   const videoInfo = await estimateVideoBitrate(file);
-  
+
   // 1. 先上传原视频到 OSS（临时存储）
   options?.onProgress?.({ phase: 'uploading', progress: 0, message: '上传原视频到 OSS...' });
 
@@ -731,176 +749,176 @@ export async function uploadVideoWithAliyunCompression(
   if (options?.title) formData.append('title', options.title);
   if (options?.createShot) formData.append('createShot', '1');
 
-  const uploadResp = await fetch(`${API_BASE_URL}/api/video2/upload/video`, {
-    method: 'POST',
-    body: formData
-  });
-
-  if (!uploadResp.ok) {
-    const errText = await uploadResp.text();
-    throw new Error(`上传原视频失败: ${errText}`);
-  }
-
-  const { taskId: uploadTaskId } = await uploadResp.json();
-
-  // 轮询等待上传完成
+  // videoUrl / ossKey / uploadTaskId 在 try 外声明，以便 catch 块中清理使用
   let videoUrl = '';
   let ossKey = '';
-  let uploadAttempts = 0;
-  const maxUploadAttempts = 180;
-
-  while (uploadAttempts < maxUploadAttempts) {
-    await new Promise(r => setTimeout(r, 1000));
-    const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`);
-    if (!statusResp.ok) throw new Error('上传状态查询失败');
-    const status = await statusResp.json();
-
-    if (status.status === 'done') {
-      videoUrl = status.result.url;
-      ossKey = status.result.ossKey;
-      break;
-    }
-    if (status.status === 'error') {
-      throw new Error(status.error || '上传失败');
-    }
-    const progress = Math.min(19, Math.floor((uploadAttempts / maxUploadAttempts) * 20));
-    options?.onProgress?.({
-      phase: 'uploading',
-      progress,
-      message: status.message || '上传中...'
-    });
-    uploadAttempts++;
-  }
-
-  if (!videoUrl) {
-    throw new Error('上传超时');
-  }
-
-  options?.onProgress?.({ phase: 'compressing', progress: 20, message: '提交阿里云转码任务...' });
-
-  // 2. 调用后端 /api/video2/aliyun/transcode 提交转码任务
-  const transcodeResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      videoUrl,
-      ossKey,
-      filename: file.name,
-      targetBitrate: options?.targetBitrate,
-      originalBitrate: videoInfo.bitrateKbps,
-      width: videoInfo.width,
-      height: videoInfo.height,
-      projectId: options?.projectId,
-      sceneId: options?.sceneId,
-      reference: options?.reference ? 1 : 0,
-      title: options?.title,
-      createShot: options?.createShot ? 1 : 0
-    })
-  });
-
-  if (!transcodeResp.ok) {
-    const errText = await transcodeResp.text();
-    throw new Error(`提交转码任务失败: ${errText}`);
-  }
-
-  const { taskId, skipped, originalUrl } = await transcodeResp.json();
-  
-  // 如果后端判定不需要压缩，返回原视频
-  if (skipped && originalUrl) {
-    options?.onProgress?.({ phase: 'done', progress: 100, message: '视频码率符合要求，无需压缩' });
-    return {
-      url: originalUrl,
-      compressed: false,
-      originalBitrate: videoInfo.bitrateKbps ?? undefined,
-      targetBitrate: videoInfo.bitrateKbps,
-      duration: videoInfo.duration ?? undefined,
-    };
-  }
-
-  // 3. 轮询 /api/video2/aliyun/transcode/:taskId 查询状态
-  let attempts = 0;
-  const maxAttempts = 300; // 最大等待 10 分钟 (300 * 2秒)
-
-  while (attempts < maxAttempts) {
-    const statusResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode/${taskId}`);
-    if (!statusResp.ok) {
-      throw new Error('查询转码状态失败');
-    }
-
-    const status = await statusResp.json();
-
-    if (status.status === 'completed' || status.status === 'done') {
-      // 4. 转码完成，返回结果
-      options?.onProgress?.({ phase: 'done', progress: 100, message: '阿里云转码完成' });
-
-      return {
-        url: status.url || videoUrl,
-        compressed: true,
-        id: status.id,
-        filename: status.filename || file.name,
-        ossKey: status.ossKey || ossKey,
-        originalSizeKB: Math.round(file.size / 1024),
-        compressedSizeKB: status.fileSize ? Math.round(status.fileSize / 1024) : undefined,
-      };
-    }
-
-    if (status.status === 'failed' || status.status === 'error') {
-      throw new Error('阿里云压缩失败：' + (status.error || '转码失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
-    }
-
-    // 更新进度：20-80 映射到转码进度
-    const progress = 20 + Math.min(status.progress || 0, 100) * 0.6;
-    options?.onProgress?.({
-      phase: 'compressing',
-      progress: Math.round(progress),
-      message: status.message || '阿里云转码中...'
-    });
-
-    attempts++;
-    await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒轮询一次
-  }
-
-  throw new Error('阿里云压缩失败：转码超时。请尝试其他压缩方式，或者手动压缩后再上传！');
-}
-
-// 从网络 URL 转存图片/视频到 OSS
-export async function uploadVideo2FromUrl(
-  url: string,
-  options?: {
-    type?: 'image' | 'video';
-    projectId?: number;
-    sceneId?: number;
-    reference?: boolean;
-    title?: string;
-    onProgress?: (p: UploadProgress) => void;
-  }
-): Promise<{ url: string; id?: number; filename?: string; type: 'image' | 'video' }> {
-  options?.onProgress?.({ phase: 'uploading', progress: 30, message: '正在从 URL 抓取文件...' });
+  let uploadTaskId = '';
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/video2/upload/from-url`, {
+    const uploadResp = await fetch(`${API_BASE_URL}/api/video2/upload/video`, {
+      method: 'POST',
+      body: formData,
+      signal: options?.signal
+    });
+
+    if (!uploadResp.ok) {
+      const errText = await uploadResp.text();
+      throw new Error(`上传原视频失败: ${errText}`);
+    }
+
+    const uploadRespData = await uploadResp.json();
+    uploadTaskId = uploadRespData.taskId;
+
+    // 轮询等待上传完成
+    let uploadAttempts = 0;
+    const maxUploadAttempts = 180;
+
+    while (uploadAttempts < maxUploadAttempts) {
+      if (options?.signal?.aborted) throw new Error('上传已取消');
+      await new Promise(r => setTimeout(r, 1000));
+      const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`, {
+        signal: options?.signal
+      });
+      if (!statusResp.ok) throw new Error('上传状态查询失败');
+      const status = await statusResp.json();
+
+      if (status.status === 'done') {
+        videoUrl = status.result.url;
+        ossKey = status.result.ossKey;
+        break;
+      }
+      if (status.status === 'error') {
+        throw new Error(status.error || '上传失败');
+      }
+      const progress = Math.min(19, Math.floor((uploadAttempts / maxUploadAttempts) * 20));
+      options?.onProgress?.({
+        phase: 'uploading',
+        progress,
+        message: status.message || '上传中...'
+      });
+      uploadAttempts++;
+    }
+
+    if (!videoUrl) {
+      throw new Error('上传超时');
+    }
+
+    options?.onProgress?.({ phase: 'compressing', progress: 20, message: '提交阿里云转码任务...' });
+
+    // 2. 调用后端 /api/video2/aliyun/transcode 提交转码任务
+    const transcodeResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        url,
-        type: options?.type,
+        videoUrl,
+        ossKey,
+        filename: file.name,
+        targetBitrate: options?.targetBitrate,
+        originalBitrate: videoInfo.bitrateKbps,
+        width: videoInfo.width,
+        height: videoInfo.height,
         projectId: options?.projectId,
         sceneId: options?.sceneId,
         reference: options?.reference ? 1 : 0,
-        title: options?.title
-      })
+        title: options?.title,
+        createShot: options?.createShot ? 1 : 0
+      }),
+      signal: options?.signal
     });
-    if (!response.ok) throw new Error(`URL 转存失败: HTTP ${response.status}`);
-    const result = await response.json();
-    options?.onProgress?.({ phase: 'done', progress: 100, message: '转存完成' });
-    return {
-      url: result.url,
-      id: result.id,
-      filename: result.filename,
-      type: result.type || (options?.type || 'video')
-    };
+
+    if (!transcodeResp.ok) {
+      const errText = await transcodeResp.text();
+      throw new Error(`提交转码任务失败: ${errText}`);
+    }
+
+    const { taskId, skipped, originalUrl } = await transcodeResp.json();
+
+    // 如果后端判定不需要压缩，返回原视频
+    if (skipped && originalUrl) {
+      options?.onProgress?.({ phase: 'done', progress: 100, message: '视频码率符合要求，无需压缩' });
+      return {
+        url: originalUrl,
+        compressed: false,
+        originalBitrate: videoInfo.bitrateKbps ?? undefined,
+        targetBitrate: videoInfo.bitrateKbps,
+        duration: videoInfo.duration ?? undefined,
+      };
+    }
+
+    // 3. 轮询 /api/video2/aliyun/transcode/:taskId 查询状态
+    let attempts = 0;
+    const maxAttempts = 300; // 最大等待 10 分钟 (300 * 2秒)
+
+    while (attempts < maxAttempts) {
+      if (options?.signal?.aborted) throw new Error('转码已取消');
+      const statusResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode/${taskId}`, {
+        signal: options?.signal
+      });
+      if (!statusResp.ok) {
+        throw new Error('查询转码状态失败');
+      }
+
+      const status = await statusResp.json();
+
+      if (status.status === 'completed' || status.status === 'done') {
+        // 4. 转码完成，返回结果
+        options?.onProgress?.({ phase: 'done', progress: 100, message: '阿里云转码完成' });
+
+        return {
+          url: status.url || videoUrl,
+          compressed: true,
+          id: status.id,
+          filename: status.filename || file.name,
+          ossKey: status.ossKey || ossKey,
+          originalSizeKB: Math.round(file.size / 1024),
+          compressedSizeKB: status.fileSize ? Math.round(status.fileSize / 1024) : undefined,
+        };
+      }
+
+      if (status.status === 'failed' || status.status === 'error') {
+        throw new Error('阿里云压缩失败：' + (status.error || '转码失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
+      }
+
+      // 更新进度：20-80 映射到转码进度
+      const progress = 20 + Math.min(status.progress || 0, 100) * 0.6;
+      options?.onProgress?.({
+        phase: 'compressing',
+        progress: Math.round(progress),
+        message: status.message || '阿里云转码中...'
+      });
+
+      attempts++;
+      await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒轮询一次
+    }
+
+    throw new Error('阿里云压缩失败：转码超时。请尝试其他压缩方式，或者手动压缩后再上传！');
   } catch (err) {
-    options?.onProgress?.({ phase: 'idle', progress: 0, message: String(err) });
+    // 任何阶段失败（初始上传/转码提交/转码轮询/用户取消）：清理残留
+    // 1. 如果初始上传已完成（videoUrl 已设置），清理转码相关 DB 记录和 OSS 文件
+    if (videoUrl) {
+      try {
+        await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode-cleanup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ videoUrl })
+        });
+        console.log('[aliyun] 失败/取消，已清理原始视频:', videoUrl);
+      } catch (cleanupErr) {
+        console.error('[aliyun] 清理失败资源失败:', cleanupErr);
+      }
+    }
+    // 2. 如果初始上传尚未完成（videoUrl 未设置但 uploadTaskId 已获取），取消后端异步上传任务
+    //    避免后端异步任务完成后遗留孤儿 OSS 文件 + DB 记录
+    if (uploadTaskId && !videoUrl) {
+      try {
+        await fetch(`${API_BASE_URL}/api/video2/upload/cancel/${uploadTaskId}`, {
+          method: 'POST'
+        });
+        console.log('[aliyun] 已取消后端上传任务:', uploadTaskId);
+      } catch (cancelErr) {
+        console.error('[aliyun] 取消后端上传任务失败:', cancelErr);
+      }
+    }
     throw err;
   }
 }

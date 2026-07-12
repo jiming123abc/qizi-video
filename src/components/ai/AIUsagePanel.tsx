@@ -99,7 +99,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
           </div>
           <button
             onClick={onClose}
-            className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition"
+            className="touch-target-36 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition"
           >
             <X className="w-5 h-5" />
           </button>

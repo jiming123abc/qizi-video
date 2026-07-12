@@ -116,6 +116,10 @@ export default function VideoSplitDialog({
   const pendingUploadRef = useRef<{ file: File; queue?: File[] } | null>(null);
   const pendingCompressionVideoRef = useRef<File | null>(null);
 
+  // 视频分割增强选项
+  const [filterNonShots, setFilterNonShots] = useState(true);
+  const [autoAssignScenes, setAutoAssignScenes] = useState(true);
+
   const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
   const currentVideoUrl = currentVideo?.url || '';
 
@@ -680,7 +684,9 @@ export default function VideoSplitDialog({
       const body: Record<string, any> = {
         videoUrl: currentVideoUrl,
         projectId,
-        mode: actualMode
+        mode: actualMode,
+        filterNonShots: actualMode !== 'manual' ? filterNonShots : false,
+        autoAssignScenes
       };
 
       if (sceneId !== undefined && sceneId !== null) {
@@ -1256,6 +1262,34 @@ export default function VideoSplitDialog({
             )}
           </div>
         </div>
+
+        {/* 分割增强选项 */}
+        {state === 'initial' && currentVideoUrl && (
+          <div className="px-6 py-3 border-t border-white/10 flex flex-wrap items-center gap-4">
+            <label className={`flex items-center gap-2 text-sm transition ${
+              mode === 'manual' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer text-slate-300 hover:text-white'
+            }`}>
+              <input
+                type="checkbox"
+                checked={mode === 'manual' ? false : filterNonShots}
+                onChange={(e) => setFilterNonShots(e.target.checked)}
+                disabled={mode === 'manual'}
+                className="w-4 h-4 rounded accent-violet-500"
+              />
+              滤除非实拍分镜
+              <span className="text-xs text-slate-500">（如标题卡、黑屏过渡等）</span>
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer text-slate-300 hover:text-white transition">
+              <input
+                type="checkbox"
+                checked={autoAssignScenes}
+                onChange={(e) => setAutoAssignScenes(e.target.checked)}
+                className="w-4 h-4 rounded accent-violet-500"
+              />
+              自动划分场次
+            </label>
+          </div>
+        )}
 
         <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
           <button

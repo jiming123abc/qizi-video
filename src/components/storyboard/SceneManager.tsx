@@ -94,7 +94,7 @@ export function SceneManager({
               <h2 className="text-base font-semibold">场次管理</h2>
               <button
                 onClick={handleClose}
-                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-36 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -125,7 +125,7 @@ export function SceneManager({
                     <button
                       onClick={() => moveScene(scene.id, -1)}
                       disabled={sceneIdx <= 0}
-                      className={`touch-target-44 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
+                      className={`touch-target-36 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
                         sceneIdx <= 0
                           ? 'border-white/10 text-slate-600 cursor-not-allowed'
                           : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'
@@ -136,7 +136,7 @@ export function SceneManager({
                     <button
                       onClick={() => moveScene(scene.id, 1)}
                       disabled={sceneIdx >= scenes.length - 1}
-                      className={`touch-target-44 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
+                      className={`touch-target-36 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 transition ${
                         sceneIdx >= scenes.length - 1
                           ? 'border-white/10 text-slate-600 cursor-not-allowed'
                           : 'border-white/20 text-white/60 hover:bg-violet-500/30 hover:border-violet-400/50'
@@ -156,7 +156,7 @@ export function SceneManager({
                     </button>
                     <button
                       onClick={() => handleDeleteScene(scene.id, scene.name)}
-                      className="touch-target-44 w-8 h-8 rounded-full border border-white/15 hover:border-red-400/50 hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-300 shrink-0 transition"
+                      className="touch-target-36 w-8 h-8 rounded-full border border-white/15 hover:border-red-400/50 hover:bg-red-500/20 flex items-center justify-center text-slate-400 hover:text-red-300 shrink-0 transition"
                       title="删除场次"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -178,7 +178,7 @@ export function SceneManager({
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={handleBackToList}
-                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-36 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -217,7 +217,7 @@ export function SceneManager({
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={handleBackToList}
-                className="touch-target-44 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                className="touch-target-36 w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>

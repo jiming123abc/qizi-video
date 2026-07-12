@@ -4,8 +4,8 @@ const VIDEORECOG_ENDPOINT = 'https://videorecog.cn-shanghai.aliyuncs.com/';
 const VIDEORECOG_VERSION = '2020-03-20';
 const VIDEORECOG_REGION = 'cn-shanghai';
 
-const MPS_ENDPOINT = 'https://mts.cn-shanghai.aliyuncs.com/';
-const MPS_REGION = 'cn-shanghai';
+const MPS_ENDPOINT = 'https://mts.cn-beijing.aliyuncs.com/';
+const MPS_REGION = 'cn-beijing';
 const MPS_VERSION = '2014-06-18';
 
 function getAliyunCredentials() {
@@ -241,12 +241,10 @@ function getOSSConfig() {
   const bucket = creds.ossBucket || process.env.OSS_BUCKET_DEV;
   const region = creds.ossRegion || process.env.OSS_REGION_DEV || 'oss-cn-beijing';
 
-  // OSS location 格式：region 去掉 "oss-" 前缀
-  const location = region.replace(/^oss-/, '');
-
+  // MPS API 的 Location 字段要求使用完整 region（带 oss- 前缀，如 oss-cn-beijing）
   return {
     bucket,
-    location,
+    location: region,
     region
   };
 }
@@ -271,18 +269,21 @@ function setBitrateProvider(fn) {
 }
 
 function getResolutionFromMaxRes(maxRes) {
+  // 注意：此函数接收的 maxRes 应为短边（min(width, height)），与前端 getResolutionTier 一致
   if (maxRes >= 1080) return '1080p';
   if (maxRes >= 720) return '720p';
+  if (maxRes >= 480) return '480p';
   return '480p';
 }
 
 // 根据分辨率和外部传入的码率配置确定目标码率
 // P2-3：优先使用注入的 getTargetBitrate（读数据库），回退到 DEFAULT_BITRATE_CONFIG
 async function determineBitrate(width, height, bitrateConfig = null) {
+  // 分辨率判断使用短边（与前端 getResolutionTier 一致）
+  const shortSide = Math.min(width || 0, height || 0) || Math.max(width || 0, height || 0);
   // 如果外部提供了静态配置，使用外部配置
   if (bitrateConfig) {
-    const maxRes = Math.max(width, height);
-    const resolution = getResolutionFromMaxRes(maxRes);
+    const resolution = getResolutionFromMaxRes(shortSide);
     return bitrateConfig[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
   }
   // 优先使用注入的数据库读取函数
@@ -294,8 +295,7 @@ async function determineBitrate(width, height, bitrateConfig = null) {
     }
   }
   // 最终回退：使用默认配置
-  const maxRes = Math.max(width, height);
-  const resolution = getResolutionFromMaxRes(maxRes);
+  const resolution = getResolutionFromMaxRes(shortSide);
   return DEFAULT_BITRATE_CONFIG[resolution] || DEFAULT_BITRATE_CONFIG['480p'];
 }
 
@@ -362,6 +362,9 @@ async function submitTranscodeTask(videoUrl, options = {}) {
       Video: {
         Codec: 'H.264',
         Bitrate: targetBitrate,
+        // 与浏览器端压缩参数对齐（ABR 模式，无 CRF）：实际码率尽量接近目标码率
+        Maxrate: String(targetBitrate),
+        Bufsize: String(targetBitrate * 2),
         Width: options.width || 1280,
         Height: options.height || 720,
         Fps: 30,
@@ -380,7 +383,7 @@ async function submitTranscodeTask(videoUrl, options = {}) {
 
   // P3-5：未配置 PipelineId 时抛出明确错误，而非仅 warn 后继续（会导致 MPS 调用失败）
   if (!transcodingConfig.PipelineId) {
-    throw new Error('未配置 MPS_PIPELINE_ID，请在环境变量中设置或在设置页指定转码管道 ID');
+    throw new Error('未配置 MPS_PIPELINE_ID，请在 .env 文件中设置该环境变量');
   }
 
   const params = {
@@ -458,8 +461,15 @@ async function getTranscodeResult(jobId) {
 
       if (job.State === 'TranscodeSuccess' && job.Output) {
         const output = job.Output;
-        // 构建输出 OSS URL
-        outputUrl = `https://${ossConfig.bucket}.${ossConfig.region}.aliyuncs.com/${output.OutputObject}`;
+        // MPS QueryJobList 返回的输出文件信息在 Output.OutputFile 下（含 Object/Bucket/Location）
+        const outputFile = output.OutputFile || {};
+        const outputObject = outputFile.Object;
+        if (outputObject) {
+          // 优先使用 OutputFile 中返回的 Bucket/Location 构造 URL（跨区域转码场景更准确）
+          const outBucket = outputFile.Bucket || ossConfig.bucket;
+          const outLocation = outputFile.Location || ossConfig.location;
+          outputUrl = `https://${outBucket}.${outLocation}.aliyuncs.com/${outputObject}`;
+        }
       }
 
       if (job.State === 'TranscodeFail') {
@@ -470,7 +480,7 @@ async function getTranscodeResult(jobId) {
         status,
         progress: job.Percent || 0,
         outputUrl,
-        outputObject: job.Output?.OutputObject,
+        outputObject: job.Output?.OutputFile?.Object,
         error
       };
     }
