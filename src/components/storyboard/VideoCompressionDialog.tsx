@@ -35,8 +35,8 @@ export function VideoCompressionDialog({
 
   return (
     <div className="fixed inset-0 z-[70] p-4 bg-black/60 backdrop-blur-sm">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg max-h-[85vh] bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 shrink-0">
           <h3 className="text-base font-semibold text-white">视频码率过高</h3>
           <button
             onClick={() => onSelect('cancel')}
@@ -46,7 +46,7 @@ export function VideoCompressionDialog({
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
+        <div className="px-5 py-4 space-y-4 flex-1 overflow-y-auto">
           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/20">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />

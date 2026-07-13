@@ -60,12 +60,16 @@
 }
 
 @layer base {
+  html {
+    background-color: var(--color-background);
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-on-surface);
     font-family: var(--font-body);
     -webkit-font-smoothing: antialiased;
-    min-height: max(884px, 100dvh);
+    min-height: 100dvh;
     overflow-x: hidden;
   }
 

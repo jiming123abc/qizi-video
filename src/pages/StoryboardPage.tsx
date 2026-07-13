@@ -1085,10 +1085,10 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // ============ 渲染 ============
   return (
     <div
-      className="min-h-screen bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white pb-28"
+      className="min-h-[100dvh] bg-gradient-to-br from-slate-900 via-violet-950 to-pink-950 text-white pb-28"
     >
       {loading ? (
-        <div className="min-h-screen flex flex-col items-center justify-center">
+        <div className="min-h-[100dvh] flex flex-col items-center justify-center">
           <div className="relative">
             <div className="w-16 h-16 rounded-full border-4 border-violet-500/20 border-t-violet-500 animate-spin" />
             <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 blur-xl -z-10" />

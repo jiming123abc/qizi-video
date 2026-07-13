@@ -8,9 +8,10 @@ interface DialogProps {
   children: ReactNode;
   maxWidth?: string;
   showClose?: boolean;
+  maxHeight?: string;
 }
 
-export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', showClose = true }: DialogProps) {
+export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', showClose = true, maxHeight = 'max-h-[85vh]' }: DialogProps) {
   if (!open) return null;
 
   return (
@@ -19,11 +20,11 @@ export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', 
       onClick={onClose}
     >
       <div
-        className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full ${maxWidth} rounded-3xl border border-white/10 bg-slate-900 p-6 shadow-2xl`}
+        className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full ${maxWidth} ${maxHeight} rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 shrink-0">
             <h2 className="text-base font-semibold">{title}</h2>
             {showClose && (
               <button
@@ -35,7 +36,9 @@ export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', 
             )}
           </div>
         )}
-        {children}
+        <div className="flex-1 overflow-y-auto">
+          {children}
+        </div>
       </div>
     </div>
   );

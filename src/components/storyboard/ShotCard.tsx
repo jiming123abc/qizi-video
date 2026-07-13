@@ -833,36 +833,21 @@ export function ShotCard({
           </div>
         )}
 
-        {/* 左上角：选择按钮（仅桌面端） */}
-        {!isMobile && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-            className={`touch-target-36 absolute z-20 w-8 h-8 rounded-full border flex items-center justify-center transition top-3 left-3 ${
-              isSelected
-                ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
-                : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
-            }`}
-            title="选择"
-          >
-            {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
-          </button>
-        )}
+        {/* 左上角：选择按钮（桌面端和移动端都显示） */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
+          className={`touch-target-36 absolute z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${isMobile ? 'top-2 left-2' : 'top-3 left-3'} ${
+            isSelected
+              ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
+              : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
+          }`}
+          title="选择"
+        >
+          {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
+        </button>
 
-        {/* 右上角：全屏按钮 + 删除按钮（桌面端） / 选择按钮 + 全屏按钮 + 删除按钮（移动端） */}
+        {/* 右上角：全屏按钮 + 删除按钮 */}
         <div className={`absolute z-20 flex items-center gap-1.5 ${isMobile ? 'top-2 right-2' : 'top-3 right-3'}`}>
-          {isMobile && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-              className={`touch-target-36 w-8 h-8 rounded-full border flex items-center justify-center transition ${
-                isSelected
-                  ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
-                  : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
-              }`}
-              title="选择"
-            >
-              {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
-            </button>
-          )}
           {hasMedia && (
             <>
               <button

@@ -33,7 +33,7 @@ export default function ConfirmDialog({
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-md w-full p-6 shadow-xl">
+      <div className="bg-white rounded-lg max-w-md w-full max-h-[85vh] p-6 shadow-xl overflow-y-auto">
         <h3 className="text-xl font-bold text-gray-900 mb-3">{title}</h3>
         <p className="text-gray-600 mb-4">{message}</p>
         
