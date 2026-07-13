@@ -821,7 +821,7 @@ export default function VideoSplitDialog({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4"
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4"
       onClick={onClose}
     >
       <div

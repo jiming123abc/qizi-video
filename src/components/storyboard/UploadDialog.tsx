@@ -77,8 +77,8 @@ export function UploadDialog({
 
   return (
     <>
-      <div className="fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm" onClick={handleBackdropClick}>
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="fixed inset-0 z-[60] p-5 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={handleBackdropClick}>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-4 shrink-0">
             <div>
               <h2 className="text-base font-semibold">批量上传</h2>

@@ -626,7 +626,7 @@ export default function AIScriptDialog({
   const estimatedFee = estimateCost(shotCount);
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-2 sm:p-4">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-slate-900 rounded-2xl sm:rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[85vh] overflow-hidden flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-4 sm:mb-6 shrink-0">

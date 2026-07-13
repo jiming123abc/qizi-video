@@ -398,9 +398,9 @@ export default function MediaManagerDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4" onClick={handleClose}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4" onClick={handleClose}>
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
