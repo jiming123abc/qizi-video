@@ -337,7 +337,7 @@ export default function DigitalAssetDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4" onClick={onClose}>
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4 transition-opacity duration-200 ${aiImageDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={onClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-4xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}

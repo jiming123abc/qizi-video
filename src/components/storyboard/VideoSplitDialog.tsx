@@ -821,7 +821,7 @@ export default function VideoSplitDialog({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4"
+      className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4 transition-opacity duration-200 ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       onClick={onClose}
     >
       <div

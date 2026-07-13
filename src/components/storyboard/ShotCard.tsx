@@ -625,7 +625,7 @@ export function ShotCard({
               {/* 左上角：选择按钮 */}
               <button
                 onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-                className={`touch-target-36 absolute top-3 left-3 z-30 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+                className={`absolute top-3 left-3 z-30 w-8 h-8 rounded-full border flex items-center justify-center transition ${
                   isSelected
                     ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
                     : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
@@ -798,7 +798,7 @@ export function ShotCard({
             {/* 左上角：选择按钮 */}
             <button
               onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-              className={`touch-target-36 absolute top-3 left-3 z-30 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+              className={`absolute top-3 left-3 z-30 w-8 h-8 rounded-full border flex items-center justify-center transition ${
                 isSelected
                   ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
                   : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
