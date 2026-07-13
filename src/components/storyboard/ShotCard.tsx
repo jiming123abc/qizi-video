@@ -833,47 +833,62 @@ export function ShotCard({
           </div>
         )}
 
-        {/* 左上角：选择按钮 */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
-          className={`touch-target-36 absolute z-20 w-8 h-8 rounded-full border flex items-center justify-center transition ${
-            isMobile ? 'top-2 left-2' : 'top-3 left-3'
-          } ${
-            isSelected
-              ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
-              : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
-          }`}
-          title="选择"
-        >
-          {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
-        </button>
-
-        {/* 右上角：全屏按钮 + 删除按钮（无媒体时显示上传区域） */}
-        {hasMedia && (
-          <div className={`absolute z-20 flex items-center gap-1.5 ${isMobile ? 'top-2 right-2' : 'top-3 right-3'}`}>
-            <button
-              onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
-              className="touch-target-36 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
-              title="全屏查看"
-            >
-              <Maximize2 className="w-4 h-4 text-white/90" />
-            </button>
-            {onDeleteMedia && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (confirm('确定要删除这个参考素材吗？')) {
-                    onDeleteMedia(shot.id, currentMedia.id);
-                  }
-                }}
-                className="touch-target-36 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
-                title="删除素材"
-              >
-                <Trash2 className="w-3.5 h-3.5 text-white/90" />
-              </button>
-            )}
-          </div>
+        {/* 左上角：选择按钮（仅桌面端） */}
+        {!isMobile && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
+            className={`touch-target-36 absolute z-20 w-8 h-8 rounded-full border flex items-center justify-center transition top-3 left-3 ${
+              isSelected
+                ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
+                : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
+            }`}
+            title="选择"
+          >
+            {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
+          </button>
         )}
+
+        {/* 右上角：全屏按钮 + 删除按钮（桌面端） / 选择按钮 + 全屏按钮 + 删除按钮（移动端） */}
+        <div className={`absolute z-20 flex items-center gap-1.5 ${isMobile ? 'top-2 right-2' : 'top-3 right-3'}`}>
+          {isMobile && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
+              className={`touch-target-36 w-8 h-8 rounded-full border flex items-center justify-center transition ${
+                isSelected
+                  ? 'border-transparent bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white'
+                  : 'border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/30 hover:border-violet-400/60 text-white/70'
+              }`}
+              title="选择"
+            >
+              {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
+            </button>
+          )}
+          {hasMedia && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleFullscreen(currentMedia); }}
+                className="touch-target-36 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+                title="全屏查看"
+              >
+                <Maximize2 className="w-4 h-4 text-white/90" />
+              </button>
+              {onDeleteMedia && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (confirm('确定要删除这个参考素材吗？')) {
+                      onDeleteMedia(shot.id, currentMedia.id);
+                    }
+                  }}
+                  className="touch-target-36 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
+                  title="删除素材"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-white/90" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
 
         {/* 左下角：状态标签 / 恢复按钮 */}
         <div className={`absolute z-20 ${isMobile ? 'bottom-2 left-2' : 'bottom-3 left-3'}`}>

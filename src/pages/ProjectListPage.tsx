@@ -1001,7 +1001,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 </div>
 
                 {/* 信息区 */}
-                <div className="relative px-5 py-1.5 pb-2">
+                <div className="relative px-5 py-3 pb-4 bg-slate-900/95">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <input
