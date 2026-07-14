@@ -5,10 +5,11 @@ import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
+import { useToastContext } from '../components/ToastProvider';
 import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
 import { timeAgo, formatSize, getErrorMessage } from '../lib/utils';
-import type { ShotMedia } from '../lib/types';
+import type { ShotMedia, Shot } from '../lib/types';
 
 interface Project {
   id: number;
@@ -79,9 +80,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [deleteWarnings, setDeleteWarnings] = useState<Array<{ stage: string; message: string }>>([]);
   // P4-4：轮询定时器 ref，用于 mount 恢复时清理
   const deletePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-  // P3-1：toast 定时器 ref，防止内存泄漏
-  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { showToast } = useToastContext();
   const [projectStats, setProjectStats] = useState<Record<number, { done: number; pending: number; total: number }>>({});
 
   // 分享提示
@@ -108,15 +107,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       .catch(() => {});
   }, []);
 
-  // P3-1：unmount 时清理 toast 定时器
-  useEffect(() => {
-    return () => {
-      if (toastTimerRef.current) {
-        clearTimeout(toastTimerRef.current);
-      }
-    };
-  }, []);
-
   // 每个项目的参考文件缓存（含封面作为第一个元素）
   const [referencesCache, setReferencesCache] = useState<Record<number, ReferenceItem[]>>({});
   const [carouselIndex, setCarouselIndex] = useState<Record<number, number>>({});
@@ -132,15 +122,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   // 全屏弹窗打开时自动播放视频（通过 MediaFullscreen 组件的 autoPlay 处理）
   // fullscreenVideoRef 用于 MediaFullscreen 的 videoRefCallback
-
-  const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ message: msg, type });
-    // P3-1：清理前一个定时器，避免快速连续调用时累积
-    if (toastTimerRef.current) {
-      clearTimeout(toastTimerRef.current);
-    }
-    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
-  }, []);
 
   // 收集所有媒体 URL（含项目 coverUrl）并批量签名
   const signAllMediaUrls = useCallback(async () => {
@@ -213,7 +194,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     try {
       const res = await fetch(`/api/projects/${projectId}/references`);
       const data = await res.json();
-      const refs: ReferenceItem[] = (data.data || []).map((r: any) => ({
+      const refs: ReferenceItem[] = (data.data || []).map((r: Shot) => ({
         id: r.id,
         type: r.type,
         url: r.url,
@@ -237,7 +218,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           const next = { ...prev };
           for (const [pid, refs] of Object.entries(data.data)) {
             const projectId = Number(pid);
-            const refList: ReferenceItem[] = ((refs as any[]) || []).map((r: any) => ({
+            const refList: ReferenceItem[] = ((refs as Shot[]) || []).map((r: Shot) => ({
               id: r.id,
               type: r.type,
               url: r.url,
@@ -550,10 +531,18 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       const result = await uploadImage(file, {
         projectId: project.id,
         title: file.name,
-        usage: 'project-cover'
+        usage: 'project-cover',
+        onProgress: p => {
+          setUploadDialogMessage(`${p.message} (${p.progress}%)`);
+        }
       });
       if (result.url) {
         await setProjectCover(project.id, result.url);
+        if (result.compressionFailed) {
+          showToast(`图片压缩失败，已使用原图（${result.compressionError}）`, 'info');
+        } else if (result.compressed && result.originalSizeKB && result.compressedSizeKB) {
+          showToast(`封面已压缩: ${result.originalSizeKB}KB → ${result.compressedSizeKB}KB`, 'success');
+        }
         setUploadDialogMessage('封面设置成功');
       }
     } catch (err: unknown) {
@@ -1388,16 +1377,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         aliyunConfigured={aliyunConfigured}
         onSelect={handleCompressionSelect}
       />
-
-      {/* Toast */}
-      {toast && (
-        <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[90] px-6 py-3 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl">
-          {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />}
-          {toast.type === 'error' && <XCircle className="w-4 h-4 inline mr-2 text-red-400" />}
-          {toast.type === 'info' && <Info className="w-4 h-4 inline mr-2 text-blue-400" />}
-          {toast.message}
-        </div>
-      )}
     </div>
   );
 }

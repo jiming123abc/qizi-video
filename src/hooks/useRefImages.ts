@@ -22,6 +22,9 @@ export function useRefImages(options: {
 
   const [refImages, setRefImages] = useState<RefImage[]>([]);
   const [historyImages, setHistoryImages] = useState<AiGeneratedImage[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadMessage, setUploadMessage] = useState('');
 
   // 加载历史图（持久化到 ai_generated_images 表）
   const loadHistory = useCallback(async () => {
@@ -96,18 +99,35 @@ export function useRefImages(options: {
     if (refImages.length >= MAX_REF_IMAGES) {
       throw new Error(`参考图已达上限（${MAX_REF_IMAGES} 张）`);
     }
-    const uploadResult = await uploadImage(file, {
-      projectId,
-      usage: 'shot-reference',
-      title: `ai-ref-${Date.now()}`,
-    });
-    const newRef: RefImage = {
-      id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      url: uploadResult.url,
-      source: 'upload',
-    };
-    setRefImages(prev => [...prev, newRef]);
-    return newRef;
+    setUploading(true);
+    setUploadProgress(0);
+    setUploadMessage('准备上传...');
+    try {
+      const uploadResult = await uploadImage(file, {
+        projectId,
+        usage: 'shot-reference',
+        title: `ai-ref-${Date.now()}`,
+        onProgress: p => {
+          setUploadProgress(p.progress);
+          setUploadMessage(p.message);
+        }
+      });
+      const newRef: RefImage = {
+        id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        url: uploadResult.url,
+        source: 'upload',
+      };
+      setRefImages(prev => [...prev, newRef]);
+      setUploadProgress(100);
+      setUploadMessage('完成');
+      return newRef;
+    } finally {
+      setTimeout(() => {
+        setUploading(false);
+        setUploadProgress(0);
+        setUploadMessage('');
+      }, 500);
+    }
   }, [projectId, refImages.length]);
 
   // 移除参考图
@@ -180,6 +200,9 @@ export function useRefImages(options: {
     MAX_REF_IMAGES,
     MAX_HISTORY,
     isFull,
+    uploading,
+    uploadProgress,
+    uploadMessage,
     addAssetRef,
     toggleAssetRef,
     addUploadRef,

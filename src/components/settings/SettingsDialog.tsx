@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Eye, EyeOff, ChevronDown, Loader2, Download, Upload, AlertTriangle, LogIn, LogOut, Lock, Plus, Edit, Info } from 'lucide-react';
 import type { Settings, AiPlatform } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useToastContext } from '../ToastProvider';
 import { clearAdminToken, checkAuth, loginWithToken } from '../../lib/auth';
 import { getErrorMessage } from '../../lib/utils';
 
@@ -33,6 +34,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
   const [loginToken, setLoginToken] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [showToken, setShowToken] = useState(false);
+  const { showToast } = useToastContext();
 
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
@@ -136,7 +138,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     }));
   };
 
-  const updateModel = (type: 'llm' | 'image', index: number, field: string, value: any) => {
+  const updateModel = (type: 'llm' | 'image', index: number, field: string, value: string | number | boolean) => {
     const key = type === 'llm' ? 'llm_fallback_chain' : 'image_fallback_chain';
     setSettings(prev => {
       const list = [...(prev[key] || [])];
@@ -272,9 +274,11 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
       }
 
       const data = await res.json();
-      alert(`导入成功！\n场次: ${data.sceneCount} 个\n分镜: ${data.shotCount} 个`);
-      onClose();
-      window.location.reload();
+      showToast(`导入成功！场次: ${data.sceneCount} 个，分镜: ${data.shotCount} 个`, 'success');
+      setTimeout(() => {
+        onClose();
+        window.location.reload();
+      }, 1500);
     } catch (e: unknown) {
       console.error('导入备份失败:', e);
       setError('导入备份失败: ' + getErrorMessage(e, ''));

@@ -1,10 +1,12 @@
+import type { AiTaskOutput } from './types';
+
 export interface AiTaskUpdate {
   id: string;
   type: string;
   status: string;
   progress: number;
   error?: string;
-  output?: any;
+  output?: AiTaskOutput;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,7 +32,7 @@ export function subscribeToTask(
 
   eventSource.addEventListener('error', (event) => {
     try {
-      const data = JSON.parse((event as any).data);
+      const data = JSON.parse((event as MessageEvent).data);
       onError?.(data.message || '连接错误');
     } catch {
       onError?.('连接错误');

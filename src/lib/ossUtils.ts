@@ -1,3 +1,5 @@
+import type { UploadTaskResult } from './types';
+
 const FILE_SIZE_LIMITS = {
   image: 20 * 1024 * 1024,
   video: 1024 * 1024 * 1024
@@ -192,7 +194,8 @@ export async function getOssUploadCredential(
 export async function uploadDirectToOss(
   file: File,
   credential: OssUploadCredential,
-  onProgress?: (progress: UploadProgress) => void
+  onProgress?: (progress: UploadProgress) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -226,6 +229,19 @@ export async function uploadDirectToOss(
     xhr.addEventListener('error', () => reject(new Error('网络错误')));
     xhr.addEventListener('timeout', () => reject(new Error('上传超时')));
 
+    // AbortSignal 支持
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort();
+        reject(new Error('上传已取消'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        xhr.abort();
+        reject(new Error('上传已取消'));
+      });
+    }
+
     xhr.send(formData);
   });
 }
@@ -240,6 +256,7 @@ export interface UploadResult {
   url: string;
   compressed: boolean;
   compressionFailed?: boolean;
+  compressionError?: string;
   originalSizeKB?: number;
   compressedSizeKB?: number;
   originalBitrate?: number;
@@ -310,7 +327,7 @@ export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
 async function pollTaskStatus(
   taskId: string,
   onProgress?: (progress: UploadProgress) => void
-): Promise<any> {
+): Promise<UploadTaskResult> {
   let attempts = 0;
   const maxAttempts = 360; // 最多10分钟 (360 * 2秒)
 
@@ -331,7 +348,7 @@ async function pollTaskStatus(
     }
 
     // 更新进度
-    const phase: any = task.progress < 50 ? 'compressing' : (task.progress < 100 ? 'uploading' : 'done');
+    const phase: UploadProgress['phase'] = task.progress < 50 ? 'compressing' : (task.progress < 100 ? 'uploading' : 'done');
     const progress = task.progress;
     const message = task.message || '处理中...';
     onProgress?.({ phase, progress, message });
@@ -414,7 +431,158 @@ export async function uploadVideoToServerWithCompression(
 
 // ================ 上传函数 ================
 
-// 图片上传到 images 文件夹（通过后端 API 自动压缩）
+// 浏览器端图片压缩：使用 Canvas API 统一转为 JPEG
+// 失败时返回 null，由调用方回退到服务器压缩
+async function compressImageInBrowser(
+  file: File,
+  maxSizeKB: number,
+  onProgress?: (progress: number) => void
+): Promise<File | null> {
+  try {
+    if (file.size <= maxSizeKB * 1024) return file;
+
+    const img = await loadImage(file);
+    onProgress?.(30);
+
+    // Canvas 尺寸限制检查（保守值 4096）
+    const MAX_CANVAS_DIM = 4096;
+    let width = img.naturalWidth;
+    let height = img.naturalHeight;
+    if (width > MAX_CANVAS_DIM || height > MAX_CANVAS_DIM) {
+      const scale = MAX_CANVAS_DIM / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    // 白色背景填充，避免 PNG 透明通道转 JPEG 后变黑
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    onProgress?.(60);
+
+    // 统一转 JPEG，从高质量逐步降低
+    let quality = 0.9;
+    let bestBlob: Blob | null = null;
+    while (quality > 0.1) {
+      const blob = await new Promise<Blob | null>(resolve =>
+        canvas.toBlob(resolve, 'image/jpeg', quality)
+      );
+      if (blob && (!bestBlob || blob.size < bestBlob.size)) {
+        bestBlob = blob;
+      }
+      if (bestBlob && bestBlob.size <= maxSizeKB * 1024) break;
+      quality -= 0.05;
+    }
+
+    if (!bestBlob || bestBlob.size >= file.size) return null;
+    onProgress?.(90);
+
+    return new File([bestBlob], file.name.replace(/\.\w+$/, '.jpg'), {
+      type: 'image/jpeg',
+    });
+  } catch (e) {
+    console.warn('[compressImageInBrowser] 浏览器压缩失败，将回退服务器:', e);
+    return null;
+  }
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      resolve(img);
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(img.src);
+      reject(e);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// 直传 OSS 并注册 DB 记录（供 uploadImage/uploadVideo 直传分支使用）
+async function directUploadToOssAndRegister(
+  file: File,
+  type: 'image' | 'video',
+  options: {
+    projectId?: number;
+    sceneId?: number;
+    usage?: string;
+    title?: string;
+    createShot?: boolean;
+    onProgress?: (p: UploadProgress) => void;
+    signal?: AbortSignal;
+  }
+): Promise<{ url: string; id?: number; filename: string; ossKey: string }> {
+  if (!options?.projectId) {
+    throw new Error('缺少 projectId，无法直传 OSS');
+  }
+
+  // 1. 获取直传凭证
+  options?.onProgress?.({ phase: 'uploading', progress: 40, message: '获取上传凭证...' });
+  const credential = await getOssUploadCredential(
+    options.projectId,
+    file.name,
+    type,
+    options.usage
+  );
+
+  // 2. 直传到 OSS
+  const fileUrl = await uploadDirectToOss(file, credential, p => {
+    options?.onProgress?.(p);
+  }, options?.signal);
+
+  const ossKey = credential.key;
+
+  // 3. 注册 DB 记录
+  options?.onProgress?.({ phase: 'uploading', progress: 90, message: '注册记录...' });
+  try {
+    const regResp = await fetch(`${API_BASE_URL}/api/media/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: fileUrl,
+        filename: file.name,
+        size: file.size,
+        type,
+        usage: options.usage,
+        projectId: options.projectId,
+        sceneId: options.sceneId,
+        createShot: options.createShot ? 1 : 0,
+        title: options.title,
+      }),
+      signal: options?.signal,
+    });
+
+    if (!regResp.ok) {
+      const errText = await regResp.text();
+      throw new Error(`注册媒体记录失败: ${errText}`);
+    }
+
+    const regResult = await regResp.json();
+    return { url: fileUrl, id: regResult.id, filename: file.name, ossKey };
+  } catch (err) {
+    // DB 注册失败：清理已上传的 OSS 文件
+    try {
+      await fetch(`${API_BASE_URL}/api/oss/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: fileUrl }),
+      });
+    } catch (cleanupErr) {
+      console.error('[directUpload] 清理 OSS 文件失败:', cleanupErr);
+    }
+    throw err;
+  }
+}
+
+// 图片上传（浏览器压缩优先，成功后直传 OSS；失败回退服务器压缩）
 export async function uploadImage(
   file: File,
   options?: {
@@ -434,8 +602,75 @@ export async function uploadImage(
     throw new Error(`图片大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
   }
 
-  options?.onProgress?.({ phase: 'uploading', progress: 10, message: '上传图片中...' });
+  const originalSizeKB = Math.round(file.size / 1024);
+  options?.onProgress?.({ phase: 'uploading', progress: 5, message: '压缩图片中...' });
 
+  // 浏览器端压缩优先：读取阈值，尝试在浏览器压缩
+  let uploadFile = file;
+  let browserCompressed = false;
+  let needServerFallback = false;
+
+  try {
+    const settingsResp = await fetch('/api/settings');
+    const settingsData = await settingsResp.json();
+    const thresholdKB = settingsData?.data?.image_compress_threshold_kb
+      ? parseInt(settingsData.data.image_compress_threshold_kb) : 300;
+
+    if (file.size > thresholdKB * 1024) {
+      const compressed = await compressImageInBrowser(file, thresholdKB, p => {
+        options?.onProgress?.({ phase: 'uploading', progress: 5 + Math.round(p * 0.3), message: '浏览器压缩中...' });
+      });
+      if (compressed) {
+        uploadFile = compressed;
+        browserCompressed = true;
+        console.log(`[uploadImage] 浏览器压缩: ${(file.size / 1024).toFixed(0)}KB → ${(compressed.size / 1024).toFixed(0)}KB`);
+      } else {
+        // 浏览器压缩失败，回退服务器
+        needServerFallback = true;
+      }
+    }
+  } catch (e) {
+    console.warn('[uploadImage] 获取设置或浏览器压缩失败，回退服务器压缩:', e);
+    needServerFallback = true;
+  }
+
+  // 浏览器压缩失败 → 回退服务器上传
+  if (needServerFallback) {
+    return uploadImageViaServer(uploadFile, options);
+  }
+
+  // 直传 OSS + 注册 DB
+  try {
+    const result = await directUploadToOssAndRegister(uploadFile, 'image', options);
+    options?.onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
+    return {
+      url: result.url,
+      compressed: browserCompressed,
+      originalSizeKB,
+      compressedSizeKB: Math.round(uploadFile.size / 1024),
+      id: result.id,
+      filename: result.filename,
+      ossKey: result.ossKey,
+    };
+  } catch (err) {
+    options?.onProgress?.({ phase: 'idle', progress: 0, message: '上传失败' });
+    throw err;
+  }
+}
+
+// 服务器上传回退（浏览器压缩失败时使用）
+async function uploadImageViaServer(
+  file: File,
+  options?: {
+    projectId?: number;
+    sceneId?: number;
+    usage?: string;
+    title?: string;
+    createShot?: boolean;
+    onProgress?: (p: UploadProgress) => void;
+    signal?: AbortSignal;
+  }
+): Promise<UploadResult & { id?: number; filename?: string; ossKey?: string }> {
   const formData = new FormData();
   formData.append('file', file);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
@@ -445,6 +680,7 @@ export async function uploadImage(
   if (options?.createShot) formData.append('createShot', '1');
 
   try {
+    options?.onProgress?.({ phase: 'uploading', progress: 40, message: '上传图片中...' });
     const response = await fetch(`${API_BASE_URL}/api/upload/image`, {
       method: 'POST',
       body: formData,
@@ -463,6 +699,10 @@ export async function uploadImage(
     return {
       url: result.url,
       compressed: result.compressed || false,
+      compressionFailed: !!result.compressionError,
+      compressionError: result.compressionError,
+      originalSizeKB: result.originalSizeKB,
+      compressedSizeKB: result.compressedSizeKB,
       id: result.id,
       filename: result.filename,
       ossKey: result.ossKey
@@ -473,7 +713,7 @@ export async function uploadImage(
   }
 }
 
-// 视频上传到 videos 文件夹（通过后端 API，支持自动压缩）
+// 视频上传（统一入口：直传 OSS 或走服务器，支持自动压缩）
 export async function uploadVideo(
   file: File,
   options?: {
@@ -492,15 +732,55 @@ export async function uploadVideo(
   const method = options?.compressionMethod || 'none';
   const originalSizeKB = Math.round(file.size / 1024);
 
-  let targetFile = file;
-  let compressed = false;
   let decision: UploadDecision | null = null;
 
-  if (!options?.skipBitrateCheck && method !== 'none') {
+  // Step 1: 若未跳过码率检测，先检测码率
+  if (!options?.skipBitrateCheck) {
     options?.onProgress?.({ phase: 'checking', progress: 2, message: '正在检测视频信息...' });
     decision = await checkVideoBitrate(file);
+
+    // 码率符合要求 → 直传 OSS
+    if (decision.decision === 'direct_upload') {
+      const result = await directUploadToOssAndRegister(file, 'video', options);
+      options?.onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
+      return {
+        url: result.url,
+        compressed: false,
+        originalSizeKB,
+        compressedSizeKB: originalSizeKB,
+        id: result.id,
+        filename: result.filename,
+        ossKey: result.ossKey,
+        originalBitrate: decision.bitrateKbps ?? undefined,
+        targetBitrate: decision.targetBitrateKbps,
+        duration: decision.duration ?? undefined,
+      };
+    }
+
+    // 码率超标但 method='none' → 终止上传
+    if (decision.decision === 'must_compress' && method === 'none') {
+      throw new Error('视频码率超标，请选择压缩方式');
+    }
   }
 
+  // Step 2: 根据 method 分支
+
+  // method='none'（skipBitrateCheck=true，调用方已确认 direct_upload）
+  if (method === 'none') {
+    const result = await directUploadToOssAndRegister(file, 'video', options);
+    options?.onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
+    return {
+      url: result.url,
+      compressed: false,
+      originalSizeKB,
+      compressedSizeKB: originalSizeKB,
+      id: result.id,
+      filename: result.filename,
+      ossKey: result.ossKey,
+    };
+  }
+
+  // method='browser'：浏览器压缩后直传 OSS
   if (method === 'browser') {
     options?.onProgress?.({ phase: 'compressing', progress: 5, message: '浏览器压缩中...' });
     const { compressVideoInBrowser } = await import('./videoCompressor');
@@ -521,67 +801,69 @@ export async function uploadVideo(
       throw new Error('浏览器压缩失败：' + (compressResult as { success: false; message: string }).message + '。请尝试其他压缩方式，或者手动压缩后再上传！');
     }
 
-    targetFile = compressResult.file;
-    compressed = true;
+    const compressedFile = compressResult.file;
     options?.onProgress?.({ phase: 'compressing', progress: 65, message: '压缩完成，正在上传...' });
+
+    // 直传压缩后文件到 OSS + 注册 DB
+    const result = await directUploadToOssAndRegister(compressedFile, 'video', options);
+    options?.onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
+    return {
+      url: result.url,
+      compressed: true,
+      originalSizeKB,
+      compressedSizeKB: Math.round(compressedFile.size / 1024),
+      id: result.id,
+      filename: result.filename,
+      ossKey: result.ossKey,
+      originalBitrate: decision?.bitrateKbps ?? undefined,
+      targetBitrate: decision?.targetBitrateKbps,
+      duration: decision?.duration ?? undefined,
+    };
   }
 
-  // 阿里云 MPS 转码压缩
+  // method='aliyun'：直传原视频到 OSS → MPS 转码
   if (method === 'aliyun') {
-    options?.onProgress?.({ phase: 'uploading', progress: 5, message: '上传视频到 OSS...' });
+    // 获取视频信息（若调用方未预检，此处补充检测）
+    if (!decision) {
+      options?.onProgress?.({ phase: 'checking', progress: 2, message: '正在检测视频信息...' });
+      decision = await checkVideoBitrate(file);
+    }
 
-    // 获取视频分辨率信息
-    const videoInfo = await checkVideoBitrate(file);
     const { getTargetBitrateAsync: getBitrateAsync } = await import('./videoCompressor');
 
-    // 调用阿里云转码，使用异步版本获取目标码率
-    const result = await uploadVideoWithAliyunCompression(file, {
+    return await uploadVideoWithAliyunCompression(file, {
       projectId: options?.projectId,
       sceneId: options?.sceneId,
       usage: options?.usage,
       title: options?.title,
       createShot: options?.createShot,
-      targetBitrate: options?.targetBitrate || await getBitrateAsync(videoInfo.resolution || '480p'),
+      targetBitrate: options?.targetBitrate || await getBitrateAsync(decision.resolution || '480p'),
       signal: options?.signal,
       onProgress: (p) => {
         options?.onProgress?.({
           phase: p.phase,
-          progress: 5 + p.progress * 0.95, // 映射到 5-100
+          progress: 5 + p.progress * 0.95,
           message: p.message
         });
       }
-    });
-
-    return {
-      url: result.url,
-      compressed: true,
-      id: result.id,
-      filename: result.filename,
-      ossKey: result.ossKey,
-      originalSizeKB,
-      compressedSizeKB: result.compressedSizeKB,
-      originalBitrate: videoInfo.bitrateKbps ?? undefined,
-      targetBitrate: videoInfo.targetBitrateKbps,
-      duration: videoInfo.duration ?? undefined,
-    };
+    }, decision);
   }
 
+  // method='server'：走服务器压缩上传（现有逻辑）
   const formData = new FormData();
-  formData.append('file', targetFile);
+  formData.append('file', file);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
   if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
   if (options?.usage) formData.append('usage', options.usage);
   if (options?.title) formData.append('title', options.title);
   if (options?.createShot) formData.append('createShot', '1');
 
-  const useServerCompress = method === 'server';
-
   let uploadTaskId = '';
   try {
     options?.onProgress?.({ phase: 'uploading', progress: 70, message: '上传视频中...' });
 
     const taskResp = await fetch(
-      `${API_BASE_URL}/api/upload/video${useServerCompress ? '?compress=true' : ''}`,
+      `${API_BASE_URL}/api/upload/video?compress=true`,
       { method: 'POST', body: formData, signal: options?.signal }
     );
     if (!taskResp.ok) throw new Error(`上传失败: HTTP ${taskResp.status}`);
@@ -604,7 +886,7 @@ export async function uploadVideo(
         options?.onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
         return {
           url: status.result.url,
-          compressed: compressed || status.result.compressed || false,
+          compressed: status.result.compressed || false,
           id: status.result.id,
           filename: status.result.fileName,
           ossKey: status.result.ossKey,
@@ -616,8 +898,7 @@ export async function uploadVideo(
         };
       }
       if (status.status === 'error') {
-        // P3-7：使用结构化错误码判断压缩失败，避免依赖中文字符串匹配
-        if (useServerCompress && status.errorCode === 'COMPRESSION_FAILED') {
+        if (status.errorCode === 'COMPRESSION_FAILED') {
           throw new Error('服务端压缩失败：' + (status.error || '压缩失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
         }
         throw new Error(status.error || '上传失败');
@@ -632,7 +913,6 @@ export async function uploadVideo(
     }
     throw new Error('上传超时');
   } catch (err) {
-    // 失败或取消时通知后端取消异步上传任务，避免遗留孤儿 OSS 文件 + DB 记录
     if (uploadTaskId) {
       try {
         await fetch(`${API_BASE_URL}/api/upload/cancel/${uploadTaskId}`, {
@@ -648,7 +928,7 @@ export async function uploadVideo(
   }
 }
 
-// 阿里云 MPS 转码压缩上传
+// 阿里云 MPS 转码压缩上传（原视频直传 OSS，不经过服务器）
 export async function uploadVideoWithAliyunCompression(
   file: File,
   options?: {
@@ -660,80 +940,68 @@ export async function uploadVideoWithAliyunCompression(
     targetBitrate?: number;
     onProgress?: (p: UploadProgress) => void;
     signal?: AbortSignal;
-  }
+  },
+  decision?: UploadDecision
 ): Promise<UploadResult & { id?: number; filename?: string; ossKey?: string }> {
-  // 0. 获取视频信息（码率、分辨率）用于后端码率阈值判断
-  const { estimateVideoBitrate } = await import('./videoCompressor');
-  const videoInfo = await estimateVideoBitrate(file);
+  // 0. 获取视频信息（若未传入则检测）
+  const videoInfo = decision || await checkVideoBitrate(file);
+  const originalSizeKB = Math.round(file.size / 1024);
 
-  // 1. 先上传原视频到 OSS（临时存储）
-  options?.onProgress?.({ phase: 'uploading', progress: 0, message: '上传原视频到 OSS...' });
-
-  const formData = new FormData();
-  formData.append('file', file);
-  if (options?.projectId) formData.append('projectId', String(options.projectId));
-  if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
-  if (options?.usage) formData.append('usage', options.usage);
-  if (options?.title) formData.append('title', options.title);
-  if (options?.createShot) formData.append('createShot', '1');
-
-  // videoUrl / ossKey / uploadTaskId 在 try 外声明，以便 catch 块中清理使用
+  // videoUrl / ossKey 在 try 外声明，以便 catch 块中清理使用
   let videoUrl = '';
   let ossKey = '';
-  let uploadTaskId = '';
 
   try {
-    const uploadResp = await fetch(`${API_BASE_URL}/api/upload/video`, {
+    // 1. 直传原视频到 OSS
+    if (!options?.projectId) {
+      throw new Error('缺少 projectId，无法直传 OSS');
+    }
+
+    options?.onProgress?.({ phase: 'uploading', progress: 0, message: '上传原视频到 OSS...' });
+
+    const credential = await getOssUploadCredential(
+      options.projectId,
+      file.name,
+      'video',
+      options.usage
+    );
+
+    videoUrl = await uploadDirectToOss(file, credential, p => {
+      options?.onProgress?.({
+        phase: p.phase,
+        progress: Math.min(19, Math.round(p.progress * 0.2)),
+        message: p.message
+      });
+    }, options?.signal);
+
+    ossKey = credential.key;
+
+    // 2. 注册 DB 记录（必须在提交转码前注册，以便转码完成后后端更新记录）
+    const regResp = await fetch(`${API_BASE_URL}/api/media/register`, {
       method: 'POST',
-      body: formData,
-      signal: options?.signal
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: videoUrl,
+        filename: file.name,
+        size: file.size,
+        type: 'video',
+        usage: options.usage,
+        projectId: options.projectId,
+        sceneId: options.sceneId,
+        createShot: options.createShot ? 1 : 0,
+        title: options.title,
+      }),
+      signal: options?.signal,
     });
 
-    if (!uploadResp.ok) {
-      const errText = await uploadResp.text();
-      throw new Error(`上传原视频失败: ${errText}`);
-    }
-
-    const uploadRespData = await uploadResp.json();
-    uploadTaskId = uploadRespData.taskId;
-
-    // 轮询等待上传完成
-    let uploadAttempts = 0;
-    const maxUploadAttempts = 180;
-
-    while (uploadAttempts < maxUploadAttempts) {
-      if (options?.signal?.aborted) throw new Error('上传已取消');
-      await new Promise(r => setTimeout(r, 1000));
-      const statusResp = await fetch(`${API_BASE_URL}/api/upload/status/${uploadTaskId}`, {
-        signal: options?.signal
-      });
-      if (!statusResp.ok) throw new Error('上传状态查询失败');
-      const status = await statusResp.json();
-
-      if (status.status === 'done') {
-        videoUrl = status.result.url;
-        ossKey = status.result.ossKey;
-        break;
-      }
-      if (status.status === 'error') {
-        throw new Error(status.error || '上传失败');
-      }
-      const progress = Math.min(19, Math.floor((uploadAttempts / maxUploadAttempts) * 20));
-      options?.onProgress?.({
-        phase: 'uploading',
-        progress,
-        message: status.message || '上传中...'
-      });
-      uploadAttempts++;
-    }
-
-    if (!videoUrl) {
-      throw new Error('上传超时');
+    if (!regResp.ok) {
+      const errText = await regResp.text();
+      throw new Error(`注册媒体记录失败: ${errText}`);
     }
 
     options?.onProgress?.({ phase: 'compressing', progress: 20, message: '提交阿里云转码任务...' });
 
-    // 2. 调用后端 /api/aliyun/transcode 提交转码任务
+    // 3. 提交转码任务
     const transcodeResp = await fetch(`${API_BASE_URL}/api/aliyun/transcode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -761,7 +1029,7 @@ export async function uploadVideoWithAliyunCompression(
 
     const { taskId, skipped, originalUrl } = await transcodeResp.json();
 
-    // 如果后端判定不需要压缩，返回原视频
+    // 后端判定不需要压缩，返回原视频
     if (skipped && originalUrl) {
       options?.onProgress?.({ phase: 'done', progress: 100, message: '视频码率符合要求，无需压缩' });
       return {
@@ -773,9 +1041,9 @@ export async function uploadVideoWithAliyunCompression(
       };
     }
 
-    // 3. 轮询 /api/aliyun/transcode/:taskId 查询状态
+    // 4. 轮询转码状态
     let attempts = 0;
-    const maxAttempts = 300; // 最大等待 10 分钟 (300 * 2秒)
+    const maxAttempts = 300;
 
     while (attempts < maxAttempts) {
       if (options?.signal?.aborted) throw new Error('转码已取消');
@@ -789,16 +1057,14 @@ export async function uploadVideoWithAliyunCompression(
       const status = await statusResp.json();
 
       if (status.status === 'completed' || status.status === 'done') {
-        // 4. 转码完成，返回结果
         options?.onProgress?.({ phase: 'done', progress: 100, message: '阿里云转码完成' });
-
         return {
           url: status.url || videoUrl,
           compressed: true,
           id: status.id,
           filename: status.filename || file.name,
           ossKey: status.ossKey || ossKey,
-          originalSizeKB: Math.round(file.size / 1024),
+          originalSizeKB,
           compressedSizeKB: status.fileSize ? Math.round(status.fileSize / 1024) : undefined,
         };
       }
@@ -807,7 +1073,6 @@ export async function uploadVideoWithAliyunCompression(
         throw new Error('阿里云压缩失败：' + (status.error || '转码失败') + '。请尝试其他压缩方式，或者手动压缩后再上传！');
       }
 
-      // 更新进度：20-80 映射到转码进度
       const progress = 20 + Math.min(status.progress || 0, 100) * 0.6;
       options?.onProgress?.({
         phase: 'compressing',
@@ -816,13 +1081,12 @@ export async function uploadVideoWithAliyunCompression(
       });
 
       attempts++;
-      await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒轮询一次
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     throw new Error('阿里云压缩失败：转码超时。请尝试其他压缩方式，或者手动压缩后再上传！');
   } catch (err) {
-    // 任何阶段失败（初始上传/转码提交/转码轮询/用户取消）：清理残留
-    // 1. 如果初始上传已完成（videoUrl 已设置），清理转码相关 DB 记录和 OSS 文件
+    // 任何阶段失败：清理已直传的 OSS 文件和 DB 记录
     if (videoUrl) {
       try {
         await fetch(`${API_BASE_URL}/api/aliyun/transcode-cleanup`, {
@@ -833,18 +1097,6 @@ export async function uploadVideoWithAliyunCompression(
         console.log('[aliyun] 失败/取消，已清理原始视频:', videoUrl);
       } catch (cleanupErr) {
         console.error('[aliyun] 清理失败资源失败:', cleanupErr);
-      }
-    }
-    // 2. 如果初始上传尚未完成（videoUrl 未设置但 uploadTaskId 已获取），取消后端异步上传任务
-    //    避免后端异步任务完成后遗留孤儿 OSS 文件 + DB 记录
-    if (uploadTaskId && !videoUrl) {
-      try {
-        await fetch(`${API_BASE_URL}/api/upload/cancel/${uploadTaskId}`, {
-          method: 'POST'
-        });
-        console.log('[aliyun] 已取消后端上传任务:', uploadTaskId);
-      } catch (cancelErr) {
-        console.error('[aliyun] 取消后端上传任务失败:', cancelErr);
       }
     }
     throw err;

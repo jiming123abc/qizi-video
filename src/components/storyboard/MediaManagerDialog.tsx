@@ -6,6 +6,7 @@ import { useSignedUrl } from '../../hooks/useSignedUrl';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useToastContext } from '../ToastProvider';
 
 interface MediaManagerDialogProps {
   isOpen: boolean;
@@ -14,6 +15,7 @@ interface MediaManagerDialogProps {
   onMediaChange?: (shot: Shot) => void;
   onAiGenerate?: (shot: Shot) => void;
   refreshTrigger?: number;
+  childDialogOpen?: boolean;
 }
 
 const MAX_MEDIA_COUNT = 10;
@@ -51,7 +53,8 @@ export default function MediaManagerDialog({
   shot,
   onMediaChange,
   onAiGenerate,
-  refreshTrigger = 0
+  refreshTrigger = 0,
+  childDialogOpen = false
 }: MediaManagerDialogProps) {
   const [mediaList, setMediaList] = useState<ShotMedia[]>(shot?.media || []);
   const [uploadingFiles, setUploadingFiles] = useState<UploadingItem[]>([]);
@@ -60,6 +63,7 @@ export default function MediaManagerDialog({
   const [isDragOver, setIsDragOver] = useState(false);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { showToast } = useToastContext();
   // P3-23：sceneRefInputRef 已移除（场景参考图上传功能废弃）
 
   // 从 API 拉取最新媒体列表
@@ -209,7 +213,7 @@ export default function MediaManagerDialog({
 
     const remaining = MAX_MEDIA_COUNT - mediaList.length;
     if (remaining <= 0) {
-      alert(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`);
+      showToast(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
       return;
     }
 
@@ -405,7 +409,9 @@ export default function MediaManagerDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={handleClose}>
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4 transition-opacity duration-200 ${
+      childDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
+    }`} onClick={handleClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}

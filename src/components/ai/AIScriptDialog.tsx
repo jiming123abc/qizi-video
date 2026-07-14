@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { X, Upload, FileText, Loader2, CheckCircle2, AlertCircle, Info, Scissors, ImageOff, ChevronDown, Download, Lightbulb } from 'lucide-react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
-import type { ModelConfig, Settings, DigitalAsset } from '../../lib/types';
+import type { ModelConfig, Settings, DigitalAsset, AiScriptShot } from '../../lib/types';
 import { AiErrorGuide } from './AiErrorGuide';
 
 interface AIScriptDialogProps {
@@ -230,7 +230,7 @@ export default function AIScriptDialog({
           const outputShots = data.output?.shots || [];
           setShotCount(outputShots.length);
           // 保存完整的分镜数据（包括 hasShotCut 和 isStockOrEffect）
-          const fullShots: ShotData[] = outputShots.map((s: any, idx: number) => ({
+          const fullShots: ShotData[] = outputShots.map((s: AiScriptShot, idx: number) => ({
             shotIndex: idx + 1,
             shotType: s.shotType || '未知',
             title: s.title || s.sceneContent?.substring(0, 20) || `镜头 ${idx + 1}`,

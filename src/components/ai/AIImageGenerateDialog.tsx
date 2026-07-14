@@ -3,6 +3,8 @@ import { X, Upload, Loader2, CheckCircle, AlertCircle, Info, Plus, ChevronDown, 
 import type { Shot, Settings, ModelConfig, AiGeneratedImage, RefImage, DigitalAsset } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
+import ConfirmDialog from '../ConfirmDialog';
+import { useToastContext } from '../ToastProvider';
 import { useRefImages } from '../../hooks/useRefImages';
 import { AiErrorGuide } from './AiErrorGuide';
 
@@ -93,6 +95,18 @@ export default function AIImageGenerateDialog({
   const [status, setStatus] = useState<'idle' | 'generating' | 'done' | 'error'>('idle');
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const { showToast } = useToastContext();
+
+  // Q1：多图暂存 - 第一张自动上传 OSS，后续（最多5张）需用户确认后上传
+  const MAX_STAGED_IMAGES = 5;
+  const [stagedImages, setStagedImages] = useState<Array<{ id: string; url: string; uploaded: boolean }>>([]);
+  const [selectedStagedId, setSelectedStagedId] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false); // 正在上传预览图到 OSS
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
   // P3-24：@引用浮层
@@ -111,6 +125,9 @@ export default function AIImageGenerateDialog({
     MAX_REF_IMAGES,
     MAX_HISTORY,
     isFull,
+    uploading: refUploading,
+    uploadProgress: refUploadProgress,
+    uploadMessage: refUploadMessage,
     addAssetRef,
     addUploadRef,
     addUrlRef,
@@ -179,6 +196,10 @@ export default function AIImageGenerateDialog({
       setStatus('idle');
       setGeneratedImageUrl(null);
       setErrorMessage('');
+      // Q1：清空多图暂存
+      setStagedImages([]);
+      setSelectedStagedId(null);
+      setConfirming(false);
       // P3-24：清空参考图，防止上次选择残留
       clearRefs();
       // P3-22：重新加载历史图（dialog 重新打开时手动触发，仅当 ownerId 存在）
@@ -259,7 +280,7 @@ export default function AIImageGenerateDialog({
     try {
       await addUploadRef(file);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '上传参考图失败');
+      showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
     }
   };
 
@@ -270,7 +291,7 @@ export default function AIImageGenerateDialog({
       try {
         await addUploadRef(f);
       } catch (err) {
-        alert(err instanceof Error ? err.message : '上传参考图失败');
+        showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
       }
     }
     e.target.value = '';
@@ -278,6 +299,10 @@ export default function AIImageGenerateDialog({
 
   const startGeneration = async () => {
     if (!selectedModel || !prompt.trim()) return;
+    if (stagedImages.length >= MAX_STAGED_IMAGES) return;
+
+    // Q1：第一张自动上传 OSS（previewOnly=false），后续为预览（previewOnly=true）
+    const previewOnly = stagedImages.length > 0;
 
     setStatus('generating');
     setErrorMessage('');
@@ -297,6 +322,7 @@ export default function AIImageGenerateDialog({
         quality: selectedModel.quality || 'standard',
         ownerType: effectiveOwnerType,
         ownerId: effectiveOwnerId || undefined,
+        previewOnly,
       };
       // 非分镜模式传 projectId（用于 AI 通用生图存到正确的 digital-assets 目录）
       if (!isShotMode && effectiveProjectId) {
@@ -338,11 +364,16 @@ export default function AIImageGenerateDialog({
             pollingRef.current = null;
 
             const imageUrl = task.output?.imageUrl;
+            const uploaded = task.output?.uploaded !== false;
             if (imageUrl) {
+              // Q1：添加到暂存区
+              const stagedId = `staged-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              setStagedImages(prev => [...prev, { id: stagedId, url: imageUrl, uploaded }]);
+              setSelectedStagedId(stagedId);
               setGeneratedImageUrl(imageUrl);
               setStatus('done');
-              // P3-22：生成成功后刷新历史图列表（仅当 ownerId 存在）
-              if (effectiveOwnerId) {
+              // P3-22：生成成功后刷新历史图列表（仅当 ownerId 存在且已上传）
+              if (effectiveOwnerId && uploaded) {
                 loadHistory();
               }
             } else {
@@ -369,14 +400,57 @@ export default function AIImageGenerateDialog({
     }
   };
 
-  const handleUseImage = () => {
-    if (generatedImageUrl && onUseImage) {
-      onUseImage(generatedImageUrl);
+  // Q1：使用选中的图片 - 预览图需先上传 OSS
+  const handleUseImage = async () => {
+    const selected = stagedImages.find(s => s.id === selectedStagedId) || stagedImages[stagedImages.length - 1];
+    if (!selected || !onUseImage) return;
+
+    try {
+      let finalUrl = selected.url;
+      if (!selected.uploaded) {
+        // 预览图需先上传到 OSS
+        setConfirming(true);
+        const res = await fetch('/api/ai/upload-preview-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: selected.url,
+            projectId: effectiveProjectId,
+            ownerType: effectiveOwnerType,
+            ownerId: effectiveOwnerId || undefined,
+            prompt: prompt.trim(),
+            model: selectedModel?.model,
+            provider: selectedProvider,
+            size: selectedSize,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.message || '上传预览图失败');
+        }
+        const data = await res.json();
+        finalUrl = data.url;
+        // 更新暂存区状态
+        setStagedImages(prev => prev.map(s => s.id === selected.id ? { ...s, url: finalUrl, uploaded: true } : s));
+        if (effectiveOwnerId) {
+          loadHistory();
+        }
+      }
+      onUseImage(finalUrl);
       onClose();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '使用图片失败', 'error');
+    } finally {
+      setConfirming(false);
     }
   };
 
   const handleRegenerate = () => {
+    // Q1：如果有暂存图且未达上限，回到 idle 允许继续生成
+    if (stagedImages.length >= MAX_STAGED_IMAGES) {
+      showToast('已达暂存上限（5张），请选择一张使用', 'info');
+      return;
+    }
     setStatus('idle');
     setGeneratedImageUrl(null);
     setErrorMessage('');
@@ -399,7 +473,7 @@ export default function AIImageGenerateDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[65] p-8 sm:p-4" onClick={onClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md sm:max-w-xl rounded-2xl sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl max-h-[90vh] overflow-hidden"
         onClick={e => e.stopPropagation()}
@@ -490,11 +564,12 @@ export default function AIImageGenerateDialog({
                       </p>
                     </div>
                   ) : (
+                    <>
                     <div className="flex gap-2 overflow-x-auto p-2">
                       {refImages.map(r => (
                         <RefThumb key={r.id} refImg={r} onRemove={() => removeRef(r.id)} />
                       ))}
-                      {!isFull && effectiveProjectId && (
+                      {!isFull && effectiveProjectId && !refUploading && (
                         <button
                           onClick={() => uploadInputRef.current?.click()}
                           className="shrink-0 w-16 h-16 rounded-lg border-2 border-dashed border-white/20 hover:border-violet-400 flex items-center justify-center transition"
@@ -503,7 +578,25 @@ export default function AIImageGenerateDialog({
                           <Plus className="w-5 h-5 text-white/40" />
                         </button>
                       )}
+                      {refUploading && (
+                        <div className="shrink-0 w-16 h-16 rounded-lg border-2 border-violet-400 bg-violet-500/10 flex flex-col items-center justify-center px-1">
+                          <Loader2 className="w-4 h-4 text-violet-300 animate-spin" />
+                          <span className="text-[10px] text-violet-200 mt-0.5">{refUploadProgress}%</span>
+                        </div>
+                      )}
                     </div>
+                    {refUploading && (
+                      <div className="px-3 pb-2">
+                        <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-violet-500 transition-all duration-200"
+                            style={{ width: `${refUploadProgress}%` }}
+                          />
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1 truncate">{refUploadMessage}</p>
+                      </div>
+                    )}
+                    </>
                   )}
                   <input
                     ref={uploadInputRef}
@@ -666,6 +759,45 @@ export default function AIImageGenerateDialog({
                   </label>
                 </div>
               )}
+
+              {/* Q1：已暂存的生成图（idle 状态下显示，允许用户选择已生成的图） */}
+              {stagedImages.length > 0 && (
+                <div className="mb-4 p-3 rounded-xl bg-white/5 border border-white/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs text-slate-400">
+                      已生成 {stagedImages.length}/{MAX_STAGED_IMAGES} 张
+                    </p>
+                    <button
+                      onClick={() => {
+                        const last = stagedImages[stagedImages.length - 1];
+                        if (last) {
+                          setSelectedStagedId(last.id);
+                          setGeneratedImageUrl(last.url);
+                          setStatus('done');
+                        }
+                      }}
+                      className="text-xs text-violet-400 hover:text-violet-300 transition"
+                    >
+                      查看并选择 →
+                    </button>
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {stagedImages.map((img, idx) => (
+                      <StagedThumb
+                        key={img.id}
+                        img={img}
+                        idx={idx}
+                        isSelected={false}
+                        onSelect={() => {
+                          setSelectedStagedId(img.id);
+                          setGeneratedImageUrl(img.url);
+                          setStatus('done');
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -686,15 +818,52 @@ export default function AIImageGenerateDialog({
               <div className="flex items-center gap-2 text-green-400 mb-4">
                 <CheckCircle className="w-6 h-6" />
                 <span className="text-lg font-medium">生成完成！</span>
+                <span className="text-xs text-slate-400 ml-2">
+                  已生成 {stagedImages.length}/{MAX_STAGED_IMAGES} 张
+                </span>
               </div>
 
-              <div className="w-full rounded-xl border border-white/10 overflow-hidden mb-4">
+              {/* Q1：主预览区 - 显示当前选中的暂存图 */}
+              <div className="w-full rounded-xl border border-white/10 overflow-hidden mb-3 relative">
                 <img
                   src={generatedImageUrl}
                   alt="生成的图片"
                   className="w-full h-auto max-h-80 object-contain bg-black/40"
                 />
+                {/* 预览/已上传标识 */}
+                {(() => {
+                  const selected = stagedImages.find(s => s.id === selectedStagedId);
+                  if (selected && !selected.uploaded) {
+                    return (
+                      <span className="absolute top-2 right-2 px-2 py-1 rounded-md bg-amber-500/80 text-white text-xs font-medium">
+                        预览（未上传）
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
+
+              {/* Q1：暂存图缩略图条 */}
+              {stagedImages.length > 1 && (
+                <div className="w-full mb-2">
+                  <p className="text-xs text-slate-400 mb-2">点击缩略图选择</p>
+                  <div className="flex gap-2 overflow-x-auto pb-2">
+                    {stagedImages.map((img, idx) => (
+                      <StagedThumb
+                        key={img.id}
+                        img={img}
+                        idx={idx}
+                        isSelected={selectedStagedId === img.id}
+                        onSelect={() => {
+                          setSelectedStagedId(img.id);
+                          setGeneratedImageUrl(img.url);
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -725,8 +894,14 @@ export default function AIImageGenerateDialog({
                     }}
                     onDelete={(e) => {
                       e.stopPropagation();
-                      if (!confirm('确定要删除这张历史图吗？')) return;
-                      deleteHistory(img.id);
+                      setConfirmDialog({
+                        title: '确认删除',
+                        message: '确定要删除这张历史图吗？',
+                        onConfirm: () => {
+                          setConfirmDialog(null);
+                          deleteHistory(img.id);
+                        }
+                      });
                     }}
                   />
                 ))}
@@ -752,10 +927,10 @@ export default function AIImageGenerateDialog({
               </button>
               <button
                 onClick={startGeneration}
-                disabled={!prompt.trim() || !selectedModel}
+                disabled={!prompt.trim() || !selectedModel || stagedImages.length >= MAX_STAGED_IMAGES}
                 className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                生成图片
+                {stagedImages.length > 0 ? `生成第 ${stagedImages.length + 1} 张` : '生成图片'}
               </button>
             </>
           )}
@@ -771,12 +946,15 @@ export default function AIImageGenerateDialog({
 
           {status === 'done' && (
             <>
-              <button
-                onClick={handleRegenerate}
-                className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
-              >
-                重新生成
-              </button>
+              {/* Q1：继续生成（未达上限时） */}
+              {stagedImages.length < MAX_STAGED_IMAGES && (
+                <button
+                  onClick={handleRegenerate}
+                  className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
+                >
+                  继续生成 ({stagedImages.length}/{MAX_STAGED_IMAGES})
+                </button>
+              )}
               <button
                 onClick={onClose}
                 className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
@@ -786,9 +964,17 @@ export default function AIImageGenerateDialog({
               {onUseImage && (
                 <button
                   onClick={handleUseImage}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-sm font-medium transition"
+                  disabled={confirming}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
-                  使用此图片
+                  {confirming ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      上传中...
+                    </>
+                  ) : (
+                    '使用此图片'
+                  )}
                 </button>
               )}
             </>
@@ -830,6 +1016,16 @@ export default function AIImageGenerateDialog({
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={!!confirmDialog}
+        title={confirmDialog?.title || ''}
+        message={confirmDialog?.message || ''}
+        confirmText="删除"
+        confirmButtonColor="red"
+        onConfirm={() => { confirmDialog?.onConfirm(); }}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }
@@ -968,6 +1164,42 @@ function ShotImageThumb({
       <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
         {shotTitle}
       </div>
+    </div>
+  );
+}
+
+// Q1：暂存图缩略图组件（独立组件以使用 useSignedUrl hook）
+function StagedThumb({
+  img,
+  idx,
+  isSelected,
+  onSelect,
+}: {
+  img: { id: string; url: string; uploaded: boolean };
+  idx: number;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  // 仅对已上传到 OSS 的 URL 签名（预览图是 AI 临时 URL，无需签名）
+  const signedUrl = useSignedUrl(img.uploaded ? img.url : '');
+  return (
+    <div
+      onClick={onSelect}
+      className={`relative shrink-0 w-20 h-20 rounded-lg overflow-hidden border cursor-pointer transition ${
+        isSelected
+          ? 'border-violet-400 ring-2 ring-violet-400/50'
+          : 'border-white/10 hover:border-white/30'
+      }`}
+    >
+      <img
+        src={signedUrl || img.url}
+        alt={`生成图 ${idx + 1}`}
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+      />
+      <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white text-center py-0.5">
+        {idx + 1}{!img.uploaded && ' · 预览'}
+      </span>
     </div>
   );
 }

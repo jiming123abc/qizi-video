@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X,
   Upload,
@@ -9,10 +9,14 @@ import {
   Check,
   Image as ImageIcon,
   Sparkles,
-  CheckCircle2
+  ChevronLeft,
+  ChevronRight,
+  Settings,
 } from 'lucide-react';
 import type { DigitalAsset } from '../../lib/types';
 import AIImageGenerateDialog from '../ai/AIImageGenerateDialog';
+import ConfirmDialog from '../ConfirmDialog';
+import { useToastContext } from '../ToastProvider';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 import { uploadImage, detectFileType } from '../../lib/ossUtils';
@@ -56,7 +60,7 @@ export default function DigitalAssetDialog({
   const [editing, setEditing] = useState<EditingState>({ id: null, field: null, value: '' });
   const [showAddForm, setShowAddForm] = useState(false);
   const [newAsset, setNewAsset] = useState({ name: '' });
-  const [expandedAssetId, setExpandedAssetId] = useState<number | null>(null);
+  const [managingAssetId, setManagingAssetId] = useState<number | null>(null);
 
   // AI 建议资产状态
   const [showAiSuggestions, setShowAiSuggestions] = useState(false);
@@ -68,9 +72,15 @@ export default function DigitalAssetDialog({
   const [aiImagePrompt, setAiImagePrompt] = useState('');
   const [updatePromptAfterGen, setUpdatePromptAfterGen] = useState(true);
 
-  // 上传文件 input ref
-  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [uploadingAssetId, setUploadingAssetId] = useState<number | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadMessage, setUploadMessage] = useState('');
+  const { showToast } = useToastContext();
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
@@ -136,19 +146,26 @@ export default function DigitalAssetDialog({
 
   // 删除资产
   const handleDeleteAsset = async (id: number) => {
-    if (!confirm('确定要删除这个资产吗？')) return;
-
-    try {
-      const res = await fetch(`/api/projects/${projectId}/assets/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (res.ok) {
-        fetchAssets();
+    setConfirmDialog({
+      title: '确认删除',
+      message: '确定要删除这个资产吗？',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setManagingAssetId(null);
+        try {
+          const res = await fetch(`/api/projects/${projectId}/assets/${id}`, {
+            method: 'DELETE',
+          });
+          if (res.ok) {
+            fetchAssets();
+            showToast('资产已删除');
+          }
+        } catch (err) {
+          console.error('删除资产失败:', err);
+          showToast('删除失败', 'error');
+        }
       }
-    } catch (err) {
-      console.error('删除资产失败:', err);
-    }
+    });
   };
 
   // 更新资产
@@ -195,32 +212,44 @@ export default function DigitalAssetDialog({
     // 校验文件类型：拒绝视频
     const detected = detectFileType(file);
     if (detected.type === 'video') {
-      alert('数字资产仅支持图片上传，不能上传视频');
+      showToast('数字资产仅支持图片上传，不能上传视频', 'error');
       return;
     }
     if (!detected.supported) {
-      alert('不支持的文件格式');
+      showToast('不支持的文件格式', 'error');
       return;
     }
 
     setUploadingAssetId(assetId);
+    setUploadProgress(0);
+    setUploadMessage('准备上传...');
     try {
       const result = await uploadImage(file, {
         projectId,
         usage: 'digital-asset',
         title: `asset_${assetId}_${Date.now()}`,
+        onProgress: p => {
+          setUploadProgress(p.progress);
+          setUploadMessage(p.message);
+        }
       });
 
       if (result.url) {
+        setUploadProgress(100);
+        setUploadMessage('保存中...');
         await addAssetImage(assetId, result.url);
       } else {
-        alert('上传失败');
+        showToast('上传失败', 'error');
       }
     } catch (err) {
       console.error('上传图片失败:', err);
-      alert('上传图片失败，请重试');
+      showToast('上传图片失败，请重试', 'error');
     } finally {
-      setUploadingAssetId(null);
+      setTimeout(() => {
+        setUploadingAssetId(null);
+        setUploadProgress(0);
+        setUploadMessage('');
+      }, 500);
     }
   };
 
@@ -242,17 +271,25 @@ export default function DigitalAssetDialog({
 
   // 删除资产图片
   const handleDeleteImage = async (assetId: number, imageId: number) => {
-    if (!confirm('确定要删除这张图片吗？')) return;
-    try {
-      const res = await fetch(`/api/projects/${projectId}/assets/${assetId}/images/${imageId}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        fetchAssets();
+    setConfirmDialog({
+      title: '确认删除',
+      message: '确定要删除这张图片吗？',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          const res = await fetch(`/api/projects/${projectId}/assets/${assetId}/images/${imageId}`, {
+            method: 'DELETE',
+          });
+          if (res.ok) {
+            fetchAssets();
+            showToast('图片已删除');
+          }
+        } catch (err) {
+          console.error('删除资产图片失败:', err);
+          showToast('删除失败', 'error');
+        }
       }
-    } catch (err) {
-      console.error('删除图片失败:', err);
-    }
+    });
   };
 
   // AI 生图
@@ -343,9 +380,13 @@ export default function DigitalAssetDialog({
 
   if (!isOpen) return null;
 
+  const managingAsset = assets.find(a => a.id === managingAssetId) || null;
+
   return (
     <>
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={onClose}>
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4 transition-opacity duration-200 ${
+      aiImageDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
+    }`} onClick={onClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-4xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
@@ -360,6 +401,22 @@ export default function DigitalAssetDialog({
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* 上传进度条 */}
+        {uploadingAssetId !== null && (
+          <div className="px-6 py-2 bg-violet-500/10 border-b border-violet-500/20">
+            <div className="flex items-center justify-between text-xs text-violet-200 mb-1">
+              <span className="truncate">{uploadMessage || '上传中...'}</span>
+              <span className="ml-2 shrink-0">{uploadProgress}%</span>
+            </div>
+            <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-violet-500 transition-all duration-200"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* AI 建议资产提示 */}
         {showAiSuggestions && aiSuggestedAssets && (
@@ -510,157 +567,24 @@ export default function DigitalAssetDialog({
               </div>
             ) : (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {assets.map(asset => {
-                  const images = asset.images || [];
-                  const coverUrl = images.length > 0 ? images[0].imageUrl : asset.imageUrl;
-                  const isExpanded = expandedAssetId === asset.id;
-                  const maxImages = 10;
-                  const canAddImage = images.length < maxImages;
-
-                  return (
-                    <div
-                      key={asset.id}
-                      className="group rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:border-white/20 transition"
-                    >
-                      {/* 封面图区域 - 点击展开/收起 */}
-                      <div
-                        className="relative aspect-square bg-black/40 cursor-pointer"
-                        onClick={() => setExpandedAssetId(isExpanded ? null : asset.id)}
-                      >
-                        {coverUrl ? (
-                          <AssetCoverImage url={coverUrl} alt={asset.name} />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-500">
-                            <ImageIcon className="w-12 h-12" />
-                          </div>
-                        )}
-
-                        {/* 图片数量角标 */}
-                        {images.length > 1 && (
-                          <div className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-black/60 text-xs text-white">
-                            {images.length} / {maxImages}
-                          </div>
-                        )}
-
-                        {/* 悬浮操作按钮 */}
-                        <div className="absolute inset-0 bg-black/40 transition flex items-center justify-center gap-2">
-                          {/* 上传图片 */}
-                          {canAddImage && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                const input = document.createElement('input');
-                                input.type = 'file';
-                                input.accept = 'image/*';
-                                input.onchange = (e) => {
-                                  const files = (e.target as HTMLInputElement).files;
-                                  if (files && files[0]) {
-                                    setUploadingAssetId(asset.id);
-                                    handleUploadImage(asset.id, files[0]);
-                                  }
-                                };
-                                input.click();
-                              }}
-                              className="w-8 h-8 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center transition"
-                              title="上传图片"
-                            >
-                              {uploadingAssetId === asset.id ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : (
-                                <Upload className="w-4 h-4" />
-                              )}
-                            </button>
-                          )}
-
-                          {/* AI 生图 */}
-                          {canAddImage && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openAiImageDialog(asset);
-                              }}
-                              className="w-8 h-8 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center transition"
-                              title="AI 生图"
-                            >
-                              <Sparkles className="w-4 h-4" />
-                            </button>
-                          )}
-
-                          {/* 删除 */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAsset(asset.id);
-                            }}
-                            className="w-8 h-8 rounded-full bg-red-500/50 hover:bg-red-500/70 flex items-center justify-center transition"
-                            title="删除"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* 名称 */}
-                      <div className="p-3">
-                        {editing.id === asset.id && editing.field === 'name' ? (
-                          <div className="flex gap-1">
-                            <input
-                              type="text"
-                              value={editing.value}
-                              onChange={e => setEditing({ ...editing, value: e.target.value })}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter') saveEditing();
-                                if (e.key === 'Escape') cancelEditing();
-                              }}
-                              className="flex-1 px-2 py-1 text-sm rounded border border-violet-500 bg-slate-800 focus:outline-none"
-                              autoFocus
-                            />
-                            <button onClick={saveEditing} className="p-1 hover:bg-white/10 rounded">
-                              <Check className="w-4 h-4 text-green-400" />
-                            </button>
-                          </div>
-                        ) : (
-                          <div
-                            className="flex items-center gap-1 cursor-pointer group/name"
-                            onClick={() => startEditing(asset, 'name')}
-                          >
-                            <h4 className="font-medium text-sm truncate flex-1">{asset.name}</h4>
-                            <Edit2 className="w-3 h-3 opacity-0 group-hover/name:opacity-100 text-slate-400 transition" />
-                          </div>
-                        )}
-                      </div>
-
-                      {/* 展开的图片列表 */}
-                      {isExpanded && images.length > 0 && (
-                        <div className="px-3 pb-3 border-t border-white/5 pt-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs text-slate-400">图片列表 ({images.length}/{maxImages})</span>
-                          </div>
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {images.map(img => (
-                              <div
-                                key={img.id}
-                                className="relative aspect-square rounded-lg overflow-hidden bg-black/30 group/img"
-                              >
-                                <AssetImage url={img.imageUrl} />
-                                <button
-                                  onClick={() => handleDeleteImage(asset.id, img.id)}
-                                  className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-red-500/70 opacity-0 group-hover/img:opacity-100 flex items-center justify-center transition"
-                                  title="删除图片"
-                                >
-                                  <X className="w-3 h-3 text-white" />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                          {!canAddImage && (
-                            <p className="text-xs text-amber-400 mt-2">最多 {maxImages} 张图片</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                {assets.map(asset => (
+                  <AssetCard
+                    key={asset.id}
+                    asset={asset}
+                    isEditingName={editing.id === asset.id && editing.field === 'name'}
+                    editingNameValue={editing.id === asset.id ? editing.value : asset.name}
+                    onStartEditName={() => startEditing(asset, 'name')}
+                    onChangeEditingName={(v) => setEditing({ ...editing, value: v })}
+                    onSaveEditName={saveEditing}
+                    onCancelEditName={cancelEditing}
+                    onManage={() => setManagingAssetId(asset.id)}
+                    onQuickUpload={(file) => handleUploadImage(asset.id, file)}
+                    onQuickAiGenerate={() => openAiImageDialog(asset)}
+                    isUploading={uploadingAssetId === asset.id}
+                    uploadProgress={uploadProgress}
+                    uploadMessage={uploadMessage}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -678,6 +602,18 @@ export default function DigitalAssetDialog({
       </div>
     </div>
 
+      <AssetManageDialog
+        asset={managingAsset}
+        isUploading={managingAssetId !== null && uploadingAssetId === managingAssetId}
+        uploadProgress={uploadProgress}
+        uploadMessage={uploadMessage}
+        onClose={() => setManagingAssetId(null)}
+        onUpload={(file) => { if (managingAsset) handleUploadImage(managingAsset.id, file); }}
+        onAiGenerate={() => { if (managingAsset) { openAiImageDialog(managingAsset); setManagingAssetId(null); } }}
+        onDeleteImage={(imageId) => { if (managingAsset) handleDeleteImage(managingAsset.id, imageId); }}
+        onDeleteAsset={() => { if (managingAsset) handleDeleteAsset(managingAsset.id); }}
+      />
+
       <AIImageGenerateDialog
         isOpen={aiImageDialogOpen}
         onClose={() => {
@@ -694,32 +630,210 @@ export default function DigitalAssetDialog({
         projectId={projectId}
       />
 
-      {/* 隐藏的文件上传 input */}
-      <input
-        ref={uploadInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          if (uploadingAssetId && e.target.files && e.target.files[0]) {
-            handleUploadImage(uploadingAssetId, e.target.files[0]);
-          }
-        }}
+      <ConfirmDialog
+        isOpen={!!confirmDialog}
+        title={confirmDialog?.title || ''}
+        message={confirmDialog?.message || ''}
+        confirmText="删除"
+        confirmButtonColor="red"
+        onConfirm={() => { confirmDialog?.onConfirm(); }}
+        onCancel={() => setConfirmDialog(null)}
       />
     </>
   );
 }
 
-// 数字资产封面图组件（使用签名 URL）
-function AssetCoverImage({ url, alt }: { url: string; alt: string }) {
-  const signedUrl = useSignedUrl(url);
+// 数字资产卡片组件（参考 ShotCard 模式）
+interface AssetCardProps {
+  asset: DigitalAsset;
+  isEditingName: boolean;
+  editingNameValue: string;
+  onStartEditName: () => void;
+  onChangeEditingName: (value: string) => void;
+  onSaveEditName: () => void;
+  onCancelEditName: () => void;
+  onManage: () => void;
+  onQuickUpload: (file: File) => void;
+  onQuickAiGenerate: () => void;
+  isUploading: boolean;
+  uploadProgress: number;
+  uploadMessage: string;
+}
+
+function AssetCard({
+  asset,
+  isEditingName,
+  editingNameValue,
+  onStartEditName,
+  onChangeEditingName,
+  onSaveEditName,
+  onCancelEditName,
+  onManage,
+  onQuickUpload,
+  onQuickAiGenerate,
+  isUploading,
+  uploadProgress,
+  uploadMessage,
+}: AssetCardProps) {
+  const images = asset.images || [];
+  const hasImages = images.length > 0;
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 图片数量变化时重置索引
+  useEffect(() => {
+    if (currentIndex >= images.length) {
+      setCurrentIndex(0);
+    }
+  }, [images.length, currentIndex]);
+
+  const currentImage = images[currentIndex];
+  const signedUrl = useSignedUrl(currentImage?.imageUrl);
+
+  const handlePrev = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCurrentIndex(i => (i - 1 + images.length) % images.length);
+  }, [images.length]);
+
+  const handleNext = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCurrentIndex(i => (i + 1) % images.length);
+  }, [images.length]);
+
   return (
-    <img
-      src={signedUrl || url}
-      alt={alt}
-      className="w-full h-full object-cover"
-      onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
-    />
+    <div className="group rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:border-white/20 transition">
+      {/* 媒体区域 */}
+      <div className="relative aspect-video bg-black/40">
+        {hasImages ? (
+          <>
+            <img
+              src={signedUrl || currentImage.imageUrl}
+              alt={asset.name}
+              className="w-full h-full object-cover"
+              onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+            />
+
+            {/* 左右箭头 */}
+            {images.length > 1 && (
+              <>
+                <button
+                  onClick={handlePrev}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  style={{ opacity: 0.7 }}
+                >
+                  <ChevronLeft className="w-4 h-4 text-white" />
+                </button>
+                <button
+                  onClick={handleNext}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+                  style={{ opacity: 0.7 }}
+                >
+                  <ChevronRight className="w-4 h-4 text-white" />
+                </button>
+
+                {/* 指示器 */}
+                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5">
+                  {images.map((_, idx) => (
+                    <div
+                      key={idx}
+                      className={`w-1.5 h-1.5 rounded-full transition ${
+                        idx === currentIndex ? 'bg-white w-3' : 'bg-white/40'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* 管理按钮 */}
+            <button
+              onClick={(e) => { e.stopPropagation(); onManage(); }}
+              className="absolute top-2 right-2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
+              title="管理"
+            >
+              <Settings className="w-4 h-4 text-white/90" />
+            </button>
+          </>
+        ) : (
+          /* 空状态：显示上传 + AI生成按钮 */
+          <div className="w-full h-full flex flex-col items-center justify-center gap-3 relative">
+            {isUploading ? (
+              <div className="flex flex-col items-center gap-2">
+                <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
+                <div className="w-48 h-2 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-slate-400">{uploadMessage || `${uploadProgress}%`}</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-violet-400/40 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition"
+                  >
+                    <Upload className="w-4 h-4" />
+                    上传
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onQuickAiGenerate(); }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-pink-400/40 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    AI生成
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">上传或AI生成资产图片</p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onQuickUpload(f);
+                    e.target.value = '';
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 名称区域 */}
+      <div className="p-3">
+        {isEditingName ? (
+          <div className="flex gap-1 min-w-0">
+            <input
+              type="text"
+              value={editingNameValue}
+              onChange={e => onChangeEditingName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') onSaveEditName();
+                if (e.key === 'Escape') onCancelEditName();
+              }}
+              className="flex-1 min-w-0 px-2 py-1 text-sm rounded border border-violet-500 bg-slate-800 focus:outline-none"
+              autoFocus
+            />
+            <button onClick={onSaveEditName} className="p-1 hover:bg-white/10 rounded">
+              <Check className="w-4 h-4 text-green-400" />
+            </button>
+          </div>
+        ) : (
+          <div
+            className="flex items-center gap-1 cursor-pointer group/name"
+            onClick={onStartEditName}
+          >
+            <h4 className="font-medium text-sm truncate flex-1">{asset.name}</h4>
+            <Edit2 className="w-3 h-3 opacity-0 group-hover/name:opacity-100 text-slate-400 transition" />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -733,5 +847,153 @@ function AssetImage({ url }: { url: string }) {
       className="w-full h-full object-cover"
       onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
     />
+  );
+}
+
+// 数字资产管理对话框
+interface AssetManageDialogProps {
+  asset: DigitalAsset | null;
+  isUploading: boolean;
+  uploadProgress: number;
+  uploadMessage: string;
+  onClose: () => void;
+  onUpload: (file: File) => void;
+  onAiGenerate: () => void;
+  onDeleteImage: (imageId: number) => void;
+  onDeleteAsset: () => void;
+}
+
+function AssetManageDialog({
+  asset,
+  isUploading,
+  uploadProgress,
+  uploadMessage,
+  onClose,
+  onUpload,
+  onAiGenerate,
+  onDeleteImage,
+  onDeleteAsset,
+}: AssetManageDialogProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  useEscapeKey(onClose, !!asset);
+
+  if (!asset) return null;
+
+  const images = asset.images || [];
+  const maxImages = 10;
+  const canAddImage = images.length < maxImages;
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[65] p-8 sm:p-4" onClick={onClose}>
+      <div
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 shrink-0">
+          <h2 className="text-lg font-semibold truncate">管理 - {asset.name}</h2>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition shrink-0 ml-2"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* 上传进度条 */}
+        {isUploading && (
+          <div className="px-6 py-2 bg-violet-500/10 border-b border-violet-500/20 shrink-0">
+            <div className="flex items-center justify-between text-xs text-violet-200 mb-1">
+              <span className="truncate">{uploadMessage || '上传中...'}</span>
+              <span className="ml-2 shrink-0">{uploadProgress}%</span>
+            </div>
+            <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-violet-500 transition-all duration-200"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {/* 图片列表 */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm text-slate-300">图片列表 ({images.length}/{maxImages})</span>
+            </div>
+            {images.length === 0 ? (
+              <div className="text-center py-8 text-slate-400">
+                <ImageIcon className="w-10 h-10 mx-auto mb-2 opacity-40" />
+                <p className="text-sm">暂无图片</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-4 gap-2">
+                {images.map(img => (
+                  <div
+                    key={img.id}
+                    className="relative aspect-square rounded-lg overflow-hidden bg-black/30 group/img"
+                  >
+                    <AssetImage url={img.imageUrl} />
+                    <button
+                      onClick={() => onDeleteImage(img.id)}
+                      className="absolute top-1 right-1 w-6 h-6 rounded-full bg-red-500/70 hover:bg-red-500 flex items-center justify-center transition"
+                      title="删除图片"
+                    >
+                      <Trash2 className="w-3 h-3 text-white" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-white/10 shrink-0">
+          <div className="flex items-center gap-2">
+            {canAddImage && (
+              <>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-sm text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Upload className="w-4 h-4" />
+                  上传图片
+                </button>
+                <button
+                  onClick={onAiGenerate}
+                  disabled={isUploading}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-500 text-sm text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  AI生成
+                </button>
+              </>
+            )}
+            <button
+              onClick={onDeleteAsset}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-red-500/40 bg-red-500/10 hover:bg-red-500/20 text-sm text-red-300 transition"
+            >
+              <Trash2 className="w-4 h-4" />
+              删除资产
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onUpload(f);
+                e.target.value = '';
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

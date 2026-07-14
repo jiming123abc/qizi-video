@@ -493,32 +493,29 @@ async function compressImage(buffer, maxSizeKB = 300, mimetype = 'image/jpeg') {
     return buffer;
   }
 
+  const originalSize = buffer.length;
+  let bestBuffer = buffer;
+
+  // 统一转为 JPEG 格式压缩，从高质量逐步降低直到达标或质量下限
   let quality = 0.9;
-  let compressedBuffer = buffer;
-
-  // 根据输入格式选择压缩方式：PNG/WebP 保留透明度和原格式，其他转 JPEG
-  const isPng = mimetype === 'image/png';
-  const isWebp = mimetype === 'image/webp';
-
-  while (compressedBuffer.length > maxSizeBytes && quality > 0.1) {
-    let sharpInstance = sharp(buffer);
-    if (isPng) {
-      // PNG 使用无损压缩（palette 量化），保留透明度
-      sharpInstance = sharpInstance.png({
-        quality: Math.round(quality * 100),
-        compressionLevel: Math.max(1, Math.round((1 - quality) * 9)),
-        palette: true
-      });
-    } else if (isWebp) {
-      sharpInstance = sharpInstance.webp({ quality: Math.round(quality * 100) });
-    } else {
-      sharpInstance = sharpInstance.jpeg({ quality: Math.round(quality * 100) });
+  while (quality > 0.1) {
+    const compressedBuffer = await sharp(buffer)
+      .jpeg({ quality: Math.round(quality * 100) })
+      .toBuffer();
+    if (compressedBuffer.length < bestBuffer.length) {
+      bestBuffer = compressedBuffer;
     }
-    compressedBuffer = await sharpInstance.toBuffer();
+    if (bestBuffer.length <= maxSizeBytes) break;
     quality -= 0.05;
   }
 
-  return compressedBuffer;
+  // 保留较小者：如果压缩结果比原 buffer 大，返回原 buffer
+  if (bestBuffer.length >= originalSize) {
+    console.warn(`[compressImage] 压缩结果不小于原图，返回原 buffer (${(originalSize / 1024).toFixed(2)}KB)`);
+    return buffer;
+  }
+
+  return bestBuffer;
 }
 
 const DEFAULT_PROJECT_COVER_PREFIX = 'data:image/svg+xml';
@@ -1340,7 +1337,8 @@ app.post('/api/ai/create-shots', async (req, res) => {
 app.post('/api/ai/generate-image', async (req, res) => {
   try {
     // P3-24：refImages 优先于 sceneImageUrl（向后兼容）
-    const { shotId, prompt, sceneImageUrl, refImages, size, provider, model, quality } = req.body;
+    // Q1：previewOnly=true 时仅生成预览（不上传 OSS），用于多图暂存
+    const { shotId, prompt, sceneImageUrl, refImages, size, provider, model, quality, previewOnly } = req.body;
     
     if (!shotId) {
       return res.status(400).json({ success: false, message: '缺少 shotId' });
@@ -1388,7 +1386,7 @@ app.post('/api/ai/generate-image', async (req, res) => {
     });
     
     // 异步处理
-    processImageGen(task.id, shot, prompt, normalizedRefUrls, size, provider, model, quality || 'standard');
+    processImageGen(task.id, shot, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { previewOnly: !!previewOnly });
     
     res.json({ success: true, taskId: task.id });
   } catch (error) {
@@ -1402,7 +1400,7 @@ app.post('/api/ai/generic-image-gen', async (req, res) => {
   try {
     // P3-22：新增 ownerType/ownerId 参数，用于持久化历史图
     // P3-24：refImages 优先于 refImageUrl（向后兼容）
-    const { prompt, refImageUrl, refImages, size, provider, model, quality, ownerType, ownerId, projectId } = req.body;
+    const { prompt, refImageUrl, refImages, size, provider, model, quality, ownerType, ownerId, projectId, previewOnly } = req.body;
 
     if (!prompt || !provider || !model) {
       return res.status(400).json({ success: false, message: '缺少必要参数: prompt, provider, model' });
@@ -1426,7 +1424,7 @@ app.post('/api/ai/generic-image-gen', async (req, res) => {
     });
 
     // 异步处理
-    processGenericImageGen(task.id, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { ownerType, ownerId, projectId });
+    processGenericImageGen(task.id, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { ownerType, ownerId, projectId, previewOnly: !!previewOnly });
 
     res.json({ success: true, taskId: task.id });
   } catch (error) {
@@ -1471,6 +1469,75 @@ app.delete('/api/ai/generated-images/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('[app] 删除 AI 生图历史失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Q1：上传预览图到 OSS（用户从多图暂存中确认选择后调用）
+// 下载 AI 临时 URL → 压缩 → 上传 OSS → 写入 ai_generated_images 历史 → 返回 OSS URL
+app.post('/api/ai/upload-preview-image', async (req, res) => {
+  try {
+    const { url, projectId, ownerType, ownerId, prompt, model, provider, size } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, message: '缺少 url 参数' });
+    }
+    if (!projectId) {
+      return res.status(400).json({ success: false, message: '缺少 projectId' });
+    }
+
+    // 下载 AI 临时图片
+    const response = await fetch(url);
+    if (!response.ok) {
+      return res.status(400).json({ success: false, message: '下载 AI 图片失败（URL 可能已过期）' });
+    }
+    const buffer = await response.arrayBuffer();
+    let fileBuffer = Buffer.from(buffer);
+    let fileSize = fileBuffer.length;
+
+    // 压缩
+    const aiThresholdStr = await db.settings.get('image_compress_threshold_kb');
+    const aiThresholdKB = aiThresholdStr ? parseInt(aiThresholdStr) : 300;
+    if (fileSize > aiThresholdKB * 1024) {
+      try {
+        fileBuffer = await compressImage(fileBuffer, aiThresholdKB, 'image/png');
+        fileSize = fileBuffer.length;
+        console.log(`[AI] 预览图已压缩: ${buffer.byteLength} -> ${fileSize} bytes`);
+      } catch (e) {
+        console.warn('[AI] 预览图压缩失败，使用原图:', e.message);
+      }
+    }
+
+    // 上传到 OSS
+    let ossUrl = url;
+    if (isOSSConfigured && ossClient) {
+      const ext = 'png';
+      const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
+      const effectiveOwnerType = ownerType || 'asset';
+      const folder = effectiveOwnerType === 'shot'
+        ? `projects/${projectId}/shot-references/images`
+        : `projects/${projectId}/digital-assets`;
+      const ossKey = `${folder}/${fileName}`;
+      const ossResult = await ossClient.put(ossKey, fileBuffer);
+      ossUrl = ossResult.url;
+      console.log(`[AI] 预览图已上传到 OSS: ${ossKey}`);
+    }
+
+    // 写入 ai_generated_images 历史记录
+    if (ownerType && ownerId) {
+      try {
+        await db.storyboardAsync.run(
+          `INSERT INTO ai_generated_images (ownerType, ownerId, url, prompt, model, provider, size, fileSize, sortOrder)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [ownerType, parseInt(ownerId), ossUrl, prompt || '', model || '', provider || '', size || '', fileSize, 0]
+        );
+      } catch (e) {
+        console.warn('[AI] 预览图写入历史失败:', e.message);
+      }
+    }
+
+    res.json({ success: true, url: ossUrl });
+  } catch (error) {
+    console.error('[app] 上传预览图失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -1872,7 +1939,8 @@ async function processFinalShots(taskId, scriptContent, mode, settings, params, 
   console.log(`[AI] 最终分镜生成完成: ${shotsWithFlags.length} 个分镜，${sceneMap.size} 个场次，数字资产: ${digitalAssets.mainActors.length} 角色, ${digitalAssets.keyProps.length} 道具, ${digitalAssets.mainScenes.length} 场景`);
 }
 
-async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size, provider, model, quality) {
+async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size, provider, model, quality, options = {}) {
+  const { previewOnly = false } = options;
   // 跟踪已上传到项目 OSS 的图片 URL（用于失败时清理，避免残留）
   let uploadedOssUrl = '';
   try {
@@ -1975,7 +2043,7 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
     // 上传到 OSS
     let imageUrl = result.url;
     let fileSize = 0;
-    if (isOSSConfigured && ossClient && imageUrl) {
+    if (!previewOnly && isOSSConfigured && ossClient && imageUrl) {
       try {
         const response = await fetch(imageUrl);
         if (response.ok) {
@@ -1996,7 +2064,7 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
           }
           const ext = 'png';
           const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
-          const folder = shot.projectId ? `projects/${shot.projectId}/shot-references/images` : 'projects/default/shot-references/images';
+          const folder = `projects/${shot.projectId}/shot-references/images`;
           const ossKey = `${folder}/${fileName}`;
           const ossResult = await ossClient.put(ossKey, fileBuffer);
           imageUrl = ossResult.url;
@@ -2008,30 +2076,23 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
       }
     }
 
-    // 保存到 shot_media
-    const media = await db.shotMedia.create({
-      shotId: shot.id,
-      url: imageUrl,
-      type: 'image',
-      filename: '',
-      size: 0,
-      sortOrder: 0,
-      source: 'ai_generated'
-    });
-    // DB 写入成功：OSS 文件已被 shot_media 引用，后续失败不再清理
-    uploadedOssUrl = '';
-
-    // P3-22：同步写入 ai_generated_images 历史记录（ownerType='shot'）
-    try {
-      await db.storyboardAsync.run(
-        `INSERT INTO ai_generated_images (ownerType, ownerId, url, prompt, model, provider, size, fileSize, sortOrder)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ['shot', shot.id, imageUrl, finalPrompt || '', model || '', provider || '', size || '', fileSize, 0]
-      );
-    } catch (e) {
-      console.warn('[AI] 写入 ai_generated_images 历史失败:', e.message);
+    // Q1：previewOnly 模式不上传 OSS、不创建 shot_media、不写历史记录
+    // 用户确认选择后由 /api/ai/upload-preview-image 统一处理
+    if (!previewOnly) {
+      // P3-22：同步写入 ai_generated_images 历史记录（ownerType='shot'）
+      try {
+        await db.storyboardAsync.run(
+          `INSERT INTO ai_generated_images (ownerType, ownerId, url, prompt, model, provider, size, fileSize, sortOrder)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ['shot', shot.id, imageUrl, finalPrompt || '', model || '', provider || '', size || '', fileSize, 0]
+        );
+      } catch (e) {
+        console.warn('[AI] 写入 ai_generated_images 历史失败:', e.message);
+      }
+      // OSS 文件已被 ai_generated_images 引用，后续失败不再清理
+      uploadedOssUrl = '';
     }
-    
+
     // 记录 AI 使用日志
     await aiClient.recordUsage({
       type: 'image',
@@ -2041,14 +2102,14 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
       imageCount: 1,
       taskId
     }, settings);
-    
+
     await db.aiTasks.update(taskId, {
       status: 'done',
       progress: 100,
-      output: { media }
+      output: { imageUrl, uploaded: !previewOnly }
     });
-    
-    console.log(`[AI] 参考图生成完成: ${imageUrl}`);
+
+    console.log(`[AI] 参考图生成完成: ${imageUrl} (previewOnly=${previewOnly})`);
   } catch (error) {
     console.error('[AI] 参考图生成失败:', error.message);
     // 失败时清理已上传到项目 OSS 的图片文件，避免残留
@@ -2092,6 +2153,7 @@ async function processVideoSplit(taskId, videoUrl, params) {
  * P3-24：refImageUrls 改为数组，支持多参考图
  */
 async function processGenericImageGen(taskId, prompt, refImageUrls, size, provider, model, quality, ownerInfo) {
+  const { previewOnly = false } = ownerInfo || {};
   try {
     const settings = await db.settings.getAll();
 
@@ -2154,7 +2216,7 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
     // 上传到 OSS
     let imageUrl = result.url;
     let fileSize = 0;
-    if (isOSSConfigured && ossClient && imageUrl) {
+    if (!previewOnly && isOSSConfigured && ossClient && imageUrl) {
       try {
         const response = await fetch(imageUrl);
         if (response.ok) {
@@ -2175,8 +2237,9 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
           }
           const ext = 'png';
           const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
-          const projectId = ownerInfo && ownerInfo.projectId ? ownerInfo.projectId : null;
-          const folder = projectId ? `projects/${projectId}/digital-assets` : 'projects/default/digital-assets';
+          const projectId = ownerInfo && ownerInfo.projectId;
+          if (!projectId) throw new Error('projectId 不能为空');
+          const folder = `projects/${projectId}/digital-assets`;
           const ossKey = `${folder}/${fileName}`;
           const ossResult = await ossClient.put(ossKey, fileBuffer);
           imageUrl = ossResult.url;
@@ -2187,8 +2250,8 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
       }
     }
 
-    // P3-22：如果调用方提供了 ownerInfo，写入 ai_generated_images 历史记录
-    if (ownerInfo && ownerInfo.ownerType && ownerInfo.ownerId) {
+    // Q1：previewOnly 模式不写历史记录（URL 可能过期，确认后由 upload-preview-image 写入）
+    if (!previewOnly && ownerInfo && ownerInfo.ownerType && ownerInfo.ownerId) {
       try {
         await db.storyboardAsync.run(
           `INSERT INTO ai_generated_images (ownerType, ownerId, url, prompt, model, provider, size, fileSize, sortOrder)
@@ -2213,10 +2276,10 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
     await db.aiTasks.update(taskId, {
       status: 'done',
       progress: 100,
-      output: { imageUrl, model, provider }
+      output: { imageUrl, model, provider, uploaded: !previewOnly }
     });
 
-    console.log(`[AI] 通用生图完成: ${imageUrl}`);
+    console.log(`[AI] 通用生图完成: ${imageUrl} (previewOnly=${previewOnly})`);
   } catch (error) {
     console.error('[AI] 通用生图失败:', error.message);
     await db.aiTasks.update(taskId, {
@@ -3105,18 +3168,14 @@ app.get('/api/aliyun/transcode/:taskId', async (req, res) => {
             const fileName = `transcode-${Date.now()}-${Math.random().toString(36).substr(2, 8)}.${ext}`;
             const taskUsage = task.options && task.options.usage;
             let folder;
+            const taskProjectId = task.options && task.options.projectId;
+            if (!taskProjectId) throw new Error('转码任务缺少 projectId');
             if (taskUsage === 'project-reference') {
-              folder = task.options && task.options.projectId
-                ? `projects/${task.options.projectId}/project-references`
-                : 'projects/default/project-references';
+              folder = `projects/${taskProjectId}/project-references`;
             } else if (taskUsage === 'shot-reference') {
-              folder = task.options && task.options.projectId
-                ? `projects/${task.options.projectId}/shot-references/videos`
-                : 'projects/default/shot-references/videos';
+              folder = `projects/${taskProjectId}/shot-references/videos`;
             } else {
-              folder = task.options && task.options.projectId
-                ? `projects/${task.options.projectId}/videos`
-                : 'projects/default/videos';
+              folder = `projects/${taskProjectId}/videos`;
             }
             const ossKey = `${folder}/${fileName}`;
 
@@ -4545,6 +4604,94 @@ app.get('/api/projects/:projectId/field-suggestions', async (req, res) => {
 
 // ==================== 上传与封面 API ====================
 
+// 直传 OSS 后注册 DB 记录（不经过服务器的上传场景）
+// 复用 /api/upload/image 的 DB 记录创建逻辑，但不处理文件上传和压缩
+app.post('/api/media/register', async (req, res) => {
+  try {
+    const { url, filename, size, type, usage, projectId, sceneId, createShot, title } = req.body || {};
+    if (!url) return res.status(400).json({ success: false, message: '缺少 url 参数' });
+    if (!projectId) return res.status(400).json({ success: false, message: '缺少 projectId 参数' });
+
+    const reference = usage === 'project-reference' ? 1 : 0;
+    const itemTitle = title || filename || '未命名';
+    let item = null;
+
+    try {
+      if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
+        // 这些用途不创建 videos 记录，避免 ghost 记录阻止 OSS 清理
+        // 实际媒体记录由后续 API 调用创建
+      } else if (createShot) {
+        const shot = await db.items.createShot({
+          projectId: parseInt(projectId),
+          sceneId: sceneId ? parseInt(sceneId) : null,
+          sceneContent: itemTitle,
+          status: 'pending',
+          type: type || 'image',
+          filename: filename || '',
+          url,
+          size: size || 0,
+        });
+        await db.shotMedia.create({
+          shotId: shot.id,
+          url,
+          type: type || 'image',
+          filename: filename || '',
+          size: size || 0,
+          source: reference ? 'reference' : 'upload'
+        });
+        item = { id: shot.id, shotId: shot.id, url, filename, isShot: true };
+      } else {
+        item = await db.items.create({
+          title: itemTitle,
+          filename: filename || '',
+          url,
+          size: size || 0,
+          status: 'pending',
+          projectId: parseInt(projectId),
+          sceneId: sceneId ? parseInt(sceneId) : null,
+          type: type || 'image',
+          reference: reference ? 1 : 0
+        });
+      }
+    } catch (dbError) {
+      // DB 写入失败：清理已直传到 OSS 的文件
+      if (url && url.startsWith('http')) {
+        try {
+          await deleteStandaloneOssFile(url);
+          console.log('[media/register] DB 写入失败，已清理 OSS 文件:', url);
+        } catch (e) {
+          console.warn('[media/register] 清理 OSS 文件失败:', e.message);
+        }
+      }
+      throw dbError;
+    }
+
+    // 非参考素材且非封面：尝试设置项目默认封面
+    if (projectId && !reference && usage !== 'project-cover') {
+      trySetProjectCoverIfDefault(parseInt(projectId), url, type || 'image').catch(() => {});
+    }
+
+    res.json({ success: true, id: item?.id, shotId: item?.shotId, url, filename });
+  } catch (error) {
+    console.error('[media/register] 注册媒体记录失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// 删除 OSS 文件（直传后 DB 注册失败等场景的清理）
+app.post('/api/oss/delete', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ success: false, message: '缺少 url 参数' });
+    await deleteStandaloneOssFile(url);
+    console.log('[oss/delete] 已删除 OSS 文件:', url);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[oss/delete] 删除 OSS 文件失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.post('/api/upload/image', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '请上传文件' });
@@ -4564,13 +4711,18 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
     const filePath = req.file.path;
     const originalSizeKB = (req.file.size / 1024).toFixed(2);
     let compressed = false;
+    let compressionError = null;
     let fileBuffer = fs.readFileSync(filePath);
     if (req.file.size > thresholdKB * 1024) {
       try {
+        const beforeSize = fileBuffer.length;
         fileBuffer = await compressImage(fileBuffer, thresholdKB, req.file.mimetype);
         compressed = true;
+        const afterSize = fileBuffer.length;
+        console.log(`[app] 图片压缩: ${req.file.originalname} | 格式: ${req.file.mimetype} | ${originalSizeKB}KB → ${(afterSize / 1024).toFixed(2)}KB | 压缩率: ${((1 - afterSize / beforeSize) * 100).toFixed(1)}%`);
       } catch (e) {
-        console.warn('[app] 图片压缩失败，使用原图:', e.message);
+        console.warn('[app] 图片压缩失败，使用原图:', e.stack || e.message);
+        compressionError = e.message;
       }
     }
     let fileUrl = '';
@@ -4579,17 +4731,20 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
     if (isOSSConfigured && !forceLocalStorage && ossClient) {
       try {
         // OSS 路径按 usage 分类
+        if (!projectId) {
+          return res.status(400).json({ error: 'projectId 不能为空' });
+        }
         let folder;
         if (usage === 'project-cover') {
-          folder = projectId ? `projects/${projectId}/project-covers` : 'projects/default/project-covers';
+          folder = `projects/${projectId}/project-covers`;
         } else if (usage === 'project-reference') {
-          folder = projectId ? `projects/${projectId}/project-references` : 'projects/default/project-references';
+          folder = `projects/${projectId}/project-references`;
         } else if (usage === 'shot-reference') {
-          folder = projectId ? `projects/${projectId}/shot-references/images` : 'projects/default/shot-references/images';
+          folder = `projects/${projectId}/shot-references/images`;
         } else if (usage === 'digital-asset') {
-          folder = projectId ? `projects/${projectId}/digital-assets` : 'projects/default/digital-assets';
+          folder = `projects/${projectId}/digital-assets`;
         } else {
-          folder = projectId ? `projects/${projectId}/images` : 'projects/default/images';
+          folder = `projects/${projectId}/images`;
         }
         ossKey = `${folder}/${fileName}`;
         const result = await ossClient.put(ossKey, fileBuffer);
@@ -4606,9 +4761,16 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
       fileUrl = `/uploads/${fileName}`;
       console.log(`[app] 图片本地上传: ${fileName}`);
     }
-    let item;
+    let item = null;
     try {
-      if (createShot && projectId) {
+      if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
+        // 这些用途只上传到 OSS，不创建 videos 记录，避免产生 ghost 记录
+        // ghost 记录会导致 isUrlReferenced 误判，阻止 OSS 文件清理
+        // 实际的媒体记录由后续 API 调用创建：
+        // - project-cover: PUT /api/projects/:id/cover
+        // - shot-reference: POST /api/shots/:id/media (shot_media)
+        // - digital-asset: POST /api/projects/:projectId/assets/:assetId/images (digital_asset_images)
+      } else if (createShot && projectId) {
         const shot = await db.items.createShot({
           projectId: parseInt(projectId),
           sceneId: sceneId ? parseInt(sceneId) : null,
@@ -4651,10 +4813,10 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
       }
       throw dbError;
     }
-    if (projectId && !reference) {
+    if (projectId && !reference && usage !== 'project-cover') {
       trySetProjectCoverIfDefault(parseInt(projectId), fileUrl, 'image').catch(() => {});
     }
-    res.json({ success: true, url: fileUrl, ossKey, filename: fileName, compressed, size: originalSizeKB, id: item.id });
+    res.json({ success: true, url: fileUrl, ossKey, filename: fileName, compressed, originalSizeKB: parseFloat(originalSizeKB), compressedSizeKB: parseFloat((fileBuffer.length / 1024).toFixed(2)), id: item?.id, compressionError });
   } catch (error) {
     console.error('[app] 图片上传失败:', error.message);
     // P3-6：清理 multer 临时文件
@@ -4954,13 +5116,16 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
         if (isOSSConfigured && !task.forceLocalStorage && ossClient) {
           try {
             // OSS 路径按 usage 分类
+            if (!task.projectId) {
+              throw new Error('上传任务缺少 projectId');
+            }
             let folder;
             if (task.usage === 'project-reference') {
-              folder = task.projectId ? `projects/${task.projectId}/project-references` : 'projects/default/project-references';
+              folder = `projects/${task.projectId}/project-references`;
             } else if (task.usage === 'shot-reference') {
-              folder = task.projectId ? `projects/${task.projectId}/shot-references/videos` : 'projects/default/shot-references/videos';
+              folder = `projects/${task.projectId}/shot-references/videos`;
             } else {
-              folder = task.projectId ? `projects/${task.projectId}/videos` : 'projects/default/videos';
+              folder = `projects/${task.projectId}/videos`;
             }
             const ossKey = `${folder}/${task.fileName}`;
             task.ossKey = ossKey;
@@ -5043,6 +5208,9 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
               source: reference ? 'reference' : 'upload'
             });
             item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: task.fileName, isShot: true };
+          } else if (task.usage === 'shot-reference') {
+            // shot-reference 视频：只上传到 OSS，不创建 videos 记录，避免 ghost 记录
+            // 实际的 shot_media 记录由后续 POST /api/shots/:id/media 创建
           } else {
             item = await db.items.create({
               title: task.title || task.fileName,
@@ -5071,7 +5239,7 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
         if (task.projectId && !reference) {
           trySetProjectCoverIfDefault(task.projectId, fileUrl, 'video').catch(() => {});
         }
-        task.result.id = item.id;
+        if (item) task.result.id = item.id;
         videoTasks.set(taskId, task);
         scheduleTaskCleanup(videoTasks, taskId);  // P4-7：终态后 10 分钟清理
         console.log(`[app] 视频上传完成: ${task.fileName} (compressed=${compressed})`);

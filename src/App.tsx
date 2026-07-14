@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ProjectListPage } from './pages/ProjectListPage';
 import { StoryboardPage } from './pages/StoryboardPage';
+import { ToastProvider } from './components/ToastProvider';
 
 type Route = { page: 'list' } | { page: 'project'; projectId: number };
 
@@ -39,9 +40,13 @@ export default function App() {
     setRoute({ page: 'list' });
   };
 
-  if (route.page === 'project') {
-    return <StoryboardPage projectId={route.projectId} onBack={navigateToList} />;
-  }
-
-  return <ProjectListPage onSelectProject={navigateToProject} />;
+  return (
+    <ToastProvider>
+      {route.page === 'project' ? (
+        <StoryboardPage projectId={route.projectId} onBack={navigateToList} />
+      ) : (
+        <ProjectListPage onSelectProject={navigateToProject} />
+      )}
+    </ToastProvider>
+  );
 }

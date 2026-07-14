@@ -90,40 +90,18 @@ export function VideoCompressionDialog({
 
           <div className="space-y-3">
             <button
-              onClick={() => onSelect('server')}
-              disabled={!canServerCompress}
-              className={`w-full p-3 rounded-xl border ${
-                canServerCompress 
-                  ? 'border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20' 
-                  : 'border-white/10 bg-white/[0.02]'
-              } text-left transition cursor-pointer`}
+              onClick={() => onSelect('cancel')}
+              className="w-full p-3 rounded-xl border border-dashed border-white/15 bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/25 text-left transition cursor-pointer"
             >
               <div className="flex items-center gap-3">
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                  canServerCompress ? 'bg-violet-500/20 text-violet-300' : 'bg-white/5 text-white/30'
-                }`}>
-                  <Server className="w-4.5 h-4.5" />
+                <div className="w-9 h-9 rounded-xl bg-white/5 text-white/50 flex items-center justify-center shrink-0">
+                  <Hand className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-sm font-medium ${canServerCompress ? 'text-white' : 'text-white/40'}`}>
-                      服务端压缩
-                    </span>
-                    {!canServerCompress && (
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-white/50">
-                        不可用
-                      </span>
-                    )}
-                  </div>
-                  <div className={`mt-0.5 text-xs ${canServerCompress ? 'text-white/60' : 'text-white/30'}`}>
-                    速度快 · ffmpeg 专业处理 · 免费
-                    {!canServerCompress && <span className="text-amber-300/70"> · 限 ≤95MB</span>}
-                  </div>
-                  {!canServerCompress && (
-                    <p className="mt-1 text-xs text-amber-300/70">
-                      部分文件超过 95MB，服务端暂不支持
-                    </p>
-                  )}
+                  <span className="text-sm font-medium text-white/80">手动压缩后再上传</span>
+                  <p className="mt-0.5 text-xs text-white/50">
+                    💡 使用 HandBrake 等工具压缩后重新上传
+                  </p>
                 </div>
               </div>
             </button>
@@ -149,8 +127,8 @@ export function VideoCompressionDialog({
               onClick={() => onSelect('aliyun')}
               disabled={!canAliyunCompress}
               className={`w-full p-3 rounded-xl border ${
-                canAliyunCompress 
-                  ? 'border-orange-500/30 bg-orange-500/10 hover:bg-orange-500/20' 
+                canAliyunCompress
+                  ? 'border-orange-500/30 bg-orange-500/10 hover:bg-orange-500/20'
                   : 'border-white/10 bg-white/[0.02]'
               } text-left transition cursor-pointer`}
             >
@@ -184,18 +162,40 @@ export function VideoCompressionDialog({
             </button>
 
             <button
-              onClick={() => onSelect('cancel')}
-              className="w-full p-3 rounded-xl border border-dashed border-white/15 bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/25 text-left transition cursor-pointer"
+              onClick={() => onSelect('server')}
+              disabled={!canServerCompress}
+              className={`w-full p-3 rounded-xl border ${
+                canServerCompress
+                  ? 'border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20'
+                  : 'border-white/10 bg-white/[0.02]'
+              } text-left transition cursor-pointer`}
             >
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-white/5 text-white/50 flex items-center justify-center shrink-0">
-                  <Hand className="w-4.5 h-4.5" />
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                  canServerCompress ? 'bg-violet-500/20 text-violet-300' : 'bg-white/5 text-white/30'
+                }`}>
+                  <Server className="w-4.5 h-4.5" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <span className="text-sm font-medium text-white/80">手动压缩后再上传</span>
-                  <p className="mt-0.5 text-xs text-white/50">
-                    💡 使用 HandBrake 等工具压缩后重新上传
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-medium ${canServerCompress ? 'text-white' : 'text-white/40'}`}>
+                      服务端压缩
+                    </span>
+                    {!canServerCompress && (
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-white/50">
+                        不可用
+                      </span>
+                    )}
+                  </div>
+                  <div className={`mt-0.5 text-xs ${canServerCompress ? 'text-white/60' : 'text-white/30'}`}>
+                    速度快 · ffmpeg 专业处理 · 免费
+                    {!canServerCompress && <span className="text-amber-300/70"> · 限 ≤95MB</span>}
+                  </div>
+                  {!canServerCompress && (
+                    <p className="mt-1 text-xs text-amber-300/70">
+                      部分文件超过 95MB，服务端暂不支持
+                    </p>
+                  )}
                 </div>
               </div>
             </button>

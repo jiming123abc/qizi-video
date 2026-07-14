@@ -3,6 +3,8 @@ import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Inf
 import { checkVideoBitrate, uploadVideo } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
+import type { SplitShot } from '../../lib/types';
+import type { AiTaskUpdate } from '../../lib/taskStream';
 
 interface UploadedVideo {
   id: string;
@@ -18,7 +20,7 @@ interface VideoSplitDialogProps {
   initialVideos?: UploadedVideo[];
   projectId: number;
   sceneId?: number | null;
-  onSplit?: (shots: any[], videoUrl: string) => void;
+  onSplit?: (shots: SplitShot[], videoUrl: string) => void;
   onVideoUpload?: (file: File) => Promise<string>;
   maxUploads?: number;
 }
@@ -525,7 +527,7 @@ export default function VideoSplitDialog({
     try {
       const eventSource = new EventSource(`/api/ai/task/${tid}/stream`);
 
-      const handleTaskUpdate = (data: any) => {
+      const handleTaskUpdate = (data: AiTaskUpdate) => {
         if (sseClosed) return;
 
         if (data.status === 'processing' || data.status === 'pending') {
@@ -542,7 +544,8 @@ export default function VideoSplitDialog({
           setEstimatedCost(data.output?.estimatedCost || 0);
 
           if (data.output?.shots) {
-            const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot: any, idx: number) => ({
+            const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
+            const newSplitPoints: SplitPoint[] = splitShots.slice(1).map((shot, idx: number) => ({
               id: generateId(),
               time: shot.startTime
             }));
@@ -558,7 +561,7 @@ export default function VideoSplitDialog({
         }
       };
 
-      eventSource.addEventListener('update', (event: any) => {
+      eventSource.addEventListener('update', (event: MessageEvent) => {
         try {
           const data = JSON.parse(event.data);
           handleTaskUpdate(data);
@@ -567,7 +570,7 @@ export default function VideoSplitDialog({
         }
       });
 
-      eventSource.addEventListener('error', (event: any) => {
+      eventSource.addEventListener('error', (event: MessageEvent) => {
         if (sseClosed) return;
         sseFailed = true;
         eventSource.close();
@@ -683,7 +686,15 @@ export default function VideoSplitDialog({
     try {
       const actualMode = mode === 'manual' ? 'manual' : aiMode;
       
-      const body: Record<string, any> = {
+      const body: {
+        videoUrl: string;
+        projectId: number;
+        mode: string;
+        filterNonShots: boolean;
+        autoAssignScenes: boolean;
+        sceneId?: number | null;
+        splitPoints?: number[];
+      } = {
         videoUrl: currentVideoUrl,
         projectId,
         mode: actualMode,
@@ -795,7 +806,7 @@ export default function VideoSplitDialog({
     if (onSplit && currentVideoUrl) {
       const shots = splitPoints.length > 0
         ? (() => {
-            const result: any[] = [];
+            const result: SplitShot[] = [];
             const times = [0, ...splitPoints.map(p => p.time), videoDuration];
             for (let i = 0; i < times.length - 1; i++) {
               result.push({

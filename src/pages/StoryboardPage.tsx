@@ -6,7 +6,7 @@ import type { UploadDecision } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import { ShareHint } from '../components/WeChatShareHint';
 import { useEscapeKey } from '../hooks/useEscapeKey';
-import { useToast } from '../hooks/useToast';
+import { useToastContext } from '../components/ToastProvider';
 import { useScenes } from '../hooks/useScenes';
 import { useShots } from '../hooks/useShots';
 import { useUpload } from '../hooks/useUpload';
@@ -39,7 +39,7 @@ import SettingsDialog from '../components/settings/SettingsDialog';
 import DigitalAssetDialog from '../components/assets/DigitalAssetDialog';
 
 // 类型
-import type { Shot, ShotMedia, Project, Scene } from '../lib/types';
+import type { Shot, ShotMedia, Project, Scene, SceneStat } from '../lib/types';
 
 interface StoryboardPageProps {
   projectId: number;
@@ -55,7 +55,7 @@ function getPosterUrl(videoUrl: string): string {
 }
 
 export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
-  const { toast, toastVisible, showToast, hideToast } = useToast();
+  const { showToast } = useToastContext();
 
   const {
     scenes,
@@ -356,7 +356,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         const map: Record<string, { done: number; total: number }> = {};
-        data.data.forEach((s: any) => {
+        data.data.forEach((s: SceneStat) => {
           const key = s.id === null ? 'null' : String(s.id);
           map[key] = { done: s.done, total: s.total };
         });
@@ -1499,17 +1499,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         )}
       </div>
 
-      {/* 新增分镜浮动按钮 */}
-      {currentTab !== 'trash' && shots.length > 0 && (
-        <button
-          onClick={() => setShowAddShotDialog(true)}
-          className="fixed right-6 bottom-20 z-40 w-14 h-14 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-500/40 hover:shadow-xl hover:shadow-violet-500/50 flex items-center justify-center transition-all hover:scale-105 active:scale-95"
-          title="新增分镜"
-        >
-          <Plus className="w-6 h-6" />
-        </button>
-      )}
-
       {/* 底部 Tab：未拍摄 / 已拍摄 / 垃圾桶（数字实时更新） */}
       <BottomTabBar
         tabs={[
@@ -1860,7 +1849,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       <VideoSplitDialog
         isOpen={showVideoSplitDialog}
-        onClose={() => setShowVideoSplitDialog(false)}
+        videoUrl={selectedVideoForSplit || undefined}
+        onClose={() => {
+          setShowVideoSplitDialog(false);
+          setSelectedVideoForSplit(null);
+        }}
         projectId={projectId}
         sceneId={currentSceneId}
         maxUploads={5}
@@ -1914,6 +1907,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           shot={selectedShotForMedia}
           refreshTrigger={mediaRefreshTrigger}
           onAiGenerate={handleAiGenerate}
+          childDialogOpen={showAIImageGenDialog}
           onMediaChange={(updatedShot) => {
             setShots(prev => prev.map(item =>
               item.id === updatedShot.id ? { ...item, ...updatedShot } : item
@@ -1943,22 +1937,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onClose={() => setShareHintVisible(false)}
         mode={shareHintMode}
       />
-
-      {/* Toast */}
-      {toast && (
-        <div
-          className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[90] px-6 py-3 rounded-2xl bg-slate-800/95 border border-white/10 text-sm shadow-xl transition-all duration-300 ${
-            toastVisible
-              ? 'opacity-100 scale-100'
-              : 'opacity-0 scale-95'
-          }`}
-        >
-          {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 inline mr-2 text-green-400" />}
-          {toast.type === 'error' && <XCircle className="w-4 h-4 inline mr-2 text-red-400" />}
-          {toast.type === 'info' && <Info className="w-4 h-4 inline mr-2 text-blue-400" />}
-          {toast.message}
-        </div>
-      )}
         </>
       )}
     </div>

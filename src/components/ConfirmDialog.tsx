@@ -26,27 +26,27 @@ export default function ConfirmDialog({
   if (!isOpen) return null;
 
   const buttonColors = {
-    red: 'bg-red-600 hover:bg-red-700',
-    blue: 'bg-blue-600 hover:bg-blue-700',
-    gray: 'bg-gray-600 hover:bg-gray-700'
+    red: 'bg-red-500/80 hover:bg-red-500',
+    blue: 'bg-blue-500/80 hover:bg-blue-500',
+    gray: 'bg-white/10 hover:bg-white/20'
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-8 sm:p-4">
-      <div className="bg-white rounded-lg max-w-md w-full max-h-[85vh] p-6 shadow-xl overflow-y-auto">
-        <h3 className="text-xl font-bold text-gray-900 mb-3">{title}</h3>
-        <p className="text-gray-600 mb-4">{message}</p>
-        
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70] p-8 sm:p-4">
+      <div className="bg-slate-900/95 border border-white/10 rounded-2xl max-w-md w-full max-h-[85vh] p-6 shadow-xl overflow-y-auto">
+        <h3 className="text-xl font-bold text-white mb-3">{title}</h3>
+        <p className="text-slate-300 mb-4">{message}</p>
+
         {children && (
           <div className="mb-4">
             {children}
           </div>
         )}
-        
+
         <div className="flex justify-end gap-3">
           <button
             onClick={onCancel}
-            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+            className="px-4 py-2 border border-white/15 rounded-lg text-slate-300 hover:bg-white/10 transition-colors"
           >
             {cancelText}
           </button>

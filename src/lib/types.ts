@@ -117,10 +117,23 @@ export interface Settings {
   video_target_bitrate_720p: number;
   video_target_bitrate_480p: number;
   image_compress_threshold_kb: number;
-  model_prices: Record<string, any>;
+  model_prices: Record<string, ModelPrice>;
   ai_platforms: AiPlatform[];           // AI平台统一管理
   analyze_llm_provider: string;         // AI分析使用的平台ID
   analyze_llm_model: string;            // AI分析使用的模型名
+}
+
+// any-audit：AI 任务输出（不同 task type 输出结构不同，shots 结构因任务而异）
+export interface AiTaskOutput {
+  type?: string;
+  content?: string;
+  shots?: unknown[];
+  imageUrl?: string;
+  uploaded?: boolean;
+  estimatedCost?: number;
+  sceneName?: string;
+  sceneId?: number | null;
+  media?: { url?: string };
 }
 
 export interface AiTask {
@@ -128,8 +141,8 @@ export interface AiTask {
   type: 'script_parse' | 'image_gen' | 'video_split' | 'analyze_shot';
   status: 'pending' | 'processing' | 'done' | 'error';
   projectId?: number;
-  input?: any;
-  output?: any;
+  input?: unknown;
+  output?: AiTaskOutput;
   error?: string;
   progress: number;
   createdAt: string;
@@ -213,4 +226,54 @@ export interface SceneStat {
   id: number | null;
   done: number;
   total: number;
+}
+
+// any-audit：模型价格（types.ts model_prices 字段）
+// 后端 server/database.js: { 'model-name': { input, output } }
+export interface ModelPrice {
+  input: number;
+  output: number;
+}
+
+// any-audit：视频分割片段（VideoSplitDialog onSplit 回调 + result 数组）
+export interface SplitShot {
+  startTime: number;
+  endTime: number;
+  index: number;
+}
+
+// any-audit：AI 分镜任务输出（AIScriptDialog outputShots.map）
+export interface AiScriptShot {
+  shotType?: string;
+  title?: string;
+  sceneContent?: string;
+  hasShotCut?: boolean;
+  isStockOrEffect?: boolean;
+  actors?: string;
+  props?: string;
+  costume?: string;
+  location?: string;
+  focalLength?: string;
+  narration?: string;
+  cameraMovement?: string;
+  shotAngle?: string;
+  lighting?: string;
+  notes?: string;
+  estimatedDuration?: string;
+  aiImagePrompt?: string;
+  sceneName?: string;
+  sceneId?: number | null;
+}
+
+// any-audit：视频上传任务结果（ossUtils pollTaskStatus 返回值）
+// 后端 server/index.js: { url, compressed, fileName, ossKey, fileSize }
+export interface UploadTaskResult {
+  url: string;
+  compressed?: boolean;
+  compressionFailed?: boolean;
+  originalSizeKB?: number;
+  compressedSizeKB?: number;
+  fileName?: string;
+  ossKey?: string;
+  fileSize?: number;
 }

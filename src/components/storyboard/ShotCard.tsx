@@ -956,7 +956,7 @@ export function ShotCard({
 
 
 
-        {/* 右上角：全屏按钮 + 删除按钮 */}
+        {/* 右上角：全屏按钮 */}
         <div className={`absolute z-20 flex items-center gap-1.5 ${isMobile ? 'top-2 right-2' : 'top-3 right-3'}`}>
           {hasMedia && (
             <>
@@ -967,20 +967,6 @@ export function ShotCard({
               >
                 <Maximize2 className="w-4 h-4 text-white/90" />
               </button>
-              {onDeleteMedia && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (confirm('确定要删除这个参考素材吗？')) {
-                      onDeleteMedia(shot.id, currentMedia.id);
-                    }
-                  }}
-                  className="touch-target-36 w-8 h-8 rounded-full border border-red-400/30 bg-black/40 backdrop-blur hover:bg-red-500/50 hover:border-red-400/50 flex items-center justify-center transition"
-                  title="删除素材"
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-white/90" />
-                </button>
-              )}
             </>
           )}
         </div>

@@ -102,7 +102,10 @@ export function useUpload(options: UseUploadOptions) {
           usage: 'shot-reference',
           title: file.name,
           createShot: true,
-          signal: uploadAbortControllerRef.current?.signal
+          signal: uploadAbortControllerRef.current?.signal,
+          onProgress: p => {
+            setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: p.progress, message: p.message } : uf));
+          }
         });
         setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
       } else {

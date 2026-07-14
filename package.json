@@ -8,7 +8,8 @@
     "build": "vite build && node scripts/postbuild.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "check-any": "node scripts/check-any.cjs"
   },
   "dependencies": {
     "@ffmpeg/ffmpeg": "^0.12.9",

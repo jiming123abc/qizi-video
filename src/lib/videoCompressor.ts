@@ -12,7 +12,7 @@ interface FFmpegWasmInstance {
   readFile: (name: string) => Promise<Uint8Array>;
   deleteFile: (name: string) => Promise<void>;
   exec: (args: string[]) => Promise<number>;
-  on: (event: string, callback: (data: any) => void) => void;
+  on: (event: string, callback: (data: unknown) => void) => void;
   terminate: () => void;
 }
 
