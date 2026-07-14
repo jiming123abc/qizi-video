@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload, Video } from 'lucide-react';
-import { checkVideoBitrate, uploadVideo2Video } from '../../lib/ossUtils';
+import { checkVideoBitrate, uploadVideo } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 
@@ -124,7 +124,7 @@ export default function VideoSplitDialog({
   const currentVideoUrl = currentVideo?.url || '';
 
   useEffect(() => {
-    fetch('/api/video2/aliyun/status')
+    fetch('/api/aliyun/status')
       .then(res => res.json())
       .then(data => {
         if (data.configured) {
@@ -166,7 +166,7 @@ export default function VideoSplitDialog({
       // 使用 keepalive 确保页面卸载/导航时也能发请求
       urlsToClean.forEach(url => {
         try {
-          fetch('/api/video2/upload/orphan', {
+          fetch('/api/upload/orphan', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url }),
@@ -242,9 +242,10 @@ export default function VideoSplitDialog({
       }
 
       setUploadMessage(`正在上传：${file.name}`);
-      const videoUrlResult = await uploadVideo2Video(file, {
+      const videoUrlResult = await uploadVideo(file, {
         projectId,
         sceneId,
+        usage: 'shot-reference',
         compressionMethod: 'none',
         skipBitrateCheck: true,
         onProgress: (p) => {
@@ -341,9 +342,10 @@ export default function VideoSplitDialog({
     setUploadMessage('正在压缩并上传视频...');
 
     try {
-      const videoUrlResult = await uploadVideo2Video(file, {
+      const videoUrlResult = await uploadVideo(file, {
         projectId,
         sceneId,
+        usage: 'shot-reference',
         compressionMethod: method,
         skipBitrateCheck: true,
         onProgress: (p) => {
@@ -521,7 +523,7 @@ export default function VideoSplitDialog({
     let sseClosed = false;
 
     try {
-      const eventSource = new EventSource(`/api/video2/ai/task/${tid}/stream`);
+      const eventSource = new EventSource(`/api/ai/task/${tid}/stream`);
 
       const handleTaskUpdate = (data: any) => {
         if (sseClosed) return;
@@ -584,7 +586,7 @@ export default function VideoSplitDialog({
       const startPolling = () => {
         pollIntervalRef.current = setInterval(async () => {
           try {
-            const res = await fetch(`/api/video2/ai/task/${tid}`);
+            const res = await fetch(`/api/ai/task/${tid}`);
             const data: TaskResult = await res.json();
 
             if (data.status === 'processing' || data.status === 'pending') {
@@ -628,7 +630,7 @@ export default function VideoSplitDialog({
       console.warn('SSE 不可用，使用轮询:', e);
       pollIntervalRef.current = setInterval(async () => {
         try {
-          const res = await fetch(`/api/video2/ai/task/${tid}`);
+          const res = await fetch(`/api/ai/task/${tid}`);
           const data: TaskResult = await res.json();
 
           if (data.status === 'processing' || data.status === 'pending') {
@@ -697,7 +699,7 @@ export default function VideoSplitDialog({
         body.splitPoints = splitPoints.map(p => p.time);
       }
 
-      const res = await fetch('/api/video2/ai/split-video', {
+      const res = await fetch('/api/ai/split-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -821,7 +823,7 @@ export default function VideoSplitDialog({
 
   return (
     <div
-      className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4 transition-opacity duration-200 ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4"
       onClick={onClose}
     >
       <div

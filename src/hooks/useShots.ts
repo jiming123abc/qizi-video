@@ -63,7 +63,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
       }
       if (tab === 'trash') params.set('deleted', '1');
       else params.set('status', tab);
-      const res = await fetch(`/api/video2/list?${params.toString()}`);
+      const res = await fetch(`/api/list?${params.toString()}`);
       const data = await res.json();
       // 竞态保护：只有最新请求的结果才能更新 state
       if (seq !== loadSeqRef.current) return;
@@ -109,7 +109,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
 
   const updateShot = useCallback(async (id: number, fields: Partial<Shot>) => {
     try {
-      const res = await fetch(`/api/video2/shots/${id}`, {
+      const res = await fetch(`/api/shots/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fields)
@@ -132,7 +132,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
       // any-audit：用具体类型替代 any
       const body: { status: 'pending' | 'done'; shotNo?: string } = { status };
       if (shotNo !== undefined) body.shotNo = shotNo;
-      const res = await fetch(`/api/video2/shots/${shotId}/status`, {
+      const res = await fetch(`/api/shots/${shotId}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -153,7 +153,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
 
   const updateShotNo = useCallback(async (shot: Shot, shotNo: string) => {
     try {
-      const res = await fetch(`/api/video2/shots/${shot.id}`, {
+      const res = await fetch(`/api/shots/${shot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ shotNo: shotNo.trim() })
@@ -173,7 +173,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
 
   const softDelete = useCallback(async (id: number) => {
     try {
-      const res = await fetch(`/api/video2/shots/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/shots/${id}`, { method: 'DELETE' });
       const data = await res.json();
       if (res.ok && data.success !== false) {
         setShots(prev => prev.filter(it => it.id !== id));
@@ -189,7 +189,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
 
   const restoreItem = useCallback(async (id: number) => {
     try {
-      const res = await fetch(`/api/video2/shots/${id}/restore`, { method: 'POST' });
+      const res = await fetch(`/api/shots/${id}/restore`, { method: 'POST' });
       const data = await res.json();
       if (res.ok && data.success !== false) {
         setShots(prev => prev.filter(it => it.id !== id));
@@ -206,7 +206,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
   const hardDelete = useCallback((id: number, onConfirm: (fn: () => Promise<void>) => void) => {
     onConfirm(async () => {
       try {
-        const res = await fetch(`/api/video2/shots/${id}/hard`, { method: 'DELETE' });
+        const res = await fetch(`/api/shots/${id}/hard`, { method: 'DELETE' });
         const data = await res.json();
         if (res.ok && data.success !== false) {
           setShots(prev => prev.filter(it => it.id !== id));
@@ -225,7 +225,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'softDelete' })
@@ -248,7 +248,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'restore' })
@@ -273,7 +273,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     const ids = Array.from(selectedIds);
     onConfirm(async () => {
       try {
-        const res = await fetch('/api/video2/shots/batch-update', {
+        const res = await fetch('/api/shots/batch-update', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids, action: 'hardDelete' })
@@ -297,7 +297,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'updateStatus', status })
@@ -320,7 +320,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, action: 'changeScene', sceneId })
@@ -341,7 +341,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
 
   const moveShotToScene = useCallback(async (shotId: number, sceneId: number | null) => {
     try {
-      const res = await fetch('/api/video2/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: [shotId], action: 'changeScene', sceneId })
@@ -366,7 +366,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     }
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/video2/shots/merge', {
+      const res = await fetch('/api/shots/merge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ shotIds: ids })
@@ -418,7 +418,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     setShots(next.map((i, idx) => ({ ...i, sortOrder: idx })));
 
     try {
-      await fetch('/api/video2/shots/batch-update', {
+      await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reorder', orders })
@@ -455,7 +455,7 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     setShots(next.map((i, iidx) => ({ ...i, sortOrder: iidx })));
 
     try {
-      await fetch('/api/video2/shots/batch-update', {
+      await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reorder', orders })

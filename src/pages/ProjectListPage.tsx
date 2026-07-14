@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, CheckCircle2, XCircle, Info, Video } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
-import { uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
+import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
@@ -102,7 +102,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
   useEffect(() => {
-    fetch('/api/video2/aliyun/status')
+    fetch('/api/aliyun/status')
       .then(res => res.json())
       .then(data => setAliyunConfigured(data.configured || false))
       .catch(() => {});
@@ -211,7 +211,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 加载某项目的参考文件（单个）
   const loadReferences = useCallback(async (projectId: number) => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/references`);
+      const res = await fetch(`/api/projects/${projectId}/references`);
       const data = await res.json();
       const refs: ReferenceItem[] = (data.data || []).map((r: any) => ({
         id: r.id,
@@ -230,7 +230,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     if (projectIds.length === 0) return;
     try {
       const idsParam = projectIds.join(',');
-      const res = await fetch(`/api/video2/projects/references/batch?ids=${idsParam}`);
+      const res = await fetch(`/api/projects/references/batch?ids=${idsParam}`);
       const data = await res.json();
       if (data.success && data.data) {
         setReferencesCache(prev => {
@@ -255,7 +255,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   const loadProjects = useCallback(async () => {
     try {
-      const res = await fetch('/api/video2/projects');
+      const res = await fetch('/api/projects');
       const data = await res.json();
       if (data.success) {
         setProjects(data.data);
@@ -263,7 +263,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         
         // 批量获取统计数据
         ids.forEach(id => {
-          fetch(`/api/video2/stats?projectId=${id}`)
+          fetch(`/api/stats?projectId=${id}`)
             .then(r => r.json())
             .then(d => {
               if (d.success) {
@@ -299,7 +299,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 删除项目参考文件
   const deleteReference = useCallback(async (projectId: number, itemId: number) => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/references/${itemId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/projects/${projectId}/references/${itemId}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
         setReferencesCache(prev => ({
@@ -320,7 +320,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     if (!createName.trim()) return;
     setCreateLoading(true);
     try {
-      const res = await fetch('/api/video2/projects', {
+      const res = await fetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -353,7 +353,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     if (deletePollRef.current) clearInterval(deletePollRef.current);
     const interval = setInterval(async () => {
       try {
-        const pollRes = await fetch(`/api/video2/projects/delete/${taskId}`);
+        const pollRes = await fetch(`/api/projects/delete/${taskId}`);
         const pollData = await pollRes.json();
         // P4-4：任务不存在（服务端重启），清理 localStorage 并提示
         if (pollRes.status === 404 || pollData.status === 'not_found') {
@@ -446,7 +446,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     setDeleteError(null);
     setDeleteWarnings([]);
     try {
-      const res = await fetch(`/api/video2/projects/${deleteTarget.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/projects/${deleteTarget.id}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success && data.taskId) {
         setDeleteTaskId(data.taskId);
@@ -472,7 +472,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   };
 
   const handleShare = async (project: Project) => {
-    const shareUrl = project.shareUrl || `${window.location.origin}/share/video2/project/${project.id}`;
+    const shareUrl = project.shareUrl || `${window.location.origin}/share/project/${project.id}`;
     setupShareMetadata({
       title: project.name,
       desc: project.description || '柒子文化AI拍摄辅助系统 - 专业项目管理',
@@ -487,7 +487,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   const handleExport = (project: Project) => {
     // 导出分镜脚本
-    window.open(`/api/video2/projects/${project.id}/export?format=docx&includeImages=true`, '_blank');
+    window.open(`/api/projects/${project.id}/export?format=docx&includeImages=true`, '_blank');
   };
 
   const openUploadDialog = (project: Project) => {
@@ -501,7 +501,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 调用「设置项目封面」API，并本地乐观更新
   const setProjectCover = async (projectId: number, coverUrl: string) => {
     try {
-      await fetch(`/api/video2/projects/${projectId}/cover`, {
+      await fetch(`/api/projects/${projectId}/cover`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ coverUrl })
@@ -516,7 +516,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   const deleteProjectCover = async (projectId: number) => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/cover`, { method: 'DELETE' });
+      const res = await fetch(`/api/projects/${projectId}/cover`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
         setProjects(prev => prev.map(p => p.id === projectId ? { ...p, coverUrl: DEFAULT_COVER } : p));
@@ -547,9 +547,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     setUploadDialogMessage('正在上传封面...');
 
     try {
-      const result = await uploadVideo2Image(file, {
+      const result = await uploadImage(file, {
         projectId: project.id,
-        reference: true,
         title: file.name,
         usage: 'project-cover'
       });
@@ -599,9 +598,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           stopped = true;
           break;
         }
-        await uploadVideo2Video(file, {
+        await uploadVideo(file, {
           projectId: project.id,
-          reference: true,
           title: file.name,
           usage: 'project-reference',
           skipBitrateCheck: true,
@@ -653,9 +651,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     const usage = pending.usage || 'project-reference';
 
     try {
-      await uploadVideo2Video(file, {
+      await uploadVideo(file, {
         projectId: project.id,
-        reference: true,
         title: file.name,
         compressionMethod: method,
         usage,
@@ -683,9 +680,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
             return;
           }
-          await uploadVideo2Video(nextFile, {
+          await uploadVideo(nextFile, {
             projectId: project.id,
-            reference: true,
             title: nextFile.name,
             usage,
             skipBitrateCheck: true,
@@ -721,7 +717,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     if (onSelectProject) {
       onSelectProject(id);
     } else {
-      window.location.href = `/video2/project/${id}`;
+      window.location.href = `/project/${id}`;
     }
   };
 
@@ -730,7 +726,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     const n = name.trim();
     if (!n) return;
     try {
-      await fetch(`/api/video2/projects/${projectId}`, {
+      await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: n })
@@ -744,7 +740,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 更新项目描述
   const updateProjectDescription = async (projectId: number, description: string) => {
     try {
-      await fetch(`/api/video2/projects/${projectId}`, {
+      await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ description })

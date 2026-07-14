@@ -14,7 +14,7 @@ export function subscribeToTask(
   onUpdate: (task: AiTaskUpdate) => void,
   onError?: (error: string) => void
 ): () => void {
-  const eventSource = new EventSource(`/api/video2/ai/task/${taskId}/stream`);
+  const eventSource = new EventSource(`/api/ai/task/${taskId}/stream`);
 
   eventSource.addEventListener('update', (event) => {
     try {

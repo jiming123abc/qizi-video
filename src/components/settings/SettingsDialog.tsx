@@ -52,7 +52,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     setError(null);
     try {
       const [settingsRes, authRes] = await Promise.all([
-        fetch('/api/video2/settings'),
+        fetch('/api/settings'),
         checkAuth()
       ]);
       if (settingsRes.ok) {
@@ -95,7 +95,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
       const failedKeys: string[] = [];
       for (const key of keys) {
         try {
-          const res = await fetch('/api/video2/settings', {
+          const res = await fetch('/api/settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ key, value: settings[key] }),
@@ -217,7 +217,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     setBackingUp(true);
     setError(null);
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/backup`);
+      const res = await fetch(`/api/projects/${projectId}/backup`);
       if (!res.ok) throw new Error('导出失败');
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -256,7 +256,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
       const text = await file.text();
       const projectData = JSON.parse(text);
 
-      const res = await fetch('/api/video2/projects/import', {
+      const res = await fetch('/api/projects/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -311,7 +311,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] flex flex-col bg-slate-900 rounded-3xl border border-white/10 shadow-2xl">
         {/* 标题栏 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 shrink-0">

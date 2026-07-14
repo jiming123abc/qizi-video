@@ -114,7 +114,7 @@ export default function AddShotDialog({
         }
       });
 
-      const res = await fetch('/api/video2/shots', {
+      const res = await fetch('/api/shots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -159,7 +159,7 @@ export default function AddShotDialog({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4"
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4"
       onClick={onClose}
     >
       <div

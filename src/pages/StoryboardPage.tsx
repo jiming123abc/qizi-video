@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
-import { uploadVideo2Video, detectFileType } from '../lib/ossUtils';
+import { uploadVideo, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
+import type { UploadDecision } from '../lib/ossUtils';
 import { useSignedUrl } from '../hooks/useSignedUrl';
 import { ShareHint } from '../components/WeChatShareHint';
 import { useEscapeKey } from '../hooks/useEscapeKey';
@@ -20,6 +21,7 @@ import { BottomTabBar } from '../components/storyboard/BottomTabBar';
 import MediaManagerDialog from '../components/storyboard/MediaManagerDialog';
 import AddShotDialog from '../components/storyboard/AddShotDialog';
 import VideoSplitDialog from '../components/storyboard/VideoSplitDialog';
+import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { SceneTabs } from '../components/storyboard/SceneTabs';
 import { SceneManager } from '../components/storyboard/SceneManager';
 import { UploadDialog } from '../components/storyboard/UploadDialog';
@@ -250,6 +252,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [mediaRefreshTrigger, setMediaRefreshTrigger] = useState(0);
   const [selectedShotForAIGen, setSelectedShotForAIGen] = useState<Shot | null>(null);
   const [selectedVideoForSplit, setSelectedVideoForSplit] = useState<string | null>(null);
+  const [pendingSplitVideo, setPendingSplitVideo] = useState<File | null>(null);
+  const [pendingSplitDecision, setPendingSplitDecision] = useState<UploadDecision | null>(null);
   const [showDigitalAssetDialog, setShowDigitalAssetDialog] = useState(false);
   const [aiSuggestedAssets, setAiSuggestedAssets] = useState<{
     mainActors: Array<{ name: string; imagePrompt: string }>;
@@ -301,7 +305,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // ============ 数据加载 ============
   const loadProject = useCallback(async () => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}`);
+      const res = await fetch(`/api/projects/${projectId}`);
       const data = await res.json();
       if (data.success) {
         // 统一 name 字段：后端现在也会返回 name 和 title
@@ -321,7 +325,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     const name = newName.trim();
     if (!name || !project) return;
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}`, {
+      const res = await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name })
@@ -348,7 +352,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const loadSceneStats = useCallback(async () => {
     try {
-      const res = await fetch(`/api/video2/scene-stats?projectId=${projectId}`);
+      const res = await fetch(`/api/scene-stats?projectId=${projectId}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         const map: Record<string, { done: number; total: number }> = {};
@@ -365,7 +369,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const loadFieldSuggestions = useCallback(async () => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/field-suggestions`);
+      const res = await fetch(`/api/projects/${projectId}/field-suggestions`);
       const data = await res.json();
       if (data.success && data.data) {
         setFieldSuggestions(data.data);
@@ -381,7 +385,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       params.set('projectId', String(projectId));
       if (currentSceneId === null) params.set('sceneId', 'null');
       else params.set('sceneId', String(currentSceneId));
-      const res = await fetch(`/api/video2/stats?${params.toString()}`);
+      const res = await fetch(`/api/stats?${params.toString()}`);
       const data = await res.json();
       if (data.success) {
         const s = data.data || {};
@@ -535,7 +539,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       return;
     }
     try {
-      await fetch(`/api/video2/shots/${shot.id}/status`, {
+      await fetch(`/api/shots/${shot.id}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
@@ -561,7 +565,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       if (shotNo) {
         updateData.shotNo = shotNo;
       }
-      await fetch(`/api/video2/shots/${shot.id}`, {
+      await fetch(`/api/shots/${shot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updateData)
@@ -687,7 +691,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // ============ 设置项目封面（上传后自动调用） ============
   const setProjectCover = async (coverUrl: string) => {
     try {
-      await fetch(`/api/video2/projects/${projectId}/cover`, {
+      await fetch(`/api/projects/${projectId}/cover`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ coverUrl })
@@ -791,15 +795,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // ============ 视频分割 ============
   const videoSplitInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSplitVideoUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const file = files[0];
-    const detected = detectFileType(file);
-    if (detected.type !== 'video') {
-      showToast('请选择视频文件');
-      return;
-    }
-
+  const doSplitVideoUpload = useCallback(async (file: File, compressionMethod: 'none' | 'server' | 'browser' | 'aliyun') => {
     setShowUploadDialog(true);
     const uploadId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
     setUploadingFiles([{
@@ -811,11 +807,14 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }]);
 
     try {
-      const result = await uploadVideo2Video(file, {
+      const result = await uploadVideo(file, {
         projectId,
         sceneId: currentSceneId !== null ? currentSceneId : undefined,
+        usage: 'shot-reference',
         title: file.name,
         createShot: true,
+        compressionMethod,
+        skipBitrateCheck: true,
         onProgress: p => {
           setUploadingFiles(prev => prev.map(uf => uf.id === uploadId ? { ...uf, progress: p.progress, message: p.message } : uf));
         }
@@ -838,6 +837,41 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       console.error('视频上传失败:', e);
       setUploadingFiles(prev => prev.map(uf => uf.id === uploadId ? { ...uf, status: 'error', message: '失败' } : uf));
       showToast('视频上传失败', 'error');
+    }
+  }, [projectId, currentSceneId, loadShots, loadStats, showToast]);
+
+  const handleSplitVideoCompressionSelect = useCallback(async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
+    const file = pendingSplitVideo;
+    setPendingSplitVideo(null);
+    setPendingSplitDecision(null);
+
+    if (method === 'cancel' || !file) return;
+    await doSplitVideoUpload(file, method);
+  }, [pendingSplitVideo, doSplitVideoUpload]);
+
+  const handleSplitVideoUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const detected = detectFileType(file);
+    if (detected.type !== 'video') {
+      showToast('请选择视频文件');
+      return;
+    }
+
+    // 先检测码率，决定是否弹出压缩方式选择对话框
+    try {
+      const decision = await checkVideoBitrate(file);
+      if (decision.decision === 'must_compress') {
+        // 需要压缩：弹出对话框让用户选择压缩方式
+        setPendingSplitVideo(file);
+        setPendingSplitDecision(decision);
+      } else {
+        // 无需压缩：直接上传
+        await doSplitVideoUpload(file, 'none');
+      }
+    } catch (e) {
+      console.error('视频检测失败:', e);
+      showToast('视频检测失败', 'error');
     }
 
     if (videoSplitInputRef.current) videoSplitInputRef.current.value = '';
@@ -872,7 +906,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   // ============ 分享 ============
   const handleShare = async () => {
-    const shareUrl = window.location.origin + `/share/video2/project/${projectId}`;
+    const shareUrl = window.location.origin + `/share/project/${projectId}`;
     setupShareMetadata({
       title: project?.name || '项目',
       desc: project?.description || '',
@@ -906,7 +940,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     const handleUpdate = (id: number, fields: Partial<Shot>) => {
       setShots(prev => prev.map(s => s.id === id ? { ...s, ...fields } : s));
       // API 更新
-      fetch(`/api/video2/shots/${id}`, {
+      fetch(`/api/shots/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fields)
@@ -931,7 +965,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
     const handleDeleteMedia = async (shotId: number, mediaId: number) => {
       try {
-        await fetch(`/api/video2/shots/${shotId}/media/${mediaId}`, {
+        await fetch(`/api/shots/${shotId}/media/${mediaId}`, {
           method: 'DELETE'
         });
         setShots(prev => prev.map(shot => {
@@ -1801,7 +1835,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           sceneShots={shots.filter(s => s.sceneId === selectedShotForAIGen.sceneId)}
           onUseImage={async (imageUrl) => {
             const shotId = selectedShotForAIGen.id;
-            await fetch(`/api/video2/shots/${shotId}/media`, {
+            await fetch(`/api/shots/${shotId}/media`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ url: imageUrl, type: 'image', source: 'ai_generated' })
@@ -1835,6 +1869,15 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           await loadStats();
           showToast('视频分割完成');
         }}
+      />
+
+      <VideoCompressionDialog
+        isOpen={pendingSplitVideo !== null && pendingSplitDecision !== null}
+        onClose={() => { setPendingSplitVideo(null); setPendingSplitDecision(null); }}
+        file={pendingSplitVideo}
+        decision={pendingSplitDecision}
+        aliyunConfigured={aliyunConfigured}
+        onSelect={handleSplitVideoCompressionSelect}
       />
 
 

@@ -15,6 +15,7 @@ import type { DigitalAsset } from '../../lib/types';
 import AIImageGenerateDialog from '../ai/AIImageGenerateDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { uploadImage, detectFileType } from '../../lib/ossUtils';
 
 interface DigitalAssetDialogProps {
   isOpen: boolean;
@@ -95,7 +96,7 @@ export default function DigitalAssetDialog({
   const fetchAssets = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets?type=${activeTab}`);
+      const res = await fetch(`/api/projects/${projectId}/assets?type=${activeTab}`);
       const data = await res.json();
       if (data.success) {
         setAssets(data.data || []);
@@ -112,7 +113,7 @@ export default function DigitalAssetDialog({
     if (!newAsset.name.trim()) return;
 
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets`, {
+      const res = await fetch(`/api/projects/${projectId}/assets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -138,7 +139,7 @@ export default function DigitalAssetDialog({
     if (!confirm('确定要删除这个资产吗？')) return;
 
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets/${id}`, {
+      const res = await fetch(`/api/projects/${projectId}/assets/${id}`, {
         method: 'DELETE',
       });
 
@@ -153,7 +154,7 @@ export default function DigitalAssetDialog({
   // 更新资产
   const handleUpdateAsset = async (id: number, updates: Partial<DigitalAsset>) => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets/${id}`, {
+      const res = await fetch(`/api/projects/${projectId}/assets/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -189,25 +190,31 @@ export default function DigitalAssetDialog({
     setEditing({ id: null, field: null, value: '' });
   };
 
-  // 上传图片
+  // 上传图片（数字资产仅支持图片，不允许视频）
   const handleUploadImage = async (assetId: number, file: File) => {
+    // 校验文件类型：拒绝视频
+    const detected = detectFileType(file);
+    if (detected.type === 'video') {
+      alert('数字资产仅支持图片上传，不能上传视频');
+      return;
+    }
+    if (!detected.supported) {
+      alert('不支持的文件格式');
+      return;
+    }
+
     setUploadingAssetId(assetId);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('title', `asset_${assetId}_${Date.now()}`);
-
-      const res = await fetch('/api/video2/upload/image', {
-        method: 'POST',
-        body: formData,
+      const result = await uploadImage(file, {
+        projectId,
+        usage: 'digital-asset',
+        title: `asset_${assetId}_${Date.now()}`,
       });
 
-      const data = await res.json();
-      if (data.success !== false && data.url) {
-        // 添加到资产图片列表
-        await addAssetImage(assetId, data.url);
+      if (result.url) {
+        await addAssetImage(assetId, result.url);
       } else {
-        alert(data.message || '上传失败');
+        alert('上传失败');
       }
     } catch (err) {
       console.error('上传图片失败:', err);
@@ -220,7 +227,7 @@ export default function DigitalAssetDialog({
   // 添加图片到资产
   const addAssetImage = async (assetId: number, imageUrl: string) => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets/${assetId}/images`, {
+      const res = await fetch(`/api/projects/${projectId}/assets/${assetId}/images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageUrl }),
@@ -237,7 +244,7 @@ export default function DigitalAssetDialog({
   const handleDeleteImage = async (assetId: number, imageId: number) => {
     if (!confirm('确定要删除这张图片吗？')) return;
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/assets/${assetId}/images/${imageId}`, {
+      const res = await fetch(`/api/projects/${projectId}/assets/${assetId}/images/${imageId}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -310,7 +317,7 @@ export default function DigitalAssetDialog({
       // 批量创建资产
       await Promise.all(
         assetsToImport.map(asset =>
-          fetch(`/api/video2/projects/${projectId}/assets`, {
+          fetch(`/api/projects/${projectId}/assets`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -337,7 +344,8 @@ export default function DigitalAssetDialog({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4 transition-opacity duration-200 ${aiImageDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={onClose}>
+    <>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={onClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-4xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
@@ -668,6 +676,7 @@ export default function DigitalAssetDialog({
           </button>
         </div>
       </div>
+    </div>
 
       <AIImageGenerateDialog
         isOpen={aiImageDialogOpen}
@@ -697,7 +706,7 @@ export default function DigitalAssetDialog({
           }
         }}
       />
-    </div>
+    </>
   );
 }
 

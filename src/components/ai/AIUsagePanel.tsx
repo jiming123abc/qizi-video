@@ -37,7 +37,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/video2/ai/usage?period=${p}`);
+      const res = await fetch(`/api/ai/usage?period=${p}`);
       if (!res.ok) throw new Error('获取数据失败');
       const json = await res.json();
       const data: AiUsageStats = json.data || json;

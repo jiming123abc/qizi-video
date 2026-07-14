@@ -19,7 +19,7 @@ server/.env.local
 *.db
 *.sqlite
 *.sqlite3
-server/video2.db
+server/storyboard.db
 server/data.db
 
 # Uploads

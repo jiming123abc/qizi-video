@@ -25,12 +25,12 @@ function initDatabase() {
     // 保留代码仅供参考，未来版本可删除
     // portfolio_items, featured_works, home_content, team_members, categories_details
 
-    // video2 相关表在下方 video2InitDatabase 中创建
+    // storyboard 相关表在下方 initStoryboardDatabase 中创建
   });
 }
 
 function insertInitialData() {
-  console.log('[legacy] 跳过企业官网旧表初始数据插入（video2 为独立数据库）');
+  console.log('[legacy] 跳过企业官网旧表初始数据插入（storyboard 为独立数据库）');
 }
 
 const dbAsync = {
@@ -403,41 +403,41 @@ const categoriesDetails = {
   }
 };
 
-// ==================== video2 独立数据库（视频片段管理） ====================
+// ==================== storyboard 独立数据库（视频片段管理） ====================
 
-const video2DbPath = path.join(__dirname, 'video2.db');
-const video2Db = new sqlite3.Database(video2DbPath, (err) => {
+const storyboardDbPath = path.join(__dirname, 'storyboard.db');
+const storyboardDb = new sqlite3.Database(storyboardDbPath, (err) => {
   if (err) {
-    console.error('[video2] 打开数据库失败:', err.message);
+    console.error('[app] 打开数据库失败:', err.message);
   } else {
-    console.log('[video2] 已连接 SQLite 数据库');
-    initVideo2Database();
+    console.log('[app] 已连接 SQLite 数据库');
+    initStoryboardDatabase();
   }
 });
 
-// video2 数据库就绪标志（所有 DDL 完成后才为 true）
-let video2DbReady = false;
-const video2DbWaiters = [];
+// storyboard 数据库就绪标志（所有 DDL 完成后才为 true）
+let storyboardDbReady = false;
+const storyboardDbWaiters = [];
 
-function video2DbOnReady(cb) {
-  if (video2DbReady) { cb && cb(); return; }
-  if (cb) video2DbWaiters.push(cb);
+function onStoryboardDbReady(cb) {
+  if (storyboardDbReady) { cb && cb(); return; }
+  if (cb) storyboardDbWaiters.push(cb);
 }
-function video2DbSetReady() {
-  if (video2DbReady) return;
-  video2DbReady = true;
-  const list = video2DbWaiters.splice(0, video2DbWaiters.length);
+function setStoryboardDbReady() {
+  if (storyboardDbReady) return;
+  storyboardDbReady = true;
+  const list = storyboardDbWaiters.splice(0, storyboardDbWaiters.length);
   list.forEach(function(cb) { try { cb(); } catch (e) {} });
-  console.log('[video2] 表结构已就绪');
+  console.log('[app] 表结构已就绪');
 }
 
-function initVideo2Database() {
-  video2Db.serialize(() => {
+function initStoryboardDatabase() {
+  storyboardDb.serialize(() => {
     // P3-5：ignoredMsg 提前到 serialize 顶部，避免 TDZ 风险
     const ignoredMsg = 'duplicate column name';
 
     // 1. 创建 videos 表（完整新结构，包括所有新列：type/coverUrl/isCover/reference）
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS videos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
@@ -462,7 +462,7 @@ function initVideo2Database() {
     `);
 
     // 迁移：已存在表增加 shotNo 列（忽略错误）
-    video2Db.run(`ALTER TABLE videos ADD COLUMN shotNo TEXT`, (err) => {
+    storyboardDb.run(`ALTER TABLE videos ADD COLUMN shotNo TEXT`, (err) => {
       // 如果列已存在或表不存在，忽略错误
     });
 
@@ -487,15 +487,15 @@ function initVideo2Database() {
       'shotIndex INTEGER DEFAULT 0'
     ];
     shotColumns.forEach(function(colDef) {
-      video2Db.run(`ALTER TABLE videos ADD COLUMN ${colDef}`, function(err) {
+      storyboardDb.run(`ALTER TABLE videos ADD COLUMN ${colDef}`, function(err) {
         if (err && String(err.message).indexOf(ignoredMsg) === -1) {
-          console.error('[video2] 新增分镜字段失败:', colDef, err.message);
+          console.error('[app] 新增分镜字段失败:', colDef, err.message);
         }
       });
     });
 
     // ========== shot_media 表（分镜参考画面） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS shot_media (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         shotId INTEGER NOT NULL,
@@ -510,10 +510,10 @@ function initVideo2Database() {
         FOREIGN KEY (shotId) REFERENCES videos(id) ON DELETE CASCADE
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_shot_media_shot ON shot_media(shotId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_shot_media_shot ON shot_media(shotId)');
 
     // ========== ai_generated_images 表（P3-22：AI 生图历史持久化） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS ai_generated_images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ownerType TEXT NOT NULL,
@@ -528,10 +528,10 @@ function initVideo2Database() {
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_ai_gen_owner ON ai_generated_images(ownerType, ownerId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_ai_gen_owner ON ai_generated_images(ownerType, ownerId)');
 
     // ========== settings 表（系统设置） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -540,7 +540,7 @@ function initVideo2Database() {
     `);
 
     // ========== ai_tasks 表（AI 异步任务） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS ai_tasks (
         id TEXT PRIMARY KEY,
         type TEXT NOT NULL,
@@ -556,7 +556,7 @@ function initVideo2Database() {
     `);
 
     // ========== ai_usage_logs 表（AI 费用统计） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS ai_usage_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         taskId TEXT,
@@ -571,10 +571,10 @@ function initVideo2Database() {
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_usage_created ON ai_usage_logs(createdAt)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_usage_created ON ai_usage_logs(createdAt)');
 
     // ========== transcode_tasks 表（转码任务持久化） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS transcode_tasks (
         id TEXT PRIMARY KEY,
         jobId TEXT,
@@ -591,17 +591,17 @@ function initVideo2Database() {
         updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_status ON transcode_tasks(status)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_transcode_project ON transcode_tasks(projectId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_transcode_status ON transcode_tasks(status)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_transcode_project ON transcode_tasks(projectId)');
     // 心跳字段：前端最后一次查询状态的时间，用于检测孤儿任务（用户已离开）
-    video2Db.run('ALTER TABLE transcode_tasks ADD COLUMN lastQueriedAt DATETIME', function(err) {
+    storyboardDb.run('ALTER TABLE transcode_tasks ADD COLUMN lastQueriedAt DATETIME', function(err) {
       if (err && String(err.message).indexOf('duplicate column name') === -1) {
-        console.error('[video2] ALTER TABLE transcode_tasks.lastQueriedAt 失败:', err.message);
+        console.error('[app] ALTER TABLE transcode_tasks.lastQueriedAt 失败:', err.message);
       }
     });
 
     // ========== digital_assets 表（数字资产：演员/道具/场景） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS digital_assets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         projectId INTEGER NOT NULL,
@@ -613,11 +613,11 @@ function initVideo2Database() {
         FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_project ON digital_assets(projectId)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_type ON digital_assets(type)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_project ON digital_assets(projectId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_digital_assets_type ON digital_assets(type)');
 
     // ========== digital_asset_images 表（数字资产图片） ==========
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS digital_asset_images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         assetId INTEGER NOT NULL,
@@ -627,12 +627,12 @@ function initVideo2Database() {
         FOREIGN KEY (assetId) REFERENCES digital_assets(id) ON DELETE CASCADE
       )
     `);
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_digital_asset_images_asset ON digital_asset_images(assetId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_digital_asset_images_asset ON digital_asset_images(assetId)');
 
     // 迁移旧数据：将 digital_assets.imageUrl 迁移到 digital_asset_images
-    video2Db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='digital_asset_images'", [], function(err, row) {
+    storyboardDb.get("SELECT name FROM sqlite_master WHERE type='table' AND name='digital_asset_images'", [], function(err, row) {
       if (row) {
-        video2Db.run(`
+        storyboardDb.run(`
           INSERT OR IGNORE INTO digital_asset_images (assetId, imageUrl, sortOrder)
           SELECT id, imageUrl, 0 FROM digital_assets
           WHERE imageUrl IS NOT NULL AND imageUrl != ''
@@ -642,7 +642,7 @@ function initVideo2Database() {
     });
 
     // 2. 创建 projects 表
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -655,7 +655,7 @@ function initVideo2Database() {
     `);
 
     // 3. 创建 scenes 表
-    video2Db.run(`
+    storyboardDb.run(`
       CREATE TABLE IF NOT EXISTS scenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         projectId INTEGER NOT NULL,
@@ -683,25 +683,25 @@ function initVideo2Database() {
       'ALTER TABLE videos ADD COLUMN reference INTEGER DEFAULT 0'
     ];
     addColSqlList.forEach(function(sql) {
-      video2Db.run(sql, function(err) {
+      storyboardDb.run(sql, function(err) {
         if (err && String(err.message).indexOf(ignoredMsg) === -1) {
-          console.error('[video2] ALTER TABLE 失败:', err.message);
+          console.error('[app] ALTER TABLE 失败:', err.message);
         }
       });
     });
 
     // 5. 创建索引
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_sort ON videos(sortOrder)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_deleted ON videos(deleted)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_project ON videos(projectId)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_videos_scene ON videos(sceneId)');
-    video2Db.run('CREATE INDEX IF NOT EXISTS idx_scenes_project ON scenes(projectId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_videos_sort ON videos(sortOrder)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_videos_deleted ON videos(deleted)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_videos_project ON videos(projectId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_videos_scene ON videos(sceneId)');
+    storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_scenes_project ON scenes(projectId)');
 
     // 6. 初始化系统设置（首次启动插入默认值，已存在则跳过）
-    video2Db.get('SELECT 1 as ok', function(_err, _row) {
+    storyboardDb.get('SELECT 1 as ok', function(_err, _row) {
       initDefaultSettings(function() {
-        video2DbSetReady();
+        setStoryboardDbReady();
       });
     });
   });
@@ -713,17 +713,17 @@ function recalcShotIndex(callback, projectId) {
     ? 'WHERE deleted = 0 AND projectId = ?'
     : 'WHERE deleted = 0';
   const params = projectId != null ? [projectId] : [];
-  video2Db.all(
+  storyboardDb.all(
     'SELECT id, projectId, sceneId FROM ' + 'videos ' + whereClause + ' ORDER BY projectId ASC, sceneId ASC, sortOrder ASC, id ASC',
     params,
     function(err, rows) {
       if (err) {
-        console.error('[video2] 计算 shotIndex 失败:', err.message);
+        console.error('[app] 计算 shotIndex 失败:', err.message);
         callback && callback();
         return;
       }
 
-      const stmt = video2Db.prepare('UPDATE videos SET shotIndex = ? WHERE id = ?');
+      const stmt = storyboardDb.prepare('UPDATE videos SET shotIndex = ? WHERE id = ?');
       let currentProj = null;
       let currentScene = null;
       let idx = 0;
@@ -740,7 +740,7 @@ function recalcShotIndex(callback, projectId) {
       });
 
       stmt.finalize(function() {
-        console.log('[video2] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条' + (projectId != null ? ' (projectId=' + projectId + ')' : ''));
+        console.log('[app] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条' + (projectId != null ? ' (projectId=' + projectId + ')' : ''));
         callback && callback();
       });
     }
@@ -789,16 +789,16 @@ function initDefaultSettings(callback) {
   let inserted = 0;
 
   Object.keys(defaults).forEach(function(key) {
-    video2Db.get('SELECT key FROM settings WHERE key = ?', [key], function(err, row) {
+    storyboardDb.get('SELECT key FROM settings WHERE key = ?', [key], function(err, row) {
       if (!row) {
-        video2Db.run(
+        storyboardDb.run(
           'INSERT INTO settings (key, value) VALUES (?, ?)',
           [key, defaults[key]],
           function(err2) {
             if (!err2) inserted++;
             remaining--;
             if (remaining === 0) {
-              console.log('[video2] 已初始化 settings: ' + inserted + ' 条');
+              console.log('[app] 已初始化 settings: ' + inserted + ' 条');
               callback && callback();
             }
           }
@@ -806,7 +806,7 @@ function initDefaultSettings(callback) {
       } else {
         remaining--;
         if (remaining === 0) {
-          console.log('[video2] settings 已存在，跳过初始化');
+          console.log('[app] settings 已存在，跳过初始化');
           callback && callback();
         }
       }
@@ -814,11 +814,11 @@ function initDefaultSettings(callback) {
   });
 }
 
-const video2Async = {
+const storyboardAsync = {
   get: (sql, params = []) => {
     return new Promise((resolve, reject) => {
-      video2DbOnReady(() => {
-        video2Db.get(sql, params, (err, row) => {
+      onStoryboardDbReady(() => {
+        storyboardDb.get(sql, params, (err, row) => {
           if (err) reject(err);
           else resolve(row);
         });
@@ -827,8 +827,8 @@ const video2Async = {
   },
   all: (sql, params = []) => {
     return new Promise((resolve, reject) => {
-      video2DbOnReady(() => {
-        video2Db.all(sql, params, (err, rows) => {
+      onStoryboardDbReady(() => {
+        storyboardDb.all(sql, params, (err, rows) => {
           if (err) reject(err);
           else resolve(rows);
         });
@@ -837,40 +837,40 @@ const video2Async = {
   },
   run: (sql, params = []) => {
     return new Promise((resolve, reject) => {
-      video2DbOnReady(() => {
-        video2Db.run(sql, params, function(err) {
+      onStoryboardDbReady(() => {
+        storyboardDb.run(sql, params, function(err) {
           if (err) reject(err);
           else resolve({ lastID: this.lastID, changes: this.changes });
         });
       });
     });
   },
-  // P4-2：事务辅助方法（video2Db 连接），包裹多步写操作保证原子性
-  // 用法：await video2Async.transaction(async (tx) => { await tx.run(...); });
+  // P4-2：事务辅助方法（storyboardDb 连接），包裹多步写操作保证原子性
+  // 用法：await storyboardAsync.transaction(async (tx) => { await tx.run(...); });
   transaction: async (fn) => {
-    await video2Async.run('BEGIN');
+    await storyboardAsync.run('BEGIN');
     try {
-      const result = await fn(video2Async);
-      await video2Async.run('COMMIT');
+      const result = await fn(storyboardAsync);
+      await storyboardAsync.run('COMMIT');
       return result;
     } catch (e) {
-      await video2Async.run('ROLLBACK').catch(() => {});
+      await storyboardAsync.run('ROLLBACK').catch(() => {});
       throw e;
     }
   }
 };
 
-// ── video2Projects ──────────────────────────────────────────────
-const video2Projects = {
+// ── projects ──────────────────────────────────────────────
+const projects = {
   getAll: async () => {
-    const projects = await video2Async.all(
+    const projects = await storyboardAsync.all(
       'SELECT * FROM projects ORDER BY sortOrder ASC, id ASC'
     );
     if (projects.length === 0) return [];
 
     // P4-8：5 个 GROUP BY 聚合查询替代 N+1（1+5N → 7）
     // 1. 分镜主视频（videos 表，reference=0）
-    const videoStatsRows = await video2Async.all(
+    const videoStatsRows = await storyboardAsync.all(
       `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
        FROM videos WHERE deleted = 0 AND reference = 0
        GROUP BY projectId`
@@ -879,7 +879,7 @@ const video2Projects = {
     videoStatsRows.forEach(r => videoMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
 
     // 2. 项目参考文件（videos 表，reference=1）
-    const refStatsRows = await video2Async.all(
+    const refStatsRows = await storyboardAsync.all(
       `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
        FROM videos WHERE deleted = 0 AND reference = 1
        GROUP BY projectId`
@@ -888,7 +888,7 @@ const video2Projects = {
     refStatsRows.forEach(r => refMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
 
     // 3. 分镜参考画面（shot_media JOIN videos）
-    const shotMediaStatsRows = await video2Async.all(
+    const shotMediaStatsRows = await storyboardAsync.all(
       `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(m.size),0) as totalSize
        FROM shot_media m JOIN videos v ON m.shotId = v.id
        WHERE v.deleted = 0
@@ -899,7 +899,7 @@ const video2Projects = {
 
     // 4. 数字资产图（digital_asset_images JOIN digital_assets）
     //    注意：digital_asset_images 表只存 imageUrl，无 size 列，totalSize 用 0 占位（COUNT 仍准确）
-    const assetImgStatsRows = await video2Async.all(
+    const assetImgStatsRows = await storyboardAsync.all(
       `SELECT da.projectId, COUNT(*) as cnt, 0 as totalSize
        FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
        GROUP BY da.projectId`
@@ -910,13 +910,13 @@ const video2Projects = {
     // 5. AI 生图历史（ai_generated_images，按 shot/asset 维度关联到项目）
     //    该查询涉及两个子查询（shot/asset），无法直接 GROUP BY projectId
     //    分两次查询：shot 维度和 asset 维度分别聚合，再在内存合并
-    const aiHistShotRows = await video2Async.all(
+    const aiHistShotRows = await storyboardAsync.all(
       `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
        FROM ai_generated_images a JOIN videos v ON a.ownerId = v.id
        WHERE a.ownerType = 'shot' AND v.deleted = 0
        GROUP BY v.projectId`
     );
-    const aiHistAssetRows = await video2Async.all(
+    const aiHistAssetRows = await storyboardAsync.all(
       `SELECT da.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
        FROM ai_generated_images a JOIN digital_assets da ON a.ownerId = da.id
        WHERE a.ownerType = 'asset'
@@ -950,15 +950,15 @@ const video2Projects = {
     return result;
   },
   getById: async (id) => {
-    return await video2Async.get('SELECT * FROM projects WHERE id = ?', [id]);
+    return await storyboardAsync.get('SELECT * FROM projects WHERE id = ?', [id]);
   },
   create: async ({ name, description, coverUrl }) => {
-    const maxRow = await video2Async.get('SELECT MAX(sortOrder) as maxSort FROM projects');
+    const maxRow = await storyboardAsync.get('SELECT MAX(sortOrder) as maxSort FROM projects');
     const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
     const DEFAULT_COVER = 'data:image/svg+xml;utf8,' +
       encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 225"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#ec4899"/></linearGradient></defs><rect width="400" height="225" fill="url(#g)"/></svg>');
     const finalCoverUrl = coverUrl || DEFAULT_COVER;
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'INSERT INTO projects (name, description, sortOrder, coverUrl) VALUES (?, ?, ?, ?)',
       [name, description || '', nextSort, finalCoverUrl]
     );
@@ -973,12 +973,12 @@ const video2Projects = {
     if (fields.length === 0) return;
     fields.push('updatedAt=CURRENT_TIMESTAMP');
     vals.push(id);
-    await video2Async.run('UPDATE projects SET ' + fields.join(', ') + ' WHERE id = ?', vals);
+    await storyboardAsync.run('UPDATE projects SET ' + fields.join(', ') + ' WHERE id = ?', vals);
     return true;
   },
   updateSort: async (orders) => {
     for (const item of orders) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE projects SET sortOrder = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
         [item.sortOrder, item.id]
       );
@@ -987,27 +987,27 @@ const video2Projects = {
   },
   delete: async (id) => {
     // 获取该项目下所有视频 url（用于调用方清理 OSS）
-    const videos = await video2Async.all(
+    const videos = await storyboardAsync.all(
       'SELECT url FROM videos WHERE projectId = ?',
       [id]
     );
-    await video2Async.run('DELETE FROM scenes WHERE projectId = ?', [id]);
-    await video2Async.run('DELETE FROM projects WHERE id = ?', [id]);
+    await storyboardAsync.run('DELETE FROM scenes WHERE projectId = ?', [id]);
+    await storyboardAsync.run('DELETE FROM projects WHERE id = ?', [id]);
     return videos; // 返回视频 URL 列表，由调用方清理 OSS
   }
 };
 
-// ── video2Scenes ──────────────────────────────────────────────
-const video2Scenes = {
+// ── scenes ──────────────────────────────────────────────
+const scenes = {
   getByProjectId: async (projectId) => {
-    const scenes = await video2Async.all(
+    const scenes = await storyboardAsync.all(
       'SELECT * FROM scenes WHERE projectId = ? ORDER BY sortOrder ASC, id ASC',
       [projectId]
     );
     if (scenes.length === 0) return [];
 
     // P4-8：一次 GROUP BY 聚合替代 N+1（1+N → 2）
-    const statsRows = await video2Async.all(
+    const statsRows = await storyboardAsync.all(
       `SELECT sceneId, COUNT(*) as cnt
        FROM videos WHERE sceneId IS NOT NULL AND deleted = 0 AND reference = 0
        GROUP BY sceneId`
@@ -1021,12 +1021,12 @@ const video2Scenes = {
     }));
   },
   create: async ({ projectId, name }) => {
-    const maxRow = await video2Async.get(
+    const maxRow = await storyboardAsync.get(
       'SELECT MAX(sortOrder) as maxSort FROM scenes WHERE projectId = ?',
       [projectId]
     );
     const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'INSERT INTO scenes (projectId, name, sortOrder) VALUES (?, ?, ?)',
       [projectId, name, nextSort]
     );
@@ -1040,12 +1040,12 @@ const video2Scenes = {
     if (fields.length === 0) return;
     fields.push('updatedAt=CURRENT_TIMESTAMP');
     vals.push(id);
-    await video2Async.run('UPDATE scenes SET ' + fields.join(', ') + ' WHERE id = ?', vals);
+    await storyboardAsync.run('UPDATE scenes SET ' + fields.join(', ') + ' WHERE id = ?', vals);
     return true;
   },
   updateSort: async (orders) => {
     for (const item of orders) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE scenes SET sortOrder = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
         [item.sortOrder, item.id]
       );
@@ -1054,13 +1054,13 @@ const video2Scenes = {
   },
   delete: async (id) => {
     // 该场次下视频归到未分类
-    await video2Async.run('UPDATE videos SET sceneId = NULL WHERE sceneId = ?', [id]);
-    await video2Async.run('DELETE FROM scenes WHERE id = ?', [id]);
+    await storyboardAsync.run('UPDATE videos SET sceneId = NULL WHERE sceneId = ?', [id]);
+    await storyboardAsync.run('DELETE FROM scenes WHERE id = ?', [id]);
     return true;
   }
 };
 
-// ── video2Items（扩展）────────────────────────────────────────
+// ── items（扩展）────────────────────────────────────────
 function formatShot(shot) {
   if (!shot) return shot;
   if (shot.mergedFrom && typeof shot.mergedFrom === 'string') {
@@ -1078,9 +1078,9 @@ function formatShot(shot) {
   return shot;
 }
 
-const video2Items = {
+const items = {
   getAll: async () => {
-    const rows = await video2Async.all(
+    const rows = await storyboardAsync.all(
       'SELECT * FROM videos WHERE deleted = 0 ORDER BY sortOrder ASC, id ASC'
     );
     return rows.map(formatShot);
@@ -1095,11 +1095,11 @@ const video2Items = {
     if (type !== undefined) { sql += ' AND type = ?'; params.push(type); }
     if (reference !== undefined) { sql += ' AND reference = ?'; params.push(reference); }
     sql += ' ORDER BY sortOrder ASC, id ASC';
-    const rows = await video2Async.all(sql, params);
+    const rows = await storyboardAsync.all(sql, params);
     return rows.map(formatShot);
   },
   getByStatus: async (status) => {
-    const rows = await video2Async.all(
+    const rows = await storyboardAsync.all(
       'SELECT * FROM videos WHERE status = ? AND deleted = 0 ORDER BY sortOrder ASC, id ASC',
       [status]
     );
@@ -1118,7 +1118,7 @@ const video2Items = {
       }
     }
     if (reference !== undefined) { whereClause += ' AND reference = ?'; params.push(reference); }
-    const all = await video2Async.all(
+    const all = await storyboardAsync.all(
       'SELECT status, COUNT(*) as cnt FROM videos ' + whereClause + ' GROUP BY status',
       params
     );
@@ -1131,7 +1131,7 @@ const video2Items = {
     const trashParams = [];
     if (projectId !== undefined) { trashWhere += ' AND projectId = ?'; trashParams.push(projectId); }
     if (reference !== undefined) { trashWhere += ' AND reference = ?'; trashParams.push(reference); }
-    const trash = await video2Async.get(
+    const trash = await storyboardAsync.get(
       'SELECT COUNT(*) as cnt FROM videos' + trashWhere,
       trashParams
     );
@@ -1140,7 +1140,7 @@ const video2Items = {
     const unclassifiedParams = [];
     if (projectId !== undefined) { unclassifiedWhere += ' AND projectId = ?'; unclassifiedParams.push(projectId); }
     if (reference !== undefined) { unclassifiedWhere += ' AND reference = ?'; unclassifiedParams.push(reference); }
-    const unclassified = await video2Async.get(
+    const unclassified = await storyboardAsync.get(
       'SELECT COUNT(*) as cnt FROM videos ' + unclassifiedWhere,
       unclassifiedParams
     );
@@ -1148,7 +1148,7 @@ const video2Items = {
     return map;
   },
   getSceneStats: async (projectId) => {
-    const rows = await video2Async.all(
+    const rows = await storyboardAsync.all(
       `SELECT v.sceneId, s.name as sceneName, v.status, COUNT(*) as cnt
        FROM videos v
        LEFT JOIN scenes s ON v.sceneId = s.id
@@ -1179,13 +1179,13 @@ const video2Items = {
     return Object.values(sceneMap);
   },
   exportProject: async (projectId) => {
-    const project = await video2Async.get('SELECT * FROM projects WHERE id = ?', [projectId]);
+    const project = await storyboardAsync.get('SELECT * FROM projects WHERE id = ?', [projectId]);
     if (!project) return null;
-    const scenes = await video2Async.all(
+    const scenes = await storyboardAsync.all(
       'SELECT id, name, sortOrder, createdAt, updatedAt FROM scenes WHERE projectId = ? ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC',
       [projectId]
     );
-    const shots = await video2Async.all(
+    const shots = await storyboardAsync.all(
       `SELECT id, title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
               narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
               props, costume, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
@@ -1198,7 +1198,7 @@ const video2Items = {
     let media = [];
     if (shotIds.length > 0) {
       const placeholders = shotIds.map(() => '?').join(',');
-      media = await video2Async.all(
+      media = await storyboardAsync.all(
         `SELECT id, shotId, url, type, filename, size, duration, sortOrder, source, createdAt
          FROM shot_media WHERE shotId IN (${placeholders})
          ORDER BY shotId ASC, sortOrder ASC, id ASC`,
@@ -1225,7 +1225,7 @@ const video2Items = {
     let newProjectId = targetProjectId;
 
     if (!targetProjectId) {
-      const result = await video2Async.run(
+      const result = await storyboardAsync.run(
         'INSERT INTO projects (name, description, coverUrl, sortOrder) VALUES (?, ?, ?, ?)',
         [
           project?.name || '导入的项目',
@@ -1236,14 +1236,14 @@ const video2Items = {
       );
       newProjectId = result.lastID;
     } else {
-      const existing = await video2Async.get('SELECT * FROM projects WHERE id = ?', [targetProjectId]);
+      const existing = await storyboardAsync.get('SELECT * FROM projects WHERE id = ?', [targetProjectId]);
       if (!existing) throw new Error('目标项目不存在');
     }
 
     const sceneIdMap = {};
     if (scenes && scenes.length > 0) {
       for (const s of scenes) {
-        const result = await video2Async.run(
+        const result = await storyboardAsync.run(
           'INSERT INTO scenes (name, sortOrder, projectId) VALUES (?, ?, ?)',
           [s.name, s.sortOrder ?? null, newProjectId]
         );
@@ -1255,7 +1255,7 @@ const video2Items = {
     if (shots && shots.length > 0) {
       for (const sh of shots) {
         const newSceneId = sh.sceneId != null ? (sceneIdMap[sh.sceneId] ?? null) : null;
-        const result = await video2Async.run(
+        const result = await storyboardAsync.run(
           `INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
             narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
             props, costume, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
@@ -1281,7 +1281,7 @@ const video2Items = {
       for (const m of media) {
         const newShotId = shotIdMap[m.shotId];
         if (!newShotId) continue;
-        await video2Async.run(
+        await storyboardAsync.run(
           'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           [
             newShotId, m.url, m.type || 'image', m.filename || '',
@@ -1294,15 +1294,15 @@ const video2Items = {
     return { projectId: newProjectId, sceneIdMap, shotIdMap };
   },
   getById: async (id) => {
-    const row = await video2Async.get('SELECT * FROM videos WHERE id = ?', [id]);
+    const row = await storyboardAsync.get('SELECT * FROM videos WHERE id = ?', [id]);
     return formatShot(row);
   },
   create: async (item) => {
-    const maxRow = await video2Async.get(
+    const maxRow = await storyboardAsync.get(
       'SELECT MAX(sortOrder) as maxSort FROM videos WHERE deleted = 0 AND (reference IS NULL OR reference = 0)'
     );
     const nextSort = ((maxRow && maxRow.maxSort != null) ? maxRow.maxSort : -1) + 1;
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         item.title,
@@ -1322,21 +1322,21 @@ const video2Items = {
     return formatShot({ id: result.lastID, sortOrder: nextSort, ...item });
   },
   updateStatus: async (id, status) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'UPDATE videos SET status = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
       [status, id]
     );
     return result.changes > 0;
   },
   updateShotNo: async (id, shotNo) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'UPDATE videos SET shotNo = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
       [shotNo || null, id]
     );
     return result.changes > 0;
   },
   updateTitle: async (id, title) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'UPDATE videos SET title = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
       [title, id]
     );
@@ -1344,7 +1344,7 @@ const video2Items = {
   },
   updateSort: async (orders) => {
     for (const item of orders) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE videos SET sortOrder = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
         [item.sortOrder, item.id]
       );
@@ -1353,7 +1353,7 @@ const video2Items = {
   },
   // 软删除（移入垃圾桶）
   softDelete: async (id) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'UPDATE videos SET deleted = 1, deletedAt = CURRENT_TIMESTAMP, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
       [id]
     );
@@ -1361,7 +1361,7 @@ const video2Items = {
   },
   // 从垃圾桶恢复
   restore: async (id) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'UPDATE videos SET deleted = 0, deletedAt = NULL, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
       [id]
     );
@@ -1369,13 +1369,13 @@ const video2Items = {
   },
   // 彻底删除（DB 记录，由调用方清理 OSS）
   hardDelete: async (id) => {
-    const result = await video2Async.run('DELETE FROM videos WHERE id = ?', [id]);
+    const result = await storyboardAsync.run('DELETE FROM videos WHERE id = ?', [id]);
     return result.changes > 0;
   },
   // 批量软删除
   batchSoftDelete: async (ids) => {
     const placeholders = ids.map(() => '?').join(',');
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       `UPDATE videos SET deleted = 1, deletedAt = CURRENT_TIMESTAMP, updatedAt = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
       ids
     );
@@ -1384,7 +1384,7 @@ const video2Items = {
   // 批量恢复
   batchRestore: async (ids) => {
     const placeholders = ids.map(() => '?').join(',');
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       `UPDATE videos SET deleted = 0, deletedAt = NULL, updatedAt = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
       ids
     );
@@ -1393,7 +1393,7 @@ const video2Items = {
   // 批量更新状态
   batchUpdateStatus: async (ids, status) => {
     const placeholders = ids.map(() => '?').join(',');
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       `UPDATE videos SET status = ?, updatedAt = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
       [status, ...ids]
     );
@@ -1402,11 +1402,11 @@ const video2Items = {
   // 批量彻底删除（返回被删视频的 URL 列表）
   batchHardDelete: async (ids) => {
     const placeholders = ids.map(() => '?').join(',');
-    const rows = await video2Async.all(
+    const rows = await storyboardAsync.all(
       `SELECT url FROM videos WHERE id IN (${placeholders})`,
       ids
     );
-    await video2Async.run(
+    await storyboardAsync.run(
       `DELETE FROM videos WHERE id IN (${placeholders})`,
       ids
     );
@@ -1415,7 +1415,7 @@ const video2Items = {
   // 批量移动到场次
   batchChangeScene: async (ids, sceneId) => {
     const placeholders = ids.map(() => '?').join(',');
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       `UPDATE videos SET sceneId = ?, updatedAt = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
       [sceneId, ...ids]
     );
@@ -1423,19 +1423,19 @@ const video2Items = {
   },
   // 兼容旧 API（硬删除，保留给 server.js 旧 DELETE 路由的兼容实现）
   delete: async (id) => {
-    const result = await video2Async.run('DELETE FROM videos WHERE id = ?', [id]);
+    const result = await storyboardAsync.run('DELETE FROM videos WHERE id = ?', [id]);
     return result.changes > 0;
   },
   // 原子设置封面：先清除同项目的旧 isCover=1，再设置当前记录
   setCover: async (projectId, videoId) => {
-    await video2Async.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE projectId = ? AND isCover = 1', [projectId]);
-    const r = await video2Async.run('UPDATE videos SET isCover = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
+    await storyboardAsync.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE projectId = ? AND isCover = 1', [projectId]);
+    const r = await storyboardAsync.run('UPDATE videos SET isCover = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
     return r.changes > 0;
   },
   // P4-2 补充：原子设置封面，同时更新 videos.isCover 和 projects.coverUrl（事务包裹）
   // 用法：await setCoverWithProject(projectId, videoId, coverUrl)
   setCoverWithProject: async (projectId, videoId, coverUrl) => {
-    return await video2Async.transaction(async (tx) => {
+    return await storyboardAsync.transaction(async (tx) => {
       await tx.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE projectId = ? AND isCover = 1', [projectId]);
       const r = await tx.run('UPDATE videos SET isCover = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
       if (r.changes > 0) {
@@ -1446,7 +1446,7 @@ const video2Items = {
   },
   // 取消某条视频的封面标记
   unsetCover: async (videoId) => {
-    const r = await video2Async.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
+    const r = await storyboardAsync.run('UPDATE videos SET isCover = 0, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [videoId]);
     return r.changes > 0;
   },
 
@@ -1469,17 +1469,17 @@ const video2Items = {
     if (sets.length === 0) return false;
     sets.push('updatedAt = CURRENT_TIMESTAMP');
     vals.push(id);
-    const r = await video2Async.run('UPDATE videos SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    const r = await storyboardAsync.run('UPDATE videos SET ' + sets.join(', ') + ' WHERE id = ?', vals);
     return r.changes > 0;
   },
 
   // 压缩/转码完成后更新媒体 URL 和 size（用于阿里云 MPS 流程）
   updateMediaUrlAndSize: async (oldUrl, newUrl, newSize) => {
-    const r1 = await video2Async.run(
+    const r1 = await storyboardAsync.run(
       'UPDATE videos SET url = ?, size = ?, updatedAt = CURRENT_TIMESTAMP WHERE url = ?',
       [newUrl, newSize, oldUrl]
     );
-    const r2 = await video2Async.run(
+    const r2 = await storyboardAsync.run(
       'UPDATE shot_media SET url = ?, size = ? WHERE url = ?',
       [newUrl, newSize, oldUrl]
     );
@@ -1489,7 +1489,7 @@ const video2Items = {
   // 分镜升级：创建空白分镜（无参考画面）
   createShot: async (item) => {
     // P4-2：用事务包裹 MAX+1 与 INSERT，防御并发请求分配到相同 sortOrder
-    const { newId, nextSort } = await video2Async.transaction(async (tx) => {
+    const { newId, nextSort } = await storyboardAsync.transaction(async (tx) => {
       const maxRow = await tx.get(
         'SELECT MAX(sortOrder) as maxSort FROM videos WHERE deleted = 0 AND projectId = ?' + (item.sceneId !== undefined ? ' AND sceneId ' + (item.sceneId === null ? 'IS NULL' : '= ?') : ''),
         item.sceneId !== undefined && item.sceneId !== null ? [item.projectId, item.sceneId] : [item.projectId]
@@ -1544,7 +1544,7 @@ const video2Items = {
   mergeShots: async (shotIds) => {
     if (!shotIds || shotIds.length < 2) throw new Error('至少需要2个分镜才能合并');
 
-    const shots = await video2Async.all(
+    const shots = await storyboardAsync.all(
       `SELECT * FROM videos WHERE id IN (${shotIds.map(() => '?').join(',')}) ORDER BY sortOrder ASC, id ASC`,
       shotIds
     );
@@ -1557,7 +1557,7 @@ const video2Items = {
     }
 
     // 检查合并后 shot_media 总数
-    const mediaCount = await video2Async.get(
+    const mediaCount = await storyboardAsync.get(
       `SELECT COUNT(*) as cnt FROM shot_media WHERE shotId IN (${shotIds.map(() => '?').join(',')})`,
       shotIds
     );
@@ -1573,7 +1573,7 @@ const video2Items = {
 
     // P4-2：用事务包裹"迁移 media + 删除原 shot + 更新首 shot + 重算 shotIndex"，保证原子性
     // 中途任何步骤失败都会 ROLLBACK，避免出现孤儿 media 或媒体丢失
-    await video2Async.transaction(async (tx) => {
+    await storyboardAsync.transaction(async (tx) => {
       // 合并后第一个分镜保留，其他分镜的media迁移过来
       for (const shot of otherShots) {
         // 获取该分镜的media最大sortOrder
@@ -1625,29 +1625,29 @@ const video2Items = {
     });
 
     // 返回合并后的分镜
-    const merged = await video2Async.get('SELECT * FROM videos WHERE id = ?', [firstShot.id]);
-    const mergedMedia = await video2Async.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [firstShot.id]);
+    const merged = await storyboardAsync.get('SELECT * FROM videos WHERE id = ?', [firstShot.id]);
+    const mergedMedia = await storyboardAsync.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [firstShot.id]);
     return { ...formatShot(merged), media: mergedMedia };
   }
 };
 
 // ========== shot_media（分镜参考画面） ==========
-const video2ShotMedia = {
+const shotMedia = {
   getByShotId: async (shotId) => {
-    return await video2Async.all(
+    return await storyboardAsync.all(
       'SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC, id ASC',
       [shotId]
     );
   },
 
   create: async (item) => {
-    const maxRow = await video2Async.get(
+    const maxRow = await storyboardAsync.get(
       'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',
       [item.shotId]
     );
     const nextSort = (maxRow ? maxRow.maxSort : -1) + 1;
 
-    const r = await video2Async.run(
+    const r = await storyboardAsync.run(
       'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         item.shotId, item.url, item.type || 'image', item.filename || '',
@@ -1660,13 +1660,13 @@ const video2ShotMedia = {
   },
 
   delete: async (id) => {
-    const r = await video2Async.run('DELETE FROM shot_media WHERE id = ?', [id]);
+    const r = await storyboardAsync.run('DELETE FROM shot_media WHERE id = ?', [id]);
     return r.changes > 0;
   },
 
   updateSort: async (shotId, items) => {
     for (const item of items) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE shot_media SET sortOrder = ? WHERE id = ? AND shotId = ?',
         [item.sortOrder, item.id, shotId]
       );
@@ -1675,7 +1675,7 @@ const video2ShotMedia = {
   },
 
   getBySceneId: async (sceneId) => {
-    return await video2Async.all(
+    return await storyboardAsync.all(
       `SELECT sm.* FROM shot_media sm
        INNER JOIN videos v ON sm.shotId = v.id
        WHERE v.sceneId = ? AND v.deleted = 0 AND sm.type = 'image'
@@ -1687,7 +1687,7 @@ const video2ShotMedia = {
   getByLocation: async (projectId, location) => {
     if (!location || !location.trim()) return [];
     const normalized = location.trim().toLowerCase();
-    return await video2Async.all(
+    return await storyboardAsync.all(
       `SELECT sm.* FROM shot_media sm
        INNER JOIN videos v ON sm.shotId = v.id
        WHERE v.projectId = ? AND v.deleted = 0 AND sm.type = 'image'
@@ -1699,9 +1699,9 @@ const video2ShotMedia = {
 };
 
 // ========== settings（系统设置） ==========
-const video2Settings = {
+const settings = {
   getAll: async () => {
-    const rows = await video2Async.all('SELECT * FROM settings');
+    const rows = await storyboardAsync.all('SELECT * FROM settings');
     const result = {};
     rows.forEach(row => {
       try {
@@ -1714,7 +1714,7 @@ const video2Settings = {
   },
 
   get: async (key) => {
-    const row = await video2Async.get('SELECT * FROM settings WHERE key = ?', [key]);
+    const row = await storyboardAsync.get('SELECT * FROM settings WHERE key = ?', [key]);
     if (!row) return null;
     try {
       return JSON.parse(row.value);
@@ -1725,14 +1725,14 @@ const video2Settings = {
 
   set: async (key, value) => {
     const valStr = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    const existing = await video2Async.get('SELECT key FROM settings WHERE key = ?', [key]);
+    const existing = await storyboardAsync.get('SELECT key FROM settings WHERE key = ?', [key]);
     if (existing) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE settings SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?',
         [valStr, key]
       );
     } else {
-      await video2Async.run(
+      await storyboardAsync.run(
         'INSERT INTO settings (key, value) VALUES (?, ?)',
         [key, valStr]
       );
@@ -1742,17 +1742,17 @@ const video2Settings = {
 
   bulkSet: async (settings) => {
     for (const key of Object.keys(settings)) {
-      await video2Settings.set(key, settings[key]);
+      await settings.set(key, settings[key]);
     }
     return true;
   }
 };
 
 // ========== ai_tasks（AI 异步任务） ==========
-const video2AiTasks = {
+const aiTasks = {
   create: async (task) => {
     const id = task.id || crypto.randomUUID();
-    await video2Async.run(
+    await storyboardAsync.run(
       'INSERT INTO ai_tasks (id, type, status, projectId, input, progress) VALUES (?, ?, ?, ?, ?, ?)',
       [
         id, task.type, task.status || 'pending',
@@ -1765,7 +1765,7 @@ const video2AiTasks = {
   },
 
   get: async (id) => {
-    const row = await video2Async.get('SELECT * FROM ai_tasks WHERE id = ?', [id]);
+    const row = await storyboardAsync.get('SELECT * FROM ai_tasks WHERE id = ?', [id]);
     if (!row) return null;
     return {
       ...row,
@@ -1791,15 +1791,15 @@ const video2AiTasks = {
     if (sets.length === 0) return false;
     sets.push('updatedAt = CURRENT_TIMESTAMP');
     vals.push(id);
-    const r = await video2Async.run('UPDATE ai_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    const r = await storyboardAsync.run('UPDATE ai_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
     return r.changes > 0;
   }
 };
 
 // ========== ai_usage_logs（AI 费用统计） ==========
-const video2AiUsage = {
+const aiUsage = {
   record: async (log) => {
-    const r = await video2Async.run(
+    const r = await storyboardAsync.run(
       `INSERT INTO ai_usage_logs 
        (taskId, type, model, provider, promptTokens, completionTokens, totalTokens, imageCount, estimatedCost)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1828,15 +1828,15 @@ const video2AiUsage = {
       dateFilter = '';
     }
 
-    const totalRow = await video2Async.get(
+    const totalRow = await storyboardAsync.get(
       `SELECT COALESCE(SUM(estimatedCost), 0) as totalCost FROM ai_usage_logs ${dateFilter}`
     );
 
-    const typeRows = await video2Async.all(
+    const typeRows = await storyboardAsync.all(
       `SELECT type, COALESCE(SUM(estimatedCost), 0) as cost FROM ai_usage_logs ${dateFilter} GROUP BY type`
     );
 
-    const modelRows = await video2Async.all(
+    const modelRows = await storyboardAsync.all(
       `SELECT model, provider, 
               COALESCE(SUM(promptTokens), 0) as promptTokens,
               COALESCE(SUM(completionTokens), 0) as completionTokens,
@@ -1860,9 +1860,9 @@ const video2AiUsage = {
 };
 
 // ========== transcode_tasks（转码任务持久化） ==========
-const video2TranscodeTasks = {
+const transcodeTasks = {
   create: async (task) => {
-    await video2Async.run(
+    await storyboardAsync.run(
       `INSERT INTO transcode_tasks (id, jobId, requestId, status, progress, videoUrl, outputUrl, outputObject, projectId, options)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -1882,7 +1882,7 @@ const video2TranscodeTasks = {
   },
 
   get: async (id) => {
-    const row = await video2Async.get('SELECT * FROM transcode_tasks WHERE id = ?', [id]);
+    const row = await storyboardAsync.get('SELECT * FROM transcode_tasks WHERE id = ?', [id]);
     if (!row) return null;
     return {
       ...row,
@@ -1891,7 +1891,7 @@ const video2TranscodeTasks = {
   },
 
   getByStatus: async (status) => {
-    const rows = await video2Async.all('SELECT * FROM transcode_tasks WHERE status = ?', [status]);
+    const rows = await storyboardAsync.all('SELECT * FROM transcode_tasks WHERE status = ?', [status]);
     return rows.map(row => ({
       ...row,
       options: row.options ? JSON.parse(row.options) : null
@@ -1899,7 +1899,7 @@ const video2TranscodeTasks = {
   },
 
   getPendingAndProcessing: async () => {
-    const rows = await video2Async.all(
+    const rows = await storyboardAsync.all(
       "SELECT * FROM transcode_tasks WHERE status IN ('pending', 'processing')"
     );
     return rows.map(row => ({
@@ -1921,12 +1921,12 @@ const video2TranscodeTasks = {
     if (sets.length === 0) return false;
     sets.push('updatedAt = CURRENT_TIMESTAMP');
     vals.push(id);
-    const r = await video2Async.run('UPDATE transcode_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    const r = await storyboardAsync.run('UPDATE transcode_tasks SET ' + sets.join(', ') + ' WHERE id = ?', vals);
     return r.changes > 0;
   },
 
   delete: async (id) => {
-    const r = await video2Async.run('DELETE FROM transcode_tasks WHERE id = ?', [id]);
+    const r = await storyboardAsync.run('DELETE FROM transcode_tasks WHERE id = ?', [id]);
     return r.changes > 0;
   }
 };
@@ -1939,7 +1939,7 @@ function recalcShotIndexPromise(projectId) {
 }
 
 // ========== digital_assets（数字资产：演员/道具/场景） ==========
-const video2DigitalAssets = {
+const digitalAssets = {
   getByProjectId: async (projectId, type = null) => {
     let sql = 'SELECT * FROM digital_assets WHERE projectId = ?';
     const params = [projectId];
@@ -1948,11 +1948,11 @@ const video2DigitalAssets = {
       params.push(type);
     }
     sql += ' ORDER BY createdAt DESC, id ASC';
-    const assets = await video2Async.all(sql, params);
+    const assets = await storyboardAsync.all(sql, params);
 
     // 为每个资产加载图片列表
     for (const asset of assets) {
-      const images = await video2Async.all(
+      const images = await storyboardAsync.all(
         'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
         [asset.id]
       );
@@ -1966,9 +1966,9 @@ const video2DigitalAssets = {
   },
 
   getById: async (id) => {
-    const asset = await video2Async.get('SELECT * FROM digital_assets WHERE id = ?', [id]);
+    const asset = await storyboardAsync.get('SELECT * FROM digital_assets WHERE id = ?', [id]);
     if (asset) {
-      const images = await video2Async.all(
+      const images = await storyboardAsync.all(
         'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
         [id]
       );
@@ -1978,7 +1978,7 @@ const video2DigitalAssets = {
   },
 
   create: async ({ projectId, type, name, imagePrompt, imageUrl }) => {
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'INSERT INTO digital_assets (projectId, type, name, imagePrompt, imageUrl) VALUES (?, ?, ?, ?, ?)',
       [projectId, type, name, imagePrompt || '', imageUrl || '']
     );
@@ -1986,7 +1986,7 @@ const video2DigitalAssets = {
 
     // 如果有 imageUrl，也添加到 images 表
     if (imageUrl && imageUrl.trim()) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'INSERT INTO digital_asset_images (assetId, imageUrl, sortOrder) VALUES (?, ?, 0)',
         [result.lastID, imageUrl]
       );
@@ -2003,19 +2003,19 @@ const video2DigitalAssets = {
     if (imageUrl !== undefined) { fields.push('imageUrl=?'); vals.push(imageUrl); }
     if (fields.length === 0) return false;
     vals.push(id);
-    const r = await video2Async.run('UPDATE digital_assets SET ' + fields.join(', ') + ' WHERE id = ?', vals);
+    const r = await storyboardAsync.run('UPDATE digital_assets SET ' + fields.join(', ') + ' WHERE id = ?', vals);
     return r.changes > 0;
   },
 
   delete: async (id) => {
-    const r = await video2Async.run('DELETE FROM digital_assets WHERE id = ?', [id]);
+    const r = await storyboardAsync.run('DELETE FROM digital_assets WHERE id = ?', [id]);
     return r.changes > 0;
   },
 
   // ========== 图片管理 ==========
   addImage: async (assetId, imageUrl) => {
     // 检查是否超过 10 张限制
-    const countRow = await video2Async.get(
+    const countRow = await storyboardAsync.get(
       'SELECT COUNT(*) as cnt FROM digital_asset_images WHERE assetId = ?',
       [assetId]
     );
@@ -2024,24 +2024,24 @@ const video2DigitalAssets = {
     }
 
     // 先获取当前最大 sortOrder
-    const maxRow = await video2Async.get(
+    const maxRow = await storyboardAsync.get(
       'SELECT MAX(sortOrder) as maxSort FROM digital_asset_images WHERE assetId = ?',
       [assetId]
     );
     const sortOrder = (maxRow?.maxSort || 0) + 1;
 
-    const result = await video2Async.run(
+    const result = await storyboardAsync.run(
       'INSERT INTO digital_asset_images (assetId, imageUrl, sortOrder) VALUES (?, ?, ?)',
       [assetId, imageUrl, sortOrder]
     );
 
     // 如果是第一张图，更新主表的 imageUrl
-    const newCountRow = await video2Async.get(
+    const newCountRow = await storyboardAsync.get(
       'SELECT COUNT(*) as cnt FROM digital_asset_images WHERE assetId = ?',
       [assetId]
     );
     if (newCountRow?.cnt === 1) {
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE digital_assets SET imageUrl = ? WHERE id = ?',
         [imageUrl, assetId]
       );
@@ -2051,17 +2051,17 @@ const video2DigitalAssets = {
   },
 
   deleteImage: async (assetId, imageId) => {
-    const r = await video2Async.run(
+    const r = await storyboardAsync.run(
       'DELETE FROM digital_asset_images WHERE id = ? AND assetId = ?',
       [imageId, assetId]
     );
     if (r.changes > 0) {
       // 如果删完后还有图片，更新主表 imageUrl 为第一张
-      const firstImage = await video2Async.get(
+      const firstImage = await storyboardAsync.get(
         'SELECT imageUrl FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC LIMIT 1',
         [assetId]
       );
-      await video2Async.run(
+      await storyboardAsync.run(
         'UPDATE digital_assets SET imageUrl = ? WHERE id = ?',
         [firstImage?.imageUrl || '', assetId]
       );
@@ -2070,7 +2070,7 @@ const video2DigitalAssets = {
   },
 
   getImages: async (assetId) => {
-    return await video2Async.all(
+    return await storyboardAsync.all(
       'SELECT * FROM digital_asset_images WHERE assetId = ? ORDER BY sortOrder ASC, id ASC',
       [assetId]
     );
@@ -2084,16 +2084,16 @@ module.exports = {
   // homeContent,
   // teamMembers,
   // categoriesDetails,
-  // video2 视频片段管理模块（当前使用）
-  video2Items,
-  video2Projects,
-  video2Scenes,
-  video2ShotMedia,
-  video2Settings,
-  video2AiTasks,
-  video2AiUsage,
-  video2TranscodeTasks,
-  video2DigitalAssets,
-  video2Async,
+  // storyboard 视频片段管理模块（当前使用）
+  items,
+  projects,
+  scenes,
+  shotMedia,
+  settings,
+  aiTasks,
+  aiUsage,
+  transcodeTasks,
+  digitalAssets,
+  storyboardAsync,
   db
 };

@@ -73,7 +73,7 @@ export async function getSignedOssUrl(ossUrl: string): Promise<string> {
 
   // 调用服务端签名接口
   const res = await fetch(
-    `${API_BASE_URL}/api/video2/oss-sign-url?url=${encodeURIComponent(ossUrl)}`
+    `${API_BASE_URL}/api/oss-sign-url?url=${encodeURIComponent(ossUrl)}`
   );
   if (!res.ok) {
     console.error('[oss] 获取签名 URL 失败，使用原始 URL:', ossUrl);
@@ -110,7 +110,7 @@ export async function batchGetSignedUrls(urls: string[]): Promise<void> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const params = batch.map(u => `urls=${encodeURIComponent(u)}`).join('&');
-        const res = await fetch(`${API_BASE_URL}/api/video2/oss-sign-urls?${params}`);
+        const res = await fetch(`${API_BASE_URL}/api/oss-sign-urls?${params}`);
         if (!res.ok) {
           console.warn(`[oss] 批量签名请求失败 (batch ${i / BATCH_SIZE + 1}, attempt ${attempt + 1}):`, res.status, res.statusText);
           if (attempt < MAX_RETRIES) {
@@ -174,9 +174,9 @@ export async function getOssUploadCredential(
   projectId: number,
   filename: string,
   type: 'image' | 'video',
-  usage?: 'shot' | 'project-cover' | 'project-reference'
+  usage?: string
 ): Promise<OssUploadCredential> {
-  let url = `${API_BASE_URL}/api/video2/oss-upload-credential?projectId=${projectId}&filename=${encodeURIComponent(filename)}&type=${type}`;
+  let url = `${API_BASE_URL}/api/oss-upload-credential?projectId=${projectId}&filename=${encodeURIComponent(filename)}&type=${type}`;
   if (usage) {
     url += `&usage=${usage}`;
   }
@@ -264,85 +264,6 @@ export type UploadDecision = {
   fileSizeMB: string;
   fileSizeMBNum: number;
 };
-
-// 图片上传（保持不变）
-export async function uploadImage(
-  file: File,
-  onProgress?: (progress: UploadProgress) => void,
-  forceLocal: boolean = false
-): Promise<UploadResult> {
-  if (!validateFileType(file, 'image')) {
-    throw new Error('不支持的图片格式，请上传 JPG、PNG、WebP 或 GIF 格式');
-  }
-  
-  const sizeValidation = validateFileSize(file, 'image');
-  if (!sizeValidation.valid) {
-    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
-    throw new Error(`图片大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
-  }
-
-  const fileSizeKB = (file.size / 1024).toFixed(1);
-  onProgress?.({ phase: 'uploading', progress: 0, message: `正在上传图片 (${fileSizeKB}KB)...` });
-
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const url = new URL(`${API_BASE_URL}/api/upload/image`);
-    if (forceLocal) {
-      url.searchParams.set('forceLocal', 'true');
-    }
-
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', url.toString());
-    xhr.timeout = 300000;
-
-    xhr.upload.addEventListener('progress', (event) => {
-      if (event.loaded && event.total) {
-        const percentage = Math.round((event.loaded / event.total) * 100);
-        onProgress?.({ phase: 'uploading', progress: percentage, message: `图片上传中... ${percentage}%` });
-      }
-    });
-
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const result = JSON.parse(xhr.responseText);
-          let message = '';
-          if (result.compressed) {
-            message = `图片压缩完成\n大小: ${result.originalSizeKB.toFixed(1)}KB -> ${result.compressedSizeKB.toFixed(1)}KB`;
-          } else {
-            message = `图片上传完成\n大小: ${result.originalSizeKB?.toFixed(1) || fileSizeKB}KB（无需压缩）`;
-          }
-          onProgress?.({ phase: 'uploading', progress: 100, message });
-          resolve(result);
-        } catch (error) {
-          reject(new Error('解析响应失败'));
-        }
-      } else {
-        try {
-          const error = JSON.parse(xhr.responseText);
-          const uploadError: UploadError = new Error(error.message || error.error || '上传失败');
-          uploadError.ossError = error.ossError === true;
-          reject(uploadError);
-        } catch {
-          reject(new Error('上传失败'));
-        }
-      }
-    });
-
-    xhr.addEventListener('error', () => {
-      reject(new Error('网络错误'));
-    });
-
-    xhr.addEventListener('timeout', () => {
-      reject(new Error('上传超时'));
-    });
-
-    xhr.send(formData);
-  });
-}
-
 export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
   const fileSizeMBNum = file.size / 1024 / 1024;
   const fileSizeMB = fileSizeMBNum.toFixed(2);
@@ -491,33 +412,40 @@ export async function uploadVideoToServerWithCompression(
   };
 }
 
-// ================ video2 专用上传函数 ================
+// ================ 上传函数 ================
 
-// 图片上传到 imges2 文件夹（通过后端 API 自动压缩）
-export async function uploadVideo2Image(
+// 图片上传到 images 文件夹（通过后端 API 自动压缩）
+export async function uploadImage(
   file: File,
   options?: {
     projectId?: number;
     sceneId?: number;
-    reference?: boolean;
+    usage?: string;
     title?: string;
     createShot?: boolean;
     onProgress?: (p: UploadProgress) => void;
     signal?: AbortSignal;
   }
 ): Promise<UploadResult & { id?: number; filename?: string; ossKey?: string }> {
+  // 前端大小校验（与后端一致：20MB 上限）
+  const sizeValidation = validateFileSize(file, 'image');
+  if (!sizeValidation.valid) {
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    throw new Error(`图片大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
+  }
+
   options?.onProgress?.({ phase: 'uploading', progress: 10, message: '上传图片中...' });
 
   const formData = new FormData();
   formData.append('file', file);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
   if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
-  if (options?.reference) formData.append('reference', '1');
+  if (options?.usage) formData.append('usage', options.usage);
   if (options?.title) formData.append('title', options.title);
   if (options?.createShot) formData.append('createShot', '1');
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/video2/upload/image`, {
+    const response = await fetch(`${API_BASE_URL}/api/upload/image`, {
       method: 'POST',
       body: formData,
       signal: options?.signal
@@ -545,13 +473,13 @@ export async function uploadVideo2Image(
   }
 }
 
-// 视频上传到 video2 文件夹（通过后端 API，支持自动压缩）
-export async function uploadVideo2Video(
+// 视频上传到 videos 文件夹（通过后端 API，支持自动压缩）
+export async function uploadVideo(
   file: File,
   options?: {
     projectId?: number;
     sceneId?: number;
-    reference?: boolean;
+    usage?: string;
     title?: string;
     createShot?: boolean;
     compressionMethod?: 'server' | 'browser' | 'aliyun' | 'none';
@@ -610,7 +538,7 @@ export async function uploadVideo2Video(
     const result = await uploadVideoWithAliyunCompression(file, {
       projectId: options?.projectId,
       sceneId: options?.sceneId,
-      reference: options?.reference,
+      usage: options?.usage,
       title: options?.title,
       createShot: options?.createShot,
       targetBitrate: options?.targetBitrate || await getBitrateAsync(videoInfo.resolution || '480p'),
@@ -642,7 +570,7 @@ export async function uploadVideo2Video(
   formData.append('file', targetFile);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
   if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
-  if (options?.reference) formData.append('reference', '1');
+  if (options?.usage) formData.append('usage', options.usage);
   if (options?.title) formData.append('title', options.title);
   if (options?.createShot) formData.append('createShot', '1');
 
@@ -653,7 +581,7 @@ export async function uploadVideo2Video(
     options?.onProgress?.({ phase: 'uploading', progress: 70, message: '上传视频中...' });
 
     const taskResp = await fetch(
-      `${API_BASE_URL}/api/video2/upload/video${useServerCompress ? '?compress=true' : ''}`,
+      `${API_BASE_URL}/api/upload/video${useServerCompress ? '?compress=true' : ''}`,
       { method: 'POST', body: formData, signal: options?.signal }
     );
     if (!taskResp.ok) throw new Error(`上传失败: HTTP ${taskResp.status}`);
@@ -666,7 +594,7 @@ export async function uploadVideo2Video(
     while (attempts < maxAttempts) {
       if (options?.signal?.aborted) throw new Error('上传已取消');
       await new Promise(r => setTimeout(r, 1000));
-      const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`, {
+      const statusResp = await fetch(`${API_BASE_URL}/api/upload/status/${uploadTaskId}`, {
         signal: options?.signal
       });
       if (!statusResp.ok) throw new Error('状态查询失败');
@@ -707,12 +635,12 @@ export async function uploadVideo2Video(
     // 失败或取消时通知后端取消异步上传任务，避免遗留孤儿 OSS 文件 + DB 记录
     if (uploadTaskId) {
       try {
-        await fetch(`${API_BASE_URL}/api/video2/upload/cancel/${uploadTaskId}`, {
+        await fetch(`${API_BASE_URL}/api/upload/cancel/${uploadTaskId}`, {
           method: 'POST'
         });
-        console.log('[video2] 已取消后端上传任务:', uploadTaskId);
+        console.log('[app] 已取消后端上传任务:', uploadTaskId);
       } catch (cancelErr) {
-        console.error('[video2] 取消后端上传任务失败:', cancelErr);
+        console.error('[app] 取消后端上传任务失败:', cancelErr);
       }
     }
     options?.onProgress?.({ phase: 'idle', progress: 0, message: String(err) });
@@ -726,7 +654,7 @@ export async function uploadVideoWithAliyunCompression(
   options?: {
     projectId?: number;
     sceneId?: number;
-    reference?: boolean;
+    usage?: string;
     title?: string;
     createShot?: boolean;
     targetBitrate?: number;
@@ -745,7 +673,7 @@ export async function uploadVideoWithAliyunCompression(
   formData.append('file', file);
   if (options?.projectId) formData.append('projectId', String(options.projectId));
   if (options?.sceneId) formData.append('sceneId', String(options.sceneId));
-  if (options?.reference) formData.append('reference', '1');
+  if (options?.usage) formData.append('usage', options.usage);
   if (options?.title) formData.append('title', options.title);
   if (options?.createShot) formData.append('createShot', '1');
 
@@ -755,7 +683,7 @@ export async function uploadVideoWithAliyunCompression(
   let uploadTaskId = '';
 
   try {
-    const uploadResp = await fetch(`${API_BASE_URL}/api/video2/upload/video`, {
+    const uploadResp = await fetch(`${API_BASE_URL}/api/upload/video`, {
       method: 'POST',
       body: formData,
       signal: options?.signal
@@ -776,7 +704,7 @@ export async function uploadVideoWithAliyunCompression(
     while (uploadAttempts < maxUploadAttempts) {
       if (options?.signal?.aborted) throw new Error('上传已取消');
       await new Promise(r => setTimeout(r, 1000));
-      const statusResp = await fetch(`${API_BASE_URL}/api/video2/upload/status/${uploadTaskId}`, {
+      const statusResp = await fetch(`${API_BASE_URL}/api/upload/status/${uploadTaskId}`, {
         signal: options?.signal
       });
       if (!statusResp.ok) throw new Error('上传状态查询失败');
@@ -805,8 +733,8 @@ export async function uploadVideoWithAliyunCompression(
 
     options?.onProgress?.({ phase: 'compressing', progress: 20, message: '提交阿里云转码任务...' });
 
-    // 2. 调用后端 /api/video2/aliyun/transcode 提交转码任务
-    const transcodeResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode`, {
+    // 2. 调用后端 /api/aliyun/transcode 提交转码任务
+    const transcodeResp = await fetch(`${API_BASE_URL}/api/aliyun/transcode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -819,7 +747,7 @@ export async function uploadVideoWithAliyunCompression(
         height: videoInfo.height,
         projectId: options?.projectId,
         sceneId: options?.sceneId,
-        reference: options?.reference ? 1 : 0,
+        usage: options?.usage,
         title: options?.title,
         createShot: options?.createShot ? 1 : 0
       }),
@@ -845,13 +773,13 @@ export async function uploadVideoWithAliyunCompression(
       };
     }
 
-    // 3. 轮询 /api/video2/aliyun/transcode/:taskId 查询状态
+    // 3. 轮询 /api/aliyun/transcode/:taskId 查询状态
     let attempts = 0;
     const maxAttempts = 300; // 最大等待 10 分钟 (300 * 2秒)
 
     while (attempts < maxAttempts) {
       if (options?.signal?.aborted) throw new Error('转码已取消');
-      const statusResp = await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode/${taskId}`, {
+      const statusResp = await fetch(`${API_BASE_URL}/api/aliyun/transcode/${taskId}`, {
         signal: options?.signal
       });
       if (!statusResp.ok) {
@@ -897,7 +825,7 @@ export async function uploadVideoWithAliyunCompression(
     // 1. 如果初始上传已完成（videoUrl 已设置），清理转码相关 DB 记录和 OSS 文件
     if (videoUrl) {
       try {
-        await fetch(`${API_BASE_URL}/api/video2/aliyun/transcode-cleanup`, {
+        await fetch(`${API_BASE_URL}/api/aliyun/transcode-cleanup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ videoUrl })
@@ -911,7 +839,7 @@ export async function uploadVideoWithAliyunCompression(
     //    避免后端异步任务完成后遗留孤儿 OSS 文件 + DB 记录
     if (uploadTaskId && !videoUrl) {
       try {
-        await fetch(`${API_BASE_URL}/api/video2/upload/cancel/${uploadTaskId}`, {
+        await fetch(`${API_BASE_URL}/api/upload/cancel/${uploadTaskId}`, {
           method: 'POST'
         });
         console.log('[aliyun] 已取消后端上传任务:', uploadTaskId);

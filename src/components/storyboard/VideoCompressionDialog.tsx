@@ -34,8 +34,11 @@ export function VideoCompressionDialog({
   const isMultiple = compressionFiles.length > 1;
 
   return (
-    <div className="fixed inset-0 z-[70] p-5 sm:p-4 bg-black/60 backdrop-blur-sm">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg max-h-[85vh] bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[70] p-8 sm:p-4 bg-black/60 backdrop-blur-sm">
+      <div
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg max-h-[85vh] bg-[#1a1530] border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 shrink-0">
           <h3 className="text-base font-semibold text-white">视频码率过高</h3>
           <button

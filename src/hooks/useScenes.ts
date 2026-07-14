@@ -44,7 +44,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
 
   const loadScenes = useCallback(async (): Promise<Scene[]> => {
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/scenes`);
+      const res = await fetch(`/api/projects/${projectId}/scenes`);
       const data = await res.json();
       if (data.success) {
         const list: Scene[] = data.data || [];
@@ -62,7 +62,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      const res = await fetch(`/api/video2/projects/${projectId}/scenes`, {
+      const res = await fetch(`/api/projects/${projectId}/scenes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: trimmed })
@@ -81,7 +81,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      const res = await fetch(`/api/video2/scenes/${id}`, {
+      const res = await fetch(`/api/scenes/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: trimmed })
@@ -102,7 +102,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
 
   const deleteScene = useCallback(async (id: number) => {
     try {
-      const res = await fetch(`/api/video2/scenes/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/scenes/${id}`, { method: 'DELETE' });
       const data = await res.json();
       // P3-9：检查响应，失败时提示用户且不调用 loadScenes 误导
       if (res.ok && data.success !== false) {
@@ -131,7 +131,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     setScenes(next.map((s, idx) => ({ ...s, sortOrder: idx })));
 
     try {
-      await fetch('/api/video2/scenes/sort', {
+      await fetch('/api/scenes/sort', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orders })
@@ -175,7 +175,7 @@ export function useScenes({ projectId, showToast }: UseScenesOptions): UseScenes
     setScenes(next.map((s, i) => ({ ...s, sortOrder: i })));
 
     try {
-      await fetch('/api/video2/scenes/sort', {
+      await fetch('/api/scenes/sort', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orders })

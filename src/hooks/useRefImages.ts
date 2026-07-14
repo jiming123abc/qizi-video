@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import type { RefImage, AiGeneratedImage } from '../lib/types';
-import { uploadVideo2Image } from '../lib/ossUtils';
+import { uploadImage } from '../lib/ossUtils';
 
 export const MAX_REF_IMAGES = 4;
 export const MAX_HISTORY = 20;
@@ -27,7 +27,7 @@ export function useRefImages(options: {
   const loadHistory = useCallback(async () => {
     if (!enabled || !ownerId) return;
     try {
-      const res = await fetch(`/api/video2/ai/generated-images?ownerType=${ownerType}&ownerId=${ownerId}`);
+      const res = await fetch(`/api/ai/generated-images?ownerType=${ownerType}&ownerId=${ownerId}`);
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -96,9 +96,9 @@ export function useRefImages(options: {
     if (refImages.length >= MAX_REF_IMAGES) {
       throw new Error(`参考图已达上限（${MAX_REF_IMAGES} 张）`);
     }
-    const uploadResult = await uploadVideo2Image(file, {
+    const uploadResult = await uploadImage(file, {
       projectId,
-      reference: true,
+      usage: 'shot-reference',
       title: `ai-ref-${Date.now()}`,
     });
     const newRef: RefImage = {
@@ -128,7 +128,7 @@ export function useRefImages(options: {
   // 用户明确删除单张历史图（调用 DELETE API + 刷新 state）
   const deleteHistory = useCallback(async (id: number) => {
     try {
-      const res = await fetch(`/api/video2/ai/generated-images/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/ai/generated-images/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setHistoryImages(prev => prev.filter(img => img.id !== id));
       }

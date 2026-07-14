@@ -134,7 +134,7 @@ export default function AIImageGenerateDialog({
   // 加载设置
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/video2/settings')
+      fetch('/api/settings')
         .then(res => res.json())
         .then(data => {
           if (data.success && data.data) {
@@ -199,7 +199,7 @@ export default function AIImageGenerateDialog({
   // 加载项目数字资产（用于参考图选择和 @引用）
   useEffect(() => {
     if (isOpen && effectiveProjectId) {
-      fetch(`/api/video2/projects/${effectiveProjectId}/assets`)
+      fetch(`/api/projects/${effectiveProjectId}/assets`)
         .then(res => res.json())
         .then(data => {
           if (data.success && Array.isArray(data.data)) {
@@ -287,7 +287,7 @@ export default function AIImageGenerateDialog({
       const refUrls = getAllRefUrls();
 
       // 根据模式选择 API 端点
-      const apiEndpoint = isShotMode ? '/api/video2/ai/generate-image' : '/api/video2/ai/generic-image-gen';
+      const apiEndpoint = isShotMode ? '/api/ai/generate-image' : '/api/ai/generic-image-gen';
       const requestBody: Record<string, unknown> = {
         prompt: prompt.trim(),
         refImages: refUrls,
@@ -298,6 +298,10 @@ export default function AIImageGenerateDialog({
         ownerType: effectiveOwnerType,
         ownerId: effectiveOwnerId || undefined,
       };
+      // 非分镜模式传 projectId（用于 AI 通用生图存到正确的 digital-assets 目录）
+      if (!isShotMode && effectiveProjectId) {
+        requestBody.projectId = effectiveProjectId;
+      }
       // 分镜模式需传 shotId
       if (isShotMode && shot) {
         requestBody.shotId = shot.id;
@@ -321,7 +325,7 @@ export default function AIImageGenerateDialog({
       const MAX_CONSECUTIVE_FAILURES = 5;
       pollingRef.current = setInterval(async () => {
         try {
-          const statusResponse = await fetch(`/api/video2/ai/task/${taskId}`);
+          const statusResponse = await fetch(`/api/ai/task/${taskId}`);
           if (!statusResponse.ok) {
             throw new Error(`HTTP ${statusResponse.status}`);
           }
@@ -395,7 +399,7 @@ export default function AIImageGenerateDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={onClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md sm:max-w-xl rounded-2xl sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl max-h-[90vh] overflow-hidden"
         onClick={e => e.stopPropagation()}

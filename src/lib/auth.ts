@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'video2_admin_token';
+const TOKEN_KEY = 'admin_token';
 
 export function getAdminToken(): string {
   return localStorage.getItem(TOKEN_KEY) || '';
@@ -15,7 +15,7 @@ export function clearAdminToken() {
 export async function checkAuth(): Promise<{ enabled: boolean; authenticated: boolean }> {
   try {
     const token = getAdminToken();
-    const res = await fetch('/api/video2/auth/check', {
+    const res = await fetch('/api/auth/check', {
       headers: token ? { 'x-admin-token': token } : {}
     });
     if (res.ok) {
@@ -29,7 +29,7 @@ export async function checkAuth(): Promise<{ enabled: boolean; authenticated: bo
 
 export async function loginWithToken(token: string): Promise<boolean> {
   try {
-    const res = await fetch('/api/video2/auth/login', {
+    const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token })
@@ -53,7 +53,7 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
   const token = getAdminToken();
   if (token) {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.includes('/api/video2/')) {
+    if (url.includes('/api/')) {
       init = init || {};
       init.headers = new Headers(init.headers);
       (init.headers as Headers).set('x-admin-token', token);

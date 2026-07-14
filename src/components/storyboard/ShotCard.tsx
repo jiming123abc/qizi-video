@@ -21,7 +21,9 @@ import {
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import AnalyzeShotDialog from '../ai/AnalyzeShotDialog';
-import { getVideoPoster, uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
+import { VideoCompressionDialog } from './VideoCompressionDialog';
+import { getVideoPoster, uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
+import type { UploadDecision } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 
@@ -95,7 +97,7 @@ function InlineSelectField({ label, value, options, onSave, placeholder = '请�
       <select
         value={value}
         onChange={(e) => onSave(e.target.value)}
-        className="flex-1 min-w-0 px-1 py-0.5 text-xs leading-tight bg-white/10 border border-white/10 rounded outline-none focus:border-violet-400 h-5 text-white/90 cursor-pointer"
+        className="flex-1 min-w-0 px-1 py-0.5 text-xs leading-tight bg-white/10 border border-white/10 rounded outline-none focus:border-violet-400 min-h-5 text-white/90 cursor-pointer"
       >
         <option value="" className="bg-slate-900 text-white/50">{placeholder}</option>
         {options.map((option) => (
@@ -221,7 +223,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
 
   if (isEditing) {
     return (
-      <div className={`${hideLabel ? '' : 'gap-1.5'} flex items-center h-5 overflow-hidden`}>
+      <div className={`${hideLabel ? '' : 'gap-1.5'} flex items-center min-h-5`}>
         {!hideLabel && <span className="text-xs text-slate-400 shrink-0">{label}：</span>}
         {multiline ? (
           <div className="flex-1 min-w-0 relative flex items-center">
@@ -233,7 +235,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
               onKeyDown={handleKeyDown}
               autoFocus
               rows={1}
-              className="flex-1 w-full min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 resize-none overflow-hidden h-5"
+              className="flex-1 w-full min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 resize-none min-h-5"
             />
           </div>
         ) : (
@@ -247,7 +249,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
               onKeyDown={handleKeyDown}
               list={shouldShowAutocomplete && datalistId ? datalistId : undefined}
               autoFocus
-              className="flex-1 min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 h-5 w-full"
+              className="flex-1 min-w-0 px-1 text-xs leading-tight bg-white/10 border border-violet-400/50 rounded outline-none focus:border-violet-400 min-h-5 w-full"
             />
             {shouldShowAutocomplete && datalistId && (
               <datalist id={datalistId}>
@@ -343,6 +345,18 @@ export function ShotCard({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState('');
   const [showAnalyzeDialog, setShowAnalyzeDialog] = useState(false);
+
+  // 视频压缩方式选择对话框
+  const [pendingVideo, setPendingVideo] = useState<File | null>(null);
+  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
+  const [aliyunConfigured, setAliyunConfigured] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/aliyun/status')
+      .then(res => res.json())
+      .then(data => setAliyunConfigured(data.configured || false))
+      .catch(() => {});
+  }, []);
   
   const media = shot.media || [];
   const currentMedia = media[currentIndex];
@@ -407,71 +421,37 @@ export function ShotCard({
     }
   }, [currentMedia]);
 
-  // 处理文件上传（直接上传并添加到分镜）
-  const handleFileUpload = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0 || !projectId) return;
-
-    const MAX_MEDIA_COUNT = 10;
-    const remaining = MAX_MEDIA_COUNT - media.length;
-    if (remaining <= 0) {
-      // P3-4：alert 改为 toast
-      onShowToast?.(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
-      return;
-    }
-
-    const file = files[0];
-    const detected = detectFileType(file);
-    if (!detected.supported) {
-      // P3-4：alert 改为 toast
-      onShowToast?.('不支持的文件格式', 'error');
-      return;
-    }
+  // 执行视频上传并保存到分镜
+  const doUploadVideo = useCallback(async (file: File, compressionMethod: 'server' | 'browser' | 'aliyun' | 'none') => {
+    if (!projectId) return;
 
     setIsUploading(true);
     setUploadProgress(5);
     setUploadMessage('准备上传...');
 
     try {
-      const fileType = detected.type as 'image' | 'video';
-      let result: { url: string; id?: number; filename?: string; ossKey?: string };
-
-      if (fileType === 'image') {
-        result = await uploadVideo2Image(file, {
-          projectId,
-          reference: true,
-          onProgress: p => {
-            setUploadProgress(p.progress);
-            setUploadMessage(p.message || '上传中...');
-          }
-        });
-      } else {
-        // 视频先检查码率
-        setUploadMessage('检测视频信息...');
-        const decision = await checkVideoBitrate(file);
-        
-        // 直接上传，使用 server 压缩方式
-        result = await uploadVideo2Video(file, {
-          projectId,
-          reference: true,
-          compressionMethod: 'server',
-          skipBitrateCheck: true,
-          onProgress: p => {
-            setUploadProgress(p.progress);
-            setUploadMessage(p.message || '上传中...');
-          }
-        });
-      }
+      setUploadMessage('上传视频中...');
+      const result = await uploadVideo(file, {
+        projectId,
+        usage: 'shot-reference',
+        compressionMethod,
+        skipBitrateCheck: true,
+        onProgress: p => {
+          setUploadProgress(p.progress);
+          setUploadMessage(p.message || '上传中...');
+        }
+      });
 
       setUploadProgress(100);
       setUploadMessage('保存到分镜...');
 
       // 保存到分镜
-      const res = await fetch(`/api/video2/shots/${shot.id}/media`, {
+      const res = await fetch(`/api/shots/${shot.id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: result.url,
-          type: fileType,
+          type: 'video',
           filename: file.name,
           source: 'upload',
           ossKey: result.ossKey
@@ -480,12 +460,11 @@ export function ShotCard({
 
       const data = await res.json();
       if (data.success || data.id) {
-        // 创建新的媒体对象并更新分镜
         const newMedia: ShotMedia = {
           id: data.data?.id || data.id || Date.now(),
           shotId: shot.id,
           url: result.url,
-          type: fileType,
+          type: 'video',
           filename: file.name,
           size: 0,
           sortOrder: media.length,
@@ -493,8 +472,7 @@ export function ShotCard({
           ossKey: result.ossKey,
           createdAt: new Date().toISOString()
         };
-        
-        // 通过 onUpdate 更新分镜的 media 字段
+
         onUpdate?.(shot.id, { media: [...media, newMedia] });
         setUploadMessage('完成');
       } else {
@@ -503,7 +481,6 @@ export function ShotCard({
     } catch (err) {
       console.error('上传失败:', err);
       setUploadMessage('上传失败');
-      // P3-4：alert 改为 toast
       onShowToast?.(`上传失败: ${(err as Error).message}`, 'error');
     } finally {
       setTimeout(() => {
@@ -513,6 +490,128 @@ export function ShotCard({
       }, 500);
     }
   }, [shot.id, projectId, media, onUpdate, onShowToast]);
+
+  // 处理压缩方式选择
+  const handleCompressionSelect = useCallback(async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
+    const video = pendingVideo;
+    setPendingVideo(null);
+    setPendingCompressionDecision(null);
+
+    if (method === 'cancel' || !video) return;
+
+    await doUploadVideo(video, method);
+  }, [pendingVideo, doUploadVideo]);
+
+  // 处理文件上传（直接上传并添加到分镜）
+  const handleFileUpload = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0 || !projectId) return;
+
+    const MAX_MEDIA_COUNT = 10;
+    const remaining = MAX_MEDIA_COUNT - media.length;
+    if (remaining <= 0) {
+      onShowToast?.(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
+      return;
+    }
+
+    const file = files[0];
+    const detected = detectFileType(file);
+    if (!detected.supported) {
+      onShowToast?.('不支持的文件格式', 'error');
+      return;
+    }
+
+    const fileType = detected.type as 'image' | 'video';
+
+    if (fileType === 'image') {
+      // 图片直接上传
+      setIsUploading(true);
+      setUploadProgress(5);
+      setUploadMessage('准备上传...');
+
+      try {
+        const result = await uploadImage(file, {
+          projectId,
+          usage: 'shot-reference',
+          onProgress: p => {
+            setUploadProgress(p.progress);
+            setUploadMessage(p.message || '上传中...');
+          }
+        });
+
+        setUploadProgress(100);
+        setUploadMessage('保存到分镜...');
+
+        const res = await fetch(`/api/shots/${shot.id}/media`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: result.url,
+            type: 'image',
+            filename: file.name,
+            source: 'upload',
+            ossKey: result.ossKey
+          })
+        });
+
+        const data = await res.json();
+        if (data.success || data.id) {
+          const newMedia: ShotMedia = {
+            id: data.data?.id || data.id || Date.now(),
+            shotId: shot.id,
+            url: result.url,
+            type: 'image',
+            filename: file.name,
+            size: 0,
+            sortOrder: media.length,
+            source: 'upload',
+            ossKey: result.ossKey,
+            createdAt: new Date().toISOString()
+          };
+
+          onUpdate?.(shot.id, { media: [...media, newMedia] });
+          setUploadMessage('完成');
+        } else {
+          throw new Error(data.message || '保存失败');
+        }
+      } catch (err) {
+        console.error('上传失败:', err);
+        setUploadMessage('上传失败');
+        onShowToast?.(`上传失败: ${(err as Error).message}`, 'error');
+      } finally {
+        setTimeout(() => {
+          setIsUploading(false);
+          setUploadProgress(0);
+          setUploadMessage('');
+        }, 500);
+      }
+    } else {
+      // 视频：先检测码率，再决定是否弹出压缩方式选择对话框
+      setIsUploading(true);
+      setUploadProgress(2);
+      setUploadMessage('正在检测视频信息...');
+
+      try {
+        const decision = await checkVideoBitrate(file);
+        if (decision.decision === 'must_compress') {
+          // 需要压缩：弹出对话框让用户选择压缩方式
+          setIsUploading(false);
+          setUploadProgress(0);
+          setUploadMessage('');
+          setPendingVideo(file);
+          setPendingCompressionDecision(decision);
+        } else {
+          // 无需压缩：直接上传
+          await doUploadVideo(file, 'none');
+        }
+      } catch (err) {
+        console.error('视频检测失败:', err);
+        setIsUploading(false);
+        setUploadProgress(0);
+        setUploadMessage('');
+        onShowToast?.(`视频检测失败: ${(err as Error).message}`, 'error');
+      }
+    }
+  }, [shot.id, projectId, media, onUpdate, onShowToast, doUploadVideo]);
 
   const handlePlayVideo = useCallback(() => {
     if (!shouldLoadVideo) {
@@ -611,9 +710,7 @@ export function ShotCard({
           ? 'ring-2 ring-violet-400 ring-offset-2 ring-offset-slate-900 border-violet-400/60'
           : isSelected
             ? 'border-violet-400/60 ring-2 ring-violet-400/30 bg-white/[0.05]'
-            : shot.status === 'done'
-              ? 'border-green-500/30 bg-green-900/10 hover:border-green-400/50 border-l-2 border-l-green-400/60'
-              : 'border-white/10 bg-white/[0.03] hover:border-violet-400/30'
+            : 'border-white/10 bg-white/[0.03] hover:border-violet-400/30'
       }`}
     >
       {/* 顶部媒体区域 */}
@@ -1224,6 +1321,15 @@ export function ShotCard({
       currentMedia={currentMedia!}
       onApply={(shotId, updates) => onUpdate?.(shotId, updates)}
       onOpenSettings={onOpenSettings}
+    />
+
+    <VideoCompressionDialog
+      isOpen={!!pendingVideo && !!pendingCompressionDecision}
+      onClose={() => { setPendingVideo(null); setPendingCompressionDecision(null); }}
+      file={pendingVideo}
+      decision={pendingCompressionDecision}
+      aliyunConfigured={aliyunConfigured}
+      onSelect={handleCompressionSelect}
     />
     </>
   );

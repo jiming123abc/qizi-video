@@ -16,7 +16,7 @@ export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', 
 
   return (
     <div
-      className="fixed inset-0 z-[60] p-5 sm:p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] p-8 sm:p-4 bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div

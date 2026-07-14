@@ -50,7 +50,7 @@ async function fetchBitrateConfig(): Promise<Record<string, number>> {
   configFetchPromise = (async () => {
     try {
       const API_BASE_URL = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_URL || '');
-      const res = await fetch(`${API_BASE_URL}/api/video2/settings`);
+      const res = await fetch(`${API_BASE_URL}/api/settings`);
       if (!res.ok) {
         console.warn('[videoCompressor] 获取码率配置失败，使用默认配置');
         return DEFAULT_BITRATE_CONFIG;

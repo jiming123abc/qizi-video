@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  uploadVideo2Image,
-  uploadVideo2Video,
+  uploadImage,
+  uploadVideo,
   detectFileType,
   checkVideoBitrate,
 } from '../lib/ossUtils';
@@ -59,7 +59,7 @@ export function useUpload(options: UseUploadOptions) {
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
   useEffect(() => {
-    fetch('/api/video2/aliyun/status')
+    fetch('/api/aliyun/status')
       .then(res => res.json())
       .then(data => setAliyunConfigured(data.configured || false))
       .catch(() => {});
@@ -96,18 +96,20 @@ export function useUpload(options: UseUploadOptions) {
       setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, status: 'uploading', progress: 5 } : uf));
 
       if (detected.type === 'image') {
-        await uploadVideo2Image(file, {
+        await uploadImage(file, {
           projectId,
           sceneId: currentSceneId !== null ? currentSceneId : undefined,
+          usage: 'shot-reference',
           title: file.name,
           createShot: true,
           signal: uploadAbortControllerRef.current?.signal
         });
         setUploadingFiles(prev => prev.map((uf, idx) => idx === index ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf));
       } else {
-        await uploadVideo2Video(file, {
+        await uploadVideo(file, {
           projectId,
           sceneId: currentSceneId !== null ? currentSceneId : undefined,
+          usage: 'shot-reference',
           title: file.name,
           createShot: true,
           compressionMethod,

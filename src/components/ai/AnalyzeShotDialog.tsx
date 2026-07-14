@@ -82,7 +82,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
-      fetch('/api/video2/settings')
+      fetch('/api/settings')
         .then(res => res.json())
         .then(data => {
           if (data.success && data.data) {
@@ -126,7 +126,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
     setAnalysisResult(null);
 
     try {
-      const response = await fetch('/api/video2/ai/analyze-shot', {
+      const response = await fetch('/api/ai/analyze-shot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -148,7 +148,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
 
       pollIntervalRef.current = setInterval(async () => {
         try {
-          const statusResponse = await fetch(`/api/video2/ai/task/${newTaskId}`);
+          const statusResponse = await fetch(`/api/ai/task/${newTaskId}`);
           if (!statusResponse.ok) {
             throw new Error(`HTTP ${statusResponse.status}`);
           }
@@ -236,7 +236,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl sm:rounded-3xl border border-white/10 shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-white/10 shrink-0">
           <h2 className="text-base sm:text-lg font-semibold text-white">AI 分析画面</h2>

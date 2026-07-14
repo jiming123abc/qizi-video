@@ -153,7 +153,7 @@ export default function AIScriptDialog({
   // 加载设置中的模型列表
   useEffect(() => {
     if (isOpen && !settingsLoaded) {
-      fetch('/api/video2/settings')
+      fetch('/api/settings')
         .then(res => res.json())
         .then(data => {
           if (data.success && data.data) {
@@ -176,7 +176,7 @@ export default function AIScriptDialog({
   const pollTaskStatus = useCallback((tid: string) => {
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/video2/ai/task/${tid}`);
+        const res = await fetch(`/api/ai/task/${tid}`);
         const data = await res.json();
 
         if (data.status === 'processing' || data.status === 'pending') {
@@ -331,7 +331,7 @@ export default function AIScriptDialog({
         setState('intent_generating');
       }
 
-      const res = await fetch('/api/video2/ai/parse-script', {
+      const res = await fetch('/api/ai/parse-script', {
         method: 'POST',
         body: formData
       });
@@ -447,7 +447,7 @@ export default function AIScriptDialog({
 
     // 提交到后端创建分镜
     try {
-      const res = await fetch('/api/video2/ai/create-shots', {
+      const res = await fetch('/api/ai/create-shots', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -487,7 +487,7 @@ export default function AIScriptDialog({
 
     // 提交到后端创建分镜
     try {
-      const res = await fetch('/api/video2/ai/create-shots', {
+      const res = await fetch('/api/ai/create-shots', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -565,7 +565,7 @@ export default function AIScriptDialog({
       formData.append('model', modelId);
       formData.append('text', scriptContentToSubmit);
 
-      const res = await fetch('/api/video2/ai/parse-script', {
+      const res = await fetch('/api/ai/parse-script', {
         method: 'POST',
         body: formData
       });
@@ -585,13 +585,13 @@ export default function AIScriptDialog({
     }
   };
 
-  // P5-1：下载脚本 - 调用后端 /api/video2/ai/download-script
+  // P5-1：下载脚本 - 调用后端 /api/ai/download-script
   const handleDownloadScript = async () => {
     const content = editingScriptText || scriptText;
     if (!content) return;
 
     try {
-      const res = await fetch('/api/video2/ai/download-script', {
+      const res = await fetch('/api/ai/download-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -626,7 +626,7 @@ export default function AIScriptDialog({
   const estimatedFee = estimateCost(shotCount);
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-slate-900 rounded-2xl sm:rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[85vh] overflow-hidden flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-4 sm:mb-6 shrink-0">

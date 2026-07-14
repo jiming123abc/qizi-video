@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Upload, GripVertical, Sparkles, Image as ImageIcon, FileVideo } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
-import { uploadVideo2Image, uploadVideo2Video, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
+import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
@@ -66,7 +66,7 @@ export default function MediaManagerDialog({
   const fetchMediaList = async () => {
     if (!shot?.id) return;
     try {
-      const res = await fetch(`/api/video2/shots/${shot.id}/media`);
+      const res = await fetch(`/api/shots/${shot.id}/media`);
       const data = await res.json();
       if (data && data.success && Array.isArray(data.data)) {
         const sorted = [...data.data].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -112,6 +112,7 @@ export default function MediaManagerDialog({
   const [pendingVideo, setPendingVideo] = useState<File | null>(null);
   const [pendingDecision, setPendingDecision] = useState<UploadDecision | null>(null);
   const [pendingIsSceneRef, setPendingIsSceneRef] = useState(false);
+  const [pendingFileId, setPendingFileId] = useState<string | null>(null);
   const pendingUploadRef = useRef<{ file: File; isSceneRef: boolean } | null>(null);
 
   // 阿里云配置状态
@@ -129,7 +130,7 @@ export default function MediaManagerDialog({
   useEscapeKey(handleClose, isOpen);
 
   useEffect(() => {
-    fetch('/api/video2/aliyun/status')
+    fetch('/api/aliyun/status')
       .then(res => res.json())
       .then(data => setAliyunConfigured(data.configured || false))
       .catch(() => {});
@@ -144,7 +145,7 @@ export default function MediaManagerDialog({
   const saveMediaOrder = async (list: ShotMedia[]) => {
     const orders = list.map((m, idx) => ({ id: m.id, sortOrder: idx }));
     try {
-      await fetch(`/api/video2/shots/${shot.id}/media/sort`, {
+      await fetch(`/api/shots/${shot.id}/media/sort`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: orders })
@@ -159,7 +160,7 @@ export default function MediaManagerDialog({
 
   const deleteMedia = async (mediaId: number) => {
     try {
-      await fetch(`/api/video2/shots/${shot.id}/media/${mediaId}`, {
+      await fetch(`/api/shots/${shot.id}/media/${mediaId}`, {
         method: 'DELETE'
       });
       const newList = mediaList.filter(m => m.id !== mediaId);
@@ -252,12 +253,13 @@ export default function MediaManagerDialog({
         const decision = await checkVideoBitrate(file);
         if (decision.decision === 'must_compress') {
           setUploadingFiles(prev => prev.map(uf =>
-            uf.id === fileId ? { ...uf, status: 'error', progress: 0, message: '需选择压缩方式' } : uf
+            uf.id === fileId ? { ...uf, status: 'pending', progress: 0, message: '等待压缩方式选择' } : uf
           ));
           pendingUploadRef.current = { file, isSceneRef };
           setPendingVideo(file);
           setPendingDecision(decision);
           setPendingIsSceneRef(isSceneRef);
+          setPendingFileId(fileId);
           continue;
         }
       }
@@ -280,9 +282,9 @@ export default function MediaManagerDialog({
 
       let result: { url: string; id?: number; filename?: string; ossKey?: string };
       if (fileType === 'image') {
-        result = await uploadVideo2Image(file, {
+        result = await uploadImage(file, {
           projectId: shot.projectId,
-          reference: !isSceneRef,
+          usage: 'shot-reference',
           onProgress: p => {
             setUploadingFiles(prev => prev.map(uf =>
               uf.id === fileId ? { ...uf, progress: p.progress, message: p.message } : uf
@@ -290,9 +292,9 @@ export default function MediaManagerDialog({
           }
         });
       } else {
-        result = await uploadVideo2Video(file, {
+        result = await uploadVideo(file, {
           projectId: shot.projectId,
-          reference: !isSceneRef,
+          usage: 'shot-reference',
           compressionMethod,
           skipBitrateCheck: true,
           onProgress: p => {
@@ -322,29 +324,34 @@ export default function MediaManagerDialog({
     if (!pendingVideo || !pendingDecision) {
       setPendingVideo(null);
       setPendingDecision(null);
+      setPendingFileId(null);
       return;
     }
 
     if (method === 'cancel') {
       setPendingVideo(null);
       setPendingDecision(null);
+      // 取消时移除等待中的进度条
+      if (pendingFileId) {
+        setUploadingFiles(prev => prev.filter(uf => uf.id !== pendingFileId));
+      }
+      setPendingFileId(null);
       return;
     }
 
     const file = pendingVideo;
     const isSceneRef = pendingIsSceneRef;
-    const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+    // 复用 handleFileSelect 创建的进度条 ID
+    const fileId = pendingFileId || `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
 
     setPendingVideo(null);
     setPendingDecision(null);
+    setPendingFileId(null);
 
-    setUploadingFiles(prev => [...prev, {
-      id: fileId,
-      name: file.name,
-      progress: 10,
-      status: 'uploading',
-      message: '准备上传...'
-    }]);
+    // 更新已有进度条状态，不创建新进度条
+    setUploadingFiles(prev => prev.map(uf =>
+      uf.id === fileId ? { ...uf, status: 'uploading', progress: 10, message: '准备上传...' } : uf
+    ));
 
     await doUploadFile(file, 'video', fileId, isSceneRef, method);
   };
@@ -353,7 +360,7 @@ export default function MediaManagerDialog({
     try {
       console.log('[MediaManager] 保存媒体到分镜:', { url, type, filename, source, ossKey, shotId: shot.id });
       
-      const res = await fetch(`/api/video2/shots/${shot.id}/media`, {
+      const res = await fetch(`/api/shots/${shot.id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, type, filename, source, ossKey })
@@ -398,7 +405,7 @@ export default function MediaManagerDialog({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-5 sm:p-4 transition-opacity duration-200 ${pendingVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={handleClose}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4" onClick={handleClose}>
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}

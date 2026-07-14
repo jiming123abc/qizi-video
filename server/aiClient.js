@@ -7,7 +7,7 @@
  * - SiliconFlow: https://api.siliconflow.cn/v1
  */
 
-const { video2Settings, video2AiUsage } = require('./database');
+const { settings, aiUsage } = require('./database');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 
@@ -123,7 +123,7 @@ async function recordUsage(log, settings) {
     const prices = settings.model_prices || MODEL_PRICES;
     const estimatedCost = calculateCost(log.type, log.model, log, prices);
     
-    await video2AiUsage.record({
+    await aiUsage.record({
       taskId: log.taskId || null,
       type: log.type,
       model: log.model,
