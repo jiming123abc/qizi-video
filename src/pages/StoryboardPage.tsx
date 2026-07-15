@@ -939,12 +939,15 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
     const handleUpdate = (id: number, fields: Partial<Shot>) => {
       setShots(prev => prev.map(s => s.id === id ? { ...s, ...fields } : s));
-      // API 更新
-      fetch(`/api/shots/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields)
-      }).catch(console.error);
+
+      const { media, ...otherFields } = fields;
+      if (Object.keys(otherFields).length > 0) {
+        fetch(`/api/shots/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(otherFields)
+        }).catch(console.error);
+      }
 
       // 如果编辑了补全相关字段，防抖刷新建议列表
       const autocompleteFields = ['location', 'actors', 'costume', 'props', 'shotType', 'focalLength', 'shotAngle', 'lighting', 'cameraMovement'];

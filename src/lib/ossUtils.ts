@@ -994,6 +994,7 @@ export async function uploadVideoWithAliyunCompression(
         sceneId: options.sceneId,
         createShot: options.createShot ? 1 : 0,
         title: options.title,
+        isAwaitingTranscode: true,
       }),
       signal: options?.signal,
     });

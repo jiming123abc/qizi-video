@@ -30,19 +30,46 @@ interface UploadingItem {
 
 function ImageWrapper({ url, alt }: { url: string; alt: string }) {
   const [hasError, setHasError] = useState(false);
+  const { url: signedUrl, ready } = useSignedUrl(url);
+  
+  if (!ready) {
+    return <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />;
+  }
   
   if (hasError) {
     return <ImageIcon className="w-8 h-8 text-white/30" />;
   }
   return (
     <img
-      src={url}
+      src={signedUrl}
       alt={alt}
       className="w-full h-full object-cover absolute inset-0"
       onError={(e) => {
-        console.error('[MediaManager] 图片加载失败:', { url, alt });
+        console.error('[MediaManager] 图片加载失败:', { url: signedUrl, alt });
         setHasError(true);
       }}
+    />
+  );
+}
+
+function VideoWrapper({ url }: { url: string }) {
+  const [hasError, setHasError] = useState(false);
+  const { url: signedUrl, ready } = useSignedUrl(url);
+  
+  if (!ready) {
+    return <FileVideo className="w-6 h-6 text-white/30 animate-pulse" />;
+  }
+  
+  if (hasError) {
+    return <FileVideo className="w-6 h-6 text-white/30" />;
+  }
+  return (
+    <video
+      src={signedUrl}
+      className="w-full h-full object-cover"
+      muted
+      preload="metadata"
+      onError={() => setHasError(true)}
     />
   );
 }
@@ -455,19 +482,9 @@ export default function MediaManagerDialog({
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
                         {media.type === 'image' ? (
-                          <ImageWrapper url={signedUrls[media.url] || media.url} alt={media.filename} />
+                          <ImageWrapper url={media.url} alt={media.filename} />
                         ) : (
-                          <>
-                            <video
-                              src={signedUrls[media.url] || media.url}
-                              className="w-full h-full object-cover"
-                              muted
-                              preload="metadata"
-                            />
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-                              <FileVideo className="w-6 h-6 text-white/70" />
-                            </div>
-                          </>
+                          <VideoWrapper url={media.url} />
                         )}
 
                         {/* Delete button */}

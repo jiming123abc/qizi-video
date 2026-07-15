@@ -3079,6 +3079,24 @@ app.post('/api/aliyun/transcode-cleanup', async (req, res) => {
 
     console.log(`[MPS] 转码失败清理开始: ${videoUrl}`);
 
+    // 0. 检查并清除项目封面（如果封面是该视频）
+    try {
+      const videoBaseUrl = videoUrl.split('?')[0];
+      const projectRows = await db.storyboardAsync.all(
+        'SELECT id, coverUrl FROM projects WHERE coverUrl IS NOT NULL AND coverUrl != ?',
+        [DEFAULT_PROJECT_COVER_PREFIX]
+      );
+      for (const proj of projectRows) {
+        const coverBaseUrl = proj.coverUrl.split('?')[0];
+        if (coverBaseUrl === videoBaseUrl) {
+          await db.projects.update(proj.id, { coverUrl: '' });
+          console.log(`[MPS] 转码失败清理：清除项目 ${proj.id} 封面`);
+        }
+      }
+    } catch (e) {
+      console.warn('[MPS] 转码失败清理：检查/清除封面失败:', e.message);
+    }
+
     // 1. 收集 shot_media 中的 shotId（用于后续清理孤立 shots）
     const mediaRows = await db.storyboardAsync.all(
       'SELECT shotId FROM shot_media WHERE url = ?',
@@ -3302,6 +3320,18 @@ app.get('/api/aliyun/transcode/:taskId', async (req, res) => {
               } catch (e) {
                 console.warn('[MPS] 清理 MPS 输出文件失败:', e.message);
               }
+            }
+
+            // 转码成功后尝试设置项目封面（如果之前因等待转码而跳过了设置）
+            const taskProjectId = task.options && task.options.projectId;
+            const taskUsage = task.options && task.options.usage;
+            const taskReference = taskUsage === 'project-reference' ? 1 : 0;
+            if (taskProjectId && !taskReference && taskUsage !== 'project-cover') {
+              trySetProjectCoverIfDefault(
+                parseInt(taskProjectId),
+                updates.outputUrl,
+                'video'
+              ).catch(() => {});
             }
           } catch (e) {
             console.error('[MPS] 更新媒体记录或删除原文件失败:', e.message);
@@ -3786,6 +3816,22 @@ async function hardDeleteShot(req, res) {
     const mediaList = await db.shotMedia.getByShotId(id);
     const mediaUrls = (mediaList || []).map(m => m.url).filter(Boolean);
     const urlsToClean = [item.url, ...mediaUrls].filter(Boolean);
+
+    // 检查项目封面是否来源于该分镜的媒体，如果是则清除封面
+    try {
+      const project = await db.projects.getById(item.projectId);
+      if (project && project.coverUrl && !project.coverUrl.startsWith(DEFAULT_PROJECT_COVER_PREFIX)) {
+        const coverBaseUrl = project.coverUrl.split('?')[0];
+        const isCoverFromShot = urlsToClean.some(url => url.split('?')[0] === coverBaseUrl);
+        if (isCoverFromShot) {
+          await db.projects.update(item.projectId, { coverUrl: '' });
+          console.log(`[app] 删除分镜 ${id}，清除项目 ${item.projectId} 封面（来源被删除）`);
+        }
+      }
+    } catch (coverErr) {
+      console.warn('[app] 检查/清除项目封面失败:', coverErr.message);
+    }
+
     // 执行硬删：删分镜自身 videos(reference=0)
     await db.items.hardDelete(id);
     // 手动删 shot_media 记录（SQLite 外键 CASCADE 未启用）
@@ -4632,7 +4678,7 @@ app.get('/api/projects/:projectId/field-suggestions', async (req, res) => {
 // 复用 /api/upload/image 的 DB 记录创建逻辑，但不处理文件上传和压缩
 app.post('/api/media/register', async (req, res) => {
   try {
-    const { url, filename, size, type, usage, projectId, sceneId, createShot, title } = req.body || {};
+    const { url, filename, size, type, usage, projectId, sceneId, createShot, title, isAwaitingTranscode } = req.body || {};
     if (!url) return res.status(400).json({ success: false, message: '缺少 url 参数' });
     if (!projectId) return res.status(400).json({ success: false, message: '缺少 projectId 参数' });
 
@@ -4690,8 +4736,9 @@ app.post('/api/media/register', async (req, res) => {
       throw dbError;
     }
 
-    // 非参考素材且非封面：尝试设置项目默认封面
-    if (projectId && !reference && usage !== 'project-cover') {
+    // 非参考素材且非封面且不等待转码：尝试设置项目默认封面
+    // 等待转码的媒体在转码成功后再设置封面，避免转码失败后封面指向已删除的文件
+    if (projectId && !reference && usage !== 'project-cover' && !isAwaitingTranscode) {
       trySetProjectCoverIfDefault(parseInt(projectId), url, type || 'image').catch(() => {});
     }
 

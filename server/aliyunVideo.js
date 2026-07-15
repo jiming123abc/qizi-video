@@ -4,8 +4,8 @@ const VIDEORECOG_ENDPOINT = 'https://videorecog.cn-shanghai.aliyuncs.com/';
 const VIDEORECOG_VERSION = '2020-03-20';
 const VIDEORECOG_REGION = 'cn-shanghai';
 
-const MPS_ENDPOINT = 'https://mts.cn-beijing.aliyuncs.com/';
-const MPS_REGION = 'cn-beijing';
+const MPS_ENDPOINT = 'https://mts.cn-shanghai.aliyuncs.com/';
+const MPS_REGION = 'cn-shanghai';
 const MPS_VERSION = '2014-06-18';
 
 function getAliyunCredentials() {
@@ -399,7 +399,22 @@ async function submitTranscodeTask(videoUrl, options = {}) {
   };
 
   try {
+    console.log('[MPS] 提交转码任务参数:', JSON.stringify({
+      inputLocation: ossConfig.location,
+      inputBucket: ossConfig.bucket,
+      inputObject,
+      outputBucket: ossConfig.bucket,
+      outputLocation: ossConfig.location,
+      outputObject,
+      pipelineId: transcodingConfig.PipelineId,
+      targetBitrate,
+      mpsEndpoint: MPS_ENDPOINT,
+      mpsRegion: MPS_REGION
+    }));
+
     const result = await callAliyunApi('SubmitJobs', params, MPS_ENDPOINT);
+
+    console.log('[MPS] 提交转码任务响应:', JSON.stringify(result));
 
     if (result.JobResultList && result.JobResultList.JobResult) {
       const jobResult = result.JobResultList.JobResult[0];
@@ -417,6 +432,7 @@ async function submitTranscodeTask(videoUrl, options = {}) {
     throw new Error('转码任务提交返回格式异常');
   } catch (error) {
     console.error('[MPS] 提交转码任务失败:', error.message);
+    console.error('[MPS] 失败详情:', error.stack || error);
     throw error;
   }
 }
