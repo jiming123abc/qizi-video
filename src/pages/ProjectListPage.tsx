@@ -117,8 +117,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [cardPlayingProjectId, setCardPlayingProjectId] = useState<number | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
   const cardVideoRef = useRef<HTMLVideoElement>(null);
-  const signedFullscreenUrl = useSignedUrl(fullscreenItem?.url);
-  const signedFullscreenPoster = useSignedUrl(fullscreenItem?.url ? getVideoPoster(fullscreenItem.url) : undefined);
+  const { url: signedFullscreenUrl } = useSignedUrl(fullscreenItem?.url);
+  const { url: signedFullscreenPoster } = useSignedUrl(fullscreenItem?.url ? getVideoPoster(fullscreenItem.url) : undefined);
 
   // 全屏弹窗打开时自动播放视频（通过 MediaFullscreen 组件的 autoPlay 处理）
   // fullscreenVideoRef 用于 MediaFullscreen 的 videoRefCallback
@@ -142,13 +142,20 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     }
     if (urls.length === 0) return;
     const { batchGetSignedUrls, getSignedUrlFromCache } = await import('../lib/ossUtils');
+    // 仅缓存命中（已签名）时写入，避免把未签名 URL 当作 src 触发 ORB 错误
     const immediate: Record<string, string> = {};
-    urls.forEach(u => { immediate[u] = getSignedUrlFromCache(u); });
+    urls.forEach(u => {
+      const cached = getSignedUrlFromCache(u);
+      if (cached && cached !== u) immediate[u] = cached;
+    });
     setSignedMediaUrls(prev => ({ ...prev, ...immediate }));
     batchGetSignedUrls(urls).then(() => {
       setSignedMediaUrls(prev => {
         const updated = { ...prev };
-        urls.forEach(u => { updated[u] = getSignedUrlFromCache(u); });
+        urls.forEach(u => {
+          const cached = getSignedUrlFromCache(u);
+          if (cached && cached !== u) updated[u] = cached;
+        });
         return updated;
       });
     });
@@ -538,6 +545,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       });
       if (result.url) {
         await setProjectCover(project.id, result.url);
+        loadProjects();
         if (result.compressionFailed) {
           showToast(`图片压缩失败，已使用原图（${result.compressionError}）`, 'info');
         } else if (result.compressed && result.originalSizeKB && result.compressedSizeKB) {
@@ -857,7 +865,15 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                   {(() => {
                     const isCardPlaying = cardPlayingProjectId === project.id;
                     if (current && current.type === 'video' && isCardPlaying) {
-                      const videoSrc = signedMediaUrls[current.url] || current.url;
+                      const videoSrc = signedMediaUrls[current.url];
+                      // 视频源未签名就绪时显示占位，避免请求未签名 URL 触发 ORB
+                      if (!videoSrc || videoSrc === current.url) {
+                        return (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <ImageIcon className="w-8 h-8 text-slate-500 animate-pulse" />
+                          </div>
+                        );
+                      }
                       return (
                         <video
                           ref={cardPlayingProjectId === project.id ? cardVideoRef : undefined}
@@ -876,22 +892,29 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                         />
                       );
                     }
-                    let mediaSrc = DEFAULT_COVER;
-                    let fallbackSrc = '';
+                    // 计算签名后的媒体 URL；未签名时返回空串以触发占位
+                    let mediaSrc = '';
                     if (current && current.url) {
                       if (current.type === 'video') {
                         const posterUrl = getVideoPoster(current.url);
-                        if (posterUrl) {
-                          mediaSrc = signedMediaUrls[posterUrl] || posterUrl;
-                          fallbackSrc = posterUrl;
-                        } else {
-                          mediaSrc = signedMediaUrls[current.url] || current.url;
-                          fallbackSrc = current.url;
+                        const candidate = posterUrl ? signedMediaUrls[posterUrl] : signedMediaUrls[current.url];
+                        if (candidate && candidate !== (posterUrl || current.url)) {
+                          mediaSrc = candidate;
                         }
                       } else {
-                        mediaSrc = signedMediaUrls[current.url] || current.url;
-                        fallbackSrc = current.url;
+                        const candidate = signedMediaUrls[current.url];
+                        if (candidate && candidate !== current.url) {
+                          mediaSrc = candidate;
+                        }
                       }
+                    }
+                    // 未签名就绪：显示占位（不回退到未签名 URL，避免 ORB）
+                    if (!mediaSrc) {
+                      return (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <ImageIcon className="w-8 h-8 text-slate-500 animate-pulse" />
+                        </div>
+                      );
                     }
                     return (
                       <img
@@ -900,9 +923,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                         className="w-full h-full object-cover"
                         onError={(ev) => {
                           const img = ev.target as HTMLImageElement;
-                          if (fallbackSrc && img.src !== fallbackSrc && img.src !== DEFAULT_COVER) {
-                            img.src = fallbackSrc;
-                          } else if (img.src !== DEFAULT_COVER) {
+                          if (img.src !== DEFAULT_COVER) {
                             img.src = DEFAULT_COVER;
                           }
                         }}
@@ -1230,17 +1251,26 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
               <div className="flex gap-4 items-start">
                 {/* 封面预览 */}
                 <div className="w-32 h-20 rounded-xl overflow-hidden border border-white/10 bg-black/30 flex-shrink-0">
-                  {!isDefaultCover(uploadDialogProject.coverUrl) ? (
-                    <img 
-                      src={signedMediaUrls[uploadDialogProject.coverUrl] || uploadDialogProject.coverUrl} 
-                      alt="封面" 
-                      className="w-full h-full object-cover" 
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-slate-500">
-                      <ImageIcon className="w-8 h-8" />
-                    </div>
-                  )}
+                  {(() => {
+                    const coverUrl = uploadDialogProject.coverUrl;
+                    const signedCover = signedMediaUrls[coverUrl];
+                    // 仅当签名 URL 就绪（与原 URL 不同）时渲染 img，否则显示占位
+                    // 避免回退到未签名 URL 触发 ORB 错误
+                    if (!isDefaultCover(coverUrl) && signedCover && signedCover !== coverUrl) {
+                      return (
+                        <img
+                          src={signedCover}
+                          alt="封面"
+                          className="w-full h-full object-cover"
+                        />
+                      );
+                    }
+                    return (
+                      <div className="w-full h-full flex items-center justify-center text-slate-500">
+                        <ImageIcon className={`w-8 h-8 ${!isDefaultCover(coverUrl) ? 'animate-pulse' : ''}`} />
+                      </div>
+                    );
+                  })()}
                 </div>
                 
                 {/* 操作按钮 */}
@@ -1307,9 +1337,19 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 <div className="mt-4">
                   <h4 className="text-xs font-medium mb-2 text-slate-400">已上传视频（{referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').length}）</h4>
                   <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
-                    {referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').map(item => (
+                    {referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').map(item => {
+                      const posterUrl = getVideoPoster(item.url);
+                      const signedPoster = posterUrl ? signedMediaUrls[posterUrl] : undefined;
+                      const isPosterReady = signedPoster && signedPoster !== posterUrl;
+                      return (
                       <div key={item.id} className="relative aspect-video rounded-lg overflow-hidden border border-white/10 bg-black/30 group">
-                        <img src={signedMediaUrls[getVideoPoster(item.url)] || getVideoPoster(item.url) || item.url} alt={item.title} className="w-full h-full object-cover" />
+                        {isPosterReady ? (
+                          <img src={signedPoster} alt={item.title} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <ImageIcon className="w-5 h-5 text-slate-500 animate-pulse" />
+                          </div>
+                        )}
                         <div className="absolute inset-0 flex items-center justify-center">
                           <Play className="w-5 h-5 text-white drop-shadow-lg" />
                         </div>
@@ -1321,7 +1361,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                           <X className="w-3 h-3 text-white" />
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

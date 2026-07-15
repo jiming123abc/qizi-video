@@ -365,8 +365,8 @@ export function ShotCard({
   const isThisVideoPlaying = playingVideoKey === videoKey;
 
   // 签名 URL
-  const signedMediaUrl = useSignedUrl(currentMedia?.url);
-  const signedPosterUrl = useSignedUrl(currentMedia?.url ? getVideoPoster(currentMedia.url) : undefined);
+  const { url: signedMediaUrl, ready: mediaReady } = useSignedUrl(currentMedia?.url);
+  const { url: signedPosterUrl, ready: posterReady } = useSignedUrl(currentMedia?.url ? getVideoPoster(currentMedia.url) : undefined);
 
   // 当签名 URL 就绪或媒体切换时，重置图片错误状态
   useEffect(() => {
@@ -745,23 +745,29 @@ export function ShotCard({
                           </svg>
                         </div>
                       ) : isVisible ? (
-                        <img
-                          key={`poster-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
-                          src={signedPosterUrl || signedMediaUrl}
-                          alt={currentMedia.filename}
-                          className="w-full h-full object-cover"
-                          loading="lazy"
-                          onError={() => {
-                            console.error('[ShotCard] 封面加载失败:', { url: currentMedia.url, shotId: shot.id });
-                            setImgError(true);
-                            if (posterRetryCount < 3) {
-                              setTimeout(() => {
-                                setImgError(false);
-                                setPosterRetryCount(c => c + 1);
-                              }, 1000 * (posterRetryCount + 1));
-                            }
-                          }}
-                        />
+                        posterReady ? (
+                          <img
+                            key={`poster-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
+                            src={signedPosterUrl || signedMediaUrl}
+                            alt={currentMedia.filename}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                            onError={() => {
+                              console.error('[ShotCard] 封面加载失败:', { url: currentMedia.url, shotId: shot.id });
+                              setImgError(true);
+                              if (posterRetryCount < 3) {
+                                setTimeout(() => {
+                                  setImgError(false);
+                                  setPosterRetryCount(c => c + 1);
+                                }, 1000 * (posterRetryCount + 1));
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                            <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+                          </div>
+                        )
                       ) : (
                         <div className="absolute inset-0 bg-black/40" />
                       )}
@@ -769,7 +775,7 @@ export function ShotCard({
                   )}
 
                   {/* 视频元素（仅在可见且点击播放后创建） */}
-                  {shouldLoadVideo && isVisible && (
+                  {shouldLoadVideo && isVisible && mediaReady && (
                     <video
                       ref={videoRef}
                       src={signedMediaUrl}
@@ -830,7 +836,7 @@ export function ShotCard({
                       <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
                     </svg>
                   </div>
-                ) : (
+                ) : mediaReady ? (
                   <img
                     key={`img-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
                     src={signedMediaUrl}
@@ -848,6 +854,10 @@ export function ShotCard({
                       }
                     }}
                   />
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                    <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+                  </div>
                 )
               )}
 

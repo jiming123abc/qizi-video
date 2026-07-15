@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Image as ImageIcon } from 'lucide-react';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import type { ShotMedia } from '../../lib/types';
@@ -42,8 +42,8 @@ export function MediaFullscreen({
   const actualMediaUrl = currentMedia?.url || mediaUrl;
   const actualFilename = currentMedia?.filename || filename;
 
-  const signedUrl = useSignedUrl(actualMediaUrl);
-  const signedPoster = useSignedUrl(actualMediaType === 'video' && actualMediaUrl ? getPosterUrl(actualMediaUrl) : undefined);
+  const { url: signedUrl, ready: urlReady } = useSignedUrl(actualMediaUrl);
+  const { url: signedPoster, ready: posterReady } = useSignedUrl(actualMediaType === 'video' && actualMediaUrl ? getPosterUrl(actualMediaUrl) : undefined);
 
   useEscapeKey(onClose, isOpen);
 
@@ -108,23 +108,35 @@ export function MediaFullscreen({
 
       <div className="max-w-6xl w-full max-h-full" onClick={e => e.stopPropagation()}>
         {actualMediaType === 'image' ? (
-          <img
-            src={signedUrl}
-            alt={actualFilename || actualMediaUrl}
-            className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl"
-          />
+          urlReady ? (
+            <img
+              src={signedUrl}
+              alt={actualFilename || actualMediaUrl}
+              className="mx-auto max-w-full max-h-[80vh] object-contain rounded-2xl"
+            />
+          ) : (
+            <div className="mx-auto max-w-full max-h-[80vh] flex items-center justify-center bg-black/40 rounded-2xl">
+              <ImageIcon className="w-12 h-12 text-white/30 animate-pulse" />
+            </div>
+          )
         ) : (
-          <video
-            ref={videoRef}
-            src={signedUrl}
-            poster={signedPoster}
-            controls
-            autoPlay
-            loop
-            playsInline
-            muted={false}
-            className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"
-          />
+          urlReady ? (
+            <video
+              ref={videoRef}
+              src={signedUrl}
+              poster={posterReady ? signedPoster : undefined}
+              controls
+              autoPlay
+              loop
+              playsInline
+              muted={false}
+              className="mx-auto max-w-full max-h-[80vh] rounded-2xl bg-black"
+            />
+          ) : (
+            <div className="mx-auto max-w-full max-h-[80vh] flex items-center justify-center bg-black/40 rounded-2xl">
+              <ImageIcon className="w-12 h-12 text-white/30 animate-pulse" />
+            </div>
+          )
         )}
         <p className="text-center text-sm text-slate-300 mt-4">
           {actualFilename || actualMediaUrl}

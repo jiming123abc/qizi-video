@@ -205,7 +205,7 @@ export async function uploadDirectToOss(
     formData.append('key', credential.key);
     formData.append('OSSAccessKeyId', credential.accessKeyId);
     formData.append('policy', credential.policy);
-    formData.append('signature', credential.signature);
+    formData.append('Signature', credential.signature); // 阿里云要求大写 S
     formData.append('file', file);
 
     xhr.upload.addEventListener('progress', (e) => {
@@ -219,14 +219,18 @@ export async function uploadDirectToOss(
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress?.({ phase: 'done', progress: 100, message: '上传完成' });
         // 返回 OSS 文件 URL
-        const fileUrl = `https://${credential.bucket}.oss-${credential.region}.aliyuncs.com/${credential.key}`;
+        const fileUrl = `https://${credential.bucket}.${credential.region}.aliyuncs.com/${credential.key}`;
         resolve(fileUrl);
       } else {
-        reject(new Error(`OSS 上传失败: HTTP ${xhr.status}`));
+        console.error('[uploadDirectToOss] HTTP 错误:', xhr.status, xhr.statusText, xhr.responseText);
+        reject(new Error(`OSS 上传失败: HTTP ${xhr.status} ${xhr.statusText}`));
       }
     });
 
-    xhr.addEventListener('error', () => reject(new Error('网络错误')));
+    xhr.addEventListener('error', (e) => {
+      console.error('[uploadDirectToOss] 网络错误:', e, 'host:', credential.host);
+      reject(new Error('网络错误'));
+    });
     xhr.addEventListener('timeout', () => reject(new Error('上传超时')));
 
     // AbortSignal 支持

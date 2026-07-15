@@ -622,12 +622,19 @@ function initStoryboardDatabase() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         assetId INTEGER NOT NULL,
         imageUrl TEXT NOT NULL,
+        size INTEGER DEFAULT 0,
         sortOrder INTEGER DEFAULT 0,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (assetId) REFERENCES digital_assets(id) ON DELETE CASCADE
       )
     `);
     storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_digital_asset_images_asset ON digital_asset_images(assetId)');
+    // 旧表迁移：补 size 列（数字资产大小统计）
+    storyboardDb.run('ALTER TABLE digital_asset_images ADD COLUMN size INTEGER DEFAULT 0', function(err) {
+      if (err && String(err.message).indexOf('duplicate column name') === -1) {
+        console.error('[app] ALTER TABLE digital_asset_images.size 失败:', err.message);
+      }
+    });
 
     // 迁移旧数据：将 digital_assets.imageUrl 迁移到 digital_asset_images
     storyboardDb.get("SELECT name FROM sqlite_master WHERE type='table' AND name='digital_asset_images'", [], function(err, row) {
@@ -898,9 +905,9 @@ const projects = {
     shotMediaStatsRows.forEach(r => shotMediaMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
 
     // 4. 数字资产图（digital_asset_images JOIN digital_assets）
-    //    注意：digital_asset_images 表只存 imageUrl，无 size 列，totalSize 用 0 占位（COUNT 仍准确）
+    //    P3-26：digital_asset_images 现在存 size 字段，totalSize 用真实值
     const assetImgStatsRows = await storyboardAsync.all(
-      `SELECT da.projectId, COUNT(*) as cnt, 0 as totalSize
+      `SELECT da.projectId, COUNT(*) as cnt, COALESCE(SUM(dai.size),0) as totalSize
        FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
        GROUP BY da.projectId`
     );
@@ -2013,7 +2020,7 @@ const digitalAssets = {
   },
 
   // ========== 图片管理 ==========
-  addImage: async (assetId, imageUrl) => {
+  addImage: async (assetId, imageUrl, size = 0) => {
     // 检查是否超过 10 张限制
     const countRow = await storyboardAsync.get(
       'SELECT COUNT(*) as cnt FROM digital_asset_images WHERE assetId = ?',
@@ -2031,8 +2038,8 @@ const digitalAssets = {
     const sortOrder = (maxRow?.maxSort || 0) + 1;
 
     const result = await storyboardAsync.run(
-      'INSERT INTO digital_asset_images (assetId, imageUrl, sortOrder) VALUES (?, ?, ?)',
-      [assetId, imageUrl, sortOrder]
+      'INSERT INTO digital_asset_images (assetId, imageUrl, size, sortOrder) VALUES (?, ?, ?, ?)',
+      [assetId, imageUrl, size || 0, sortOrder]
     );
 
     // 如果是第一张图，更新主表的 imageUrl
@@ -2047,7 +2054,7 @@ const digitalAssets = {
       );
     }
 
-    return { id: result.lastID, assetId, imageUrl, sortOrder, createdAt: new Date().toISOString() };
+    return { id: result.lastID, assetId, imageUrl, size: size || 0, sortOrder, createdAt: new Date().toISOString() };
   },
 
   deleteImage: async (assetId, imageId) => {

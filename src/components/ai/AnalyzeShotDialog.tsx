@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Loader2, Play, Check, ChevronDown, AlertCircle, Settings as SettingsIcon } from 'lucide-react';
+import { X, Loader2, Play, Check, ChevronDown, AlertCircle, Settings as SettingsIcon, Image as ImageIcon } from 'lucide-react';
 import type { Shot, ShotMedia, Settings, ModelConfig } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
@@ -42,8 +42,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const signedUrl = useSignedUrl(currentMedia?.url);
-  const displayUrl = signedUrl || currentMedia?.url;
+  const { url: signedUrl, ready } = useSignedUrl(currentMedia?.url);
 
   useEscapeKey(onClose, isOpen);
 
@@ -250,30 +249,36 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
           <div>
             <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-2">素材预览</label>
             <div className="relative aspect-video rounded-xl overflow-hidden bg-white/5 border border-white/10">
-              {currentMedia.type === 'video' ? (
-                <>
-                  <video
-                    ref={videoRef}
-                    src={displayUrl}
-                    className="w-full h-full object-cover"
-                    poster={shot.coverUrl || displayUrl}
-                    playsInline
-                    muted
-                  />
-                  <button
-                    onClick={() => videoRef.current?.play()}
-                    className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
-                  >
-                    <Play className="w-10 sm:w-12 h-10 sm:h-12 text-white/90" />
-                  </button>
-                  {currentMedia.duration && (
-                    <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/60 text-xs text-white">
-                      {Math.floor(currentMedia.duration / 60)}:{(currentMedia.duration % 60).toString().padStart(2, '0')}
-                    </div>
-                  )}
-                </>
+              {ready ? (
+                currentMedia.type === 'video' ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      src={signedUrl}
+                      className="w-full h-full object-cover"
+                      poster={shot.coverUrl || signedUrl}
+                      playsInline
+                      muted
+                    />
+                    <button
+                      onClick={() => videoRef.current?.play()}
+                      className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
+                    >
+                      <Play className="w-10 sm:w-12 h-10 sm:h-12 text-white/90" />
+                    </button>
+                    {currentMedia.duration && (
+                      <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/60 text-xs text-white">
+                        {Math.floor(currentMedia.duration / 60)}:{(currentMedia.duration % 60).toString().padStart(2, '0')}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <img src={signedUrl} alt="素材预览" className="w-full h-full object-cover" />
+                )
               ) : (
-                <img src={displayUrl} alt="素材预览" className="w-full h-full object-cover" />
+                <div className="w-full h-full flex items-center justify-center bg-black/40">
+                  <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+                </div>
               )}
             </div>
             <div className="text-xs text-slate-500 mt-1 truncate">{currentMedia.filename}</div>

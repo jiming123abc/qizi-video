@@ -236,8 +236,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const [fullscreenItem, setFullscreenItem] = useState<ShotMedia | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
-  const signedFullscreenUrl = useSignedUrl(fullscreenItem?.url);
-  const signedFullscreenPoster = useSignedUrl(fullscreenItem?.url ? getPosterUrl(fullscreenItem.url) : undefined);
+  const { url: signedFullscreenUrl } = useSignedUrl(fullscreenItem?.url);
+  const { url: signedFullscreenPoster } = useSignedUrl(fullscreenItem?.url ? getPosterUrl(fullscreenItem.url) : undefined);
 
   // ============ 新对话框状态 ============
   const [showAddShotDialog, setShowAddShotDialog] = useState(false);
@@ -1822,12 +1822,12 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           ownerType="shot"
           projectId={projectId}
           sceneShots={shots.filter(s => s.sceneId === selectedShotForAIGen.sceneId)}
-          onUseImage={async (imageUrl) => {
+          onUseImage={async (imageUrl, fileSize) => {
             const shotId = selectedShotForAIGen.id;
             await fetch(`/api/shots/${shotId}/media`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url: imageUrl, type: 'image', source: 'ai_generated' })
+              body: JSON.stringify({ url: imageUrl, type: 'image', source: 'ai_generated', size: fileSize || 0 })
             });
             await loadShots();
             setMediaRefreshTrigger(prev => prev + 1);

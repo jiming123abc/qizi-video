@@ -237,7 +237,11 @@ export default function DigitalAssetDialog({
       if (result.url) {
         setUploadProgress(100);
         setUploadMessage('保存中...');
-        await addAssetImage(assetId, result.url);
+        // 优先用压缩后大小（KB -> bytes），缺失则用文件原始大小
+        const fileSize = result.compressedSizeKB
+          ? Math.round(result.compressedSizeKB * 1024)
+          : (file?.size || 0);
+        await addAssetImage(assetId, result.url, fileSize);
       } else {
         showToast('上传失败', 'error');
       }
@@ -254,12 +258,12 @@ export default function DigitalAssetDialog({
   };
 
   // 添加图片到资产
-  const addAssetImage = async (assetId: number, imageUrl: string) => {
+  const addAssetImage = async (assetId: number, imageUrl: string, size: number = 0) => {
     try {
       const res = await fetch(`/api/projects/${projectId}/assets/${assetId}/images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl }),
+        body: JSON.stringify({ imageUrl, size }),
       });
       if (res.ok) {
         fetchAssets();
@@ -300,10 +304,10 @@ export default function DigitalAssetDialog({
     setAiImageDialogOpen(true);
   };
 
-  const handleUseAiImage = async (imageUrl: string) => {
+  const handleUseAiImage = async (imageUrl: string, fileSize?: number) => {
     if (aiImageTargetAsset) {
       // 添加到图片列表
-      await addAssetImage(aiImageTargetAsset.id, imageUrl);
+      await addAssetImage(aiImageTargetAsset.id, imageUrl, fileSize || 0);
       // 如果勾选了更新提示词
       if (updatePromptAfterGen && aiImagePrompt.trim()) {
         await handleUpdateAsset(aiImageTargetAsset.id, { imagePrompt: aiImagePrompt.trim() });
@@ -688,7 +692,7 @@ function AssetCard({
   }, [images.length, currentIndex]);
 
   const currentImage = images[currentIndex];
-  const signedUrl = useSignedUrl(currentImage?.imageUrl);
+  const { url: signedUrl, ready } = useSignedUrl(currentImage?.imageUrl);
 
   const handlePrev = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -706,12 +710,18 @@ function AssetCard({
       <div className="relative aspect-video bg-black/40">
         {hasImages ? (
           <>
-            <img
-              src={signedUrl || currentImage.imageUrl}
-              alt={asset.name}
-              className="w-full h-full object-cover"
-              onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
-            />
+            {ready ? (
+              <img
+                src={signedUrl}
+                alt={asset.name}
+                className="w-full h-full object-cover"
+                onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+              />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+              </div>
+            )}
 
             {/* 左右箭头 */}
             {images.length > 1 && (
@@ -839,14 +849,20 @@ function AssetCard({
 
 // 数字资产图片列表项组件（使用签名 URL）
 function AssetImage({ url }: { url: string }) {
-  const signedUrl = useSignedUrl(url);
+  const { url: signedUrl, ready } = useSignedUrl(url);
   return (
-    <img
-      src={signedUrl || url}
-      alt=""
-      className="w-full h-full object-cover"
-      onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
-    />
+    ready ? (
+      <img
+        src={signedUrl}
+        alt=""
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+      />
+    ) : (
+      <div className="w-full h-full flex items-center justify-center bg-black/40">
+        <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+      </div>
+    )
   );
 }
 

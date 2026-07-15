@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Upload, Loader2, CheckCircle, AlertCircle, Info, Plus, ChevronDown, Trash2, Archive, Film } from 'lucide-react';
+import { X, Upload, Loader2, CheckCircle, AlertCircle, Info, Plus, ChevronDown, Trash2, Archive, Film, Image as ImageIcon } from 'lucide-react';
 import type { Shot, Settings, ModelConfig, AiGeneratedImage, RefImage, DigitalAsset } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
@@ -12,7 +12,7 @@ interface AIImageGenerateDialogProps {
   isOpen: boolean;
   onClose: () => void;
   initialPrompt?: string;
-  onUseImage?: (imageUrl: string) => void;
+  onUseImage?: (imageUrl: string, fileSize?: number) => void;
   title?: string;
   showUpdatePromptOption?: boolean;
   updatePromptChecked?: boolean;
@@ -99,7 +99,7 @@ export default function AIImageGenerateDialog({
 
   // Q1：多图暂存 - 第一张自动上传 OSS，后续（最多5张）需用户确认后上传
   const MAX_STAGED_IMAGES = 5;
-  const [stagedImages, setStagedImages] = useState<Array<{ id: string; url: string; uploaded: boolean }>>([]);
+  const [stagedImages, setStagedImages] = useState<Array<{ id: string; url: string; uploaded: boolean; fileSize?: number }>>([]);
   const [selectedStagedId, setSelectedStagedId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false); // 正在上传预览图到 OSS
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -365,10 +365,11 @@ export default function AIImageGenerateDialog({
 
             const imageUrl = task.output?.imageUrl;
             const uploaded = task.output?.uploaded !== false;
+            const fileSize = task.output?.fileSize;
             if (imageUrl) {
               // Q1：添加到暂存区
               const stagedId = `staged-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-              setStagedImages(prev => [...prev, { id: stagedId, url: imageUrl, uploaded }]);
+              setStagedImages(prev => [...prev, { id: stagedId, url: imageUrl, uploaded, fileSize }]);
               setSelectedStagedId(stagedId);
               setGeneratedImageUrl(imageUrl);
               setStatus('done');
@@ -407,6 +408,7 @@ export default function AIImageGenerateDialog({
 
     try {
       let finalUrl = selected.url;
+      let finalFileSize: number | undefined;
       if (!selected.uploaded) {
         // 预览图需先上传到 OSS
         setConfirming(true);
@@ -430,13 +432,17 @@ export default function AIImageGenerateDialog({
         }
         const data = await res.json();
         finalUrl = data.url;
+        finalFileSize = data.fileSize;
         // 更新暂存区状态
         setStagedImages(prev => prev.map(s => s.id === selected.id ? { ...s, url: finalUrl, uploaded: true } : s));
         if (effectiveOwnerId) {
           loadHistory();
         }
+      } else {
+        // 已经上传过的：从历史记录中取 fileSize
+        finalFileSize = selected.fileSize || undefined;
       }
-      onUseImage(finalUrl);
+      onUseImage(finalUrl, finalFileSize);
       onClose();
     } catch (err) {
       showToast(err instanceof Error ? err.message : '使用图片失败', 'error');
@@ -1042,7 +1048,7 @@ function HistoryThumb({
   onSelect: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }) {
-  const signedUrl = useSignedUrl(img.url);
+  const { url: signedUrl, ready } = useSignedUrl(img.url);
   return (
     <div
       onClick={onSelect}
@@ -1051,12 +1057,18 @@ function HistoryThumb({
       }`}
       title={img.prompt || '历史生成图'}
     >
-      <img
-        src={signedUrl || img.url}
-        alt="历史图"
-        className="w-full h-full object-cover"
-        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
-      />
+      {ready ? (
+        <img
+          src={signedUrl}
+          alt="历史图"
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-black/40">
+          <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+        </div>
+      )}
       <button
         onClick={onDelete}
         className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
@@ -1076,18 +1088,24 @@ function RefThumb({
   refImg: RefImage;
   onRemove: () => void;
 }) {
-  const signedUrl = useSignedUrl(refImg.url);
+  const { url: signedUrl, ready } = useSignedUrl(refImg.url);
   return (
     <div
       className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-white/10"
       title={refImg.assetName || '参考图'}
     >
-      <img
-        src={signedUrl || refImg.url}
-        alt={refImg.assetName || '参考图'}
-        className="w-full h-full object-cover"
-        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
-      />
+      {ready ? (
+        <img
+          src={signedUrl}
+          alt={refImg.assetName || '参考图'}
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-black/40">
+          <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+        </div>
+      )}
       <button
         onClick={onRemove}
         className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 hover:bg-red-500/80 flex items-center justify-center transition"
@@ -1116,7 +1134,7 @@ function AssetThumb({
   onAdd: () => void;
   isSelected: boolean;
 }) {
-  const signedUrl = useSignedUrl(imgUrl);
+  const { url: signedUrl, ready } = useSignedUrl(imgUrl);
   return (
     <div
       onClick={onAdd}
@@ -1125,12 +1143,18 @@ function AssetThumb({
       }`}
       title={asset.name}
     >
-      <img
-        src={signedUrl || imgUrl}
-        alt={asset.name}
-        className="w-full h-full object-cover"
-        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
-      />
+      {ready ? (
+        <img
+          src={signedUrl}
+          alt={asset.name}
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-black/40">
+          <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+        </div>
+      )}
       <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
         {asset.name}
       </div>
@@ -1148,19 +1172,25 @@ function ShotImageThumb({
   shotTitle: string;
   onAdd: () => void;
 }) {
-  const signedUrl = useSignedUrl(imgUrl);
+  const { url: signedUrl, ready } = useSignedUrl(imgUrl);
   return (
     <div
       onClick={onAdd}
       className="relative shrink-0 aspect-square rounded-lg overflow-hidden border border-white/10 hover:border-violet-400/50 cursor-pointer transition"
       title={shotTitle}
     >
-      <img
-        src={signedUrl || imgUrl}
-        alt={shotTitle}
-        className="w-full h-full object-cover"
-        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
-      />
+      {ready ? (
+        <img
+          src={signedUrl}
+          alt={shotTitle}
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-black/40">
+          <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+        </div>
+      )}
       <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
         {shotTitle}
       </div>
@@ -1180,8 +1210,7 @@ function StagedThumb({
   isSelected: boolean;
   onSelect: () => void;
 }) {
-  // 仅对已上传到 OSS 的 URL 签名（预览图是 AI 临时 URL，无需签名）
-  const signedUrl = useSignedUrl(img.uploaded ? img.url : '');
+  const { url: signedUrl, ready } = useSignedUrl(img.uploaded ? img.url : '');
   return (
     <div
       onClick={onSelect}
@@ -1191,12 +1220,27 @@ function StagedThumb({
           : 'border-white/10 hover:border-white/30'
       }`}
     >
-      <img
-        src={signedUrl || img.url}
-        alt={`生成图 ${idx + 1}`}
-        className="w-full h-full object-cover"
-        onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
-      />
+      {img.uploaded ? (
+        ready ? (
+          <img
+            src={signedUrl}
+            alt={`生成图 ${idx + 1}`}
+            className="w-full h-full object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-black/40">
+            <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
+          </div>
+        )
+      ) : (
+        <img
+          src={img.url}
+          alt={`生成图 ${idx + 1}`}
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      )}
       <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white text-center py-0.5">
         {idx + 1}{!img.uploaded && ' · 预览'}
       </span>

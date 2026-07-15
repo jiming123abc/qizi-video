@@ -413,6 +413,20 @@ async function deleteOssFile(url) {
   }
 }
 
+// 获取 OSS 文件大小（用于媒体统计；失败返回 0）
+async function getOssFileSize(url) {
+  if (!url || !ossClient) return 0;
+  try {
+    const key = extractOssKeyFromUrl(url);
+    if (!key) return 0;
+    const result = await ossClient.head(key);
+    return Number(result?.res?.headers?.['content-length'] || 0);
+  } catch (e) {
+    console.warn('[OSS] 获取文件大小失败:', url, e.message);
+    return 0;
+  }
+}
+
 // P3-6：并发删除多个 OSS 文件（容错：单个失败不影响其他）
 async function deleteOssFiles(urls) {
   await Promise.all((urls || []).map(url => deleteOssFile(url).catch(e => console.error('[app] OSS 批量删除失败:', e.message))));
@@ -1535,7 +1549,7 @@ app.post('/api/ai/upload-preview-image', async (req, res) => {
       }
     }
 
-    res.json({ success: true, url: ossUrl });
+    res.json({ success: true, url: ossUrl, fileSize });
   } catch (error) {
     console.error('[app] 上传预览图失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
@@ -2106,7 +2120,7 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
     await db.aiTasks.update(taskId, {
       status: 'done',
       progress: 100,
-      output: { imageUrl, uploaded: !previewOnly }
+      output: { imageUrl, uploaded: !previewOnly, fileSize }
     });
 
     console.log(`[AI] 参考图生成完成: ${imageUrl} (previewOnly=${previewOnly})`);
@@ -2132,12 +2146,22 @@ async function processVideoSplit(taskId, videoUrl, params) {
   try {
     const mode = params.mode || 'ai_frame';
 
+    // P3-26：获取视频 OSS 文件大小，用于 shot_media 统计
+    // 失败不阻塞流程，shot_media.size 退化为 0
+    let videoSize = 0;
+    try {
+      videoSize = await getOssFileSize(videoUrl);
+    } catch (e) {
+      console.warn('[AI] 获取视频大小失败:', e.message);
+    }
+    const splitParams = { ...params, videoSize };
+
     if (mode === 'manual') {
-      await processVideoSplitManual(taskId, videoUrl, params);
+      await processVideoSplitManual(taskId, videoUrl, splitParams);
     } else if (mode === 'aliyun') {
-      await processVideoSplitAliyunMode(taskId, videoUrl, params);
+      await processVideoSplitAliyunMode(taskId, videoUrl, splitParams);
     } else {
-      await processVideoSplitAIFrameMode(taskId, videoUrl, params);
+      await processVideoSplitAIFrameMode(taskId, videoUrl, splitParams);
     }
   } catch (error) {
     console.error('[AI] 视频分割失败:', error.message);
@@ -2276,7 +2300,7 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
     await db.aiTasks.update(taskId, {
       status: 'done',
       progress: 100,
-      output: { imageUrl, model, provider, uploaded: !previewOnly }
+      output: { imageUrl, model, provider, uploaded: !previewOnly, fileSize }
     });
 
     console.log(`[AI] 通用生图完成: ${imageUrl} (previewOnly=${previewOnly})`);
@@ -2343,7 +2367,7 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
       url: videoUrl,
       type: 'video',
       filename: '',
-      size: 0,
+      size: params.videoSize || 0,
       duration: endTime ? endTime - startTime : null,
       sortOrder: 0,
       source: 'video_split'
@@ -2534,7 +2558,7 @@ async function processVideoSplitAIFrame(taskId, videoUrl, params, settings) {
       }));
     }
 
-    await createShotsFromSplitData(taskId, videoUrl, shots, params, videoBuffer ? videoBuffer.length : 0);
+    await createShotsFromSplitData(taskId, videoUrl, shots, params, params.videoSize || (videoBuffer ? videoBuffer.length : 0));
     
     // 清理临时文件
     cleanupTempFiles(tempVideoPath, framesDir);
@@ -2661,7 +2685,7 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
       url: videoUrl,
       type: 'video',
       filename: '',
-      size: 0,
+      size: params.videoSize || 0,
       duration: duration,
       sortOrder: 0,
       source: 'video_split_aliyun'
@@ -4366,7 +4390,7 @@ app.post('/api/projects/:projectId/assets/:assetId/images', async (req, res) => 
   try {
     const projectId = parseInt(req.params.projectId);
     const assetId = parseInt(req.params.assetId);
-    const { imageUrl } = req.body;
+    const { imageUrl, size } = req.body || {};
 
     if (!imageUrl || !imageUrl.trim()) {
       return res.status(400).json({ success: false, message: '图片地址不能为空' });
@@ -4378,8 +4402,8 @@ app.post('/api/projects/:projectId/assets/:assetId/images', async (req, res) => 
       return res.status(400).json({ success: false, message: '数字资产不属于该项目' });
     }
 
-    const image = await db.digitalAssets.addImage(assetId, imageUrl.trim());
-    console.log(`[app] 新增数字资产图片: assetId=${assetId}`);
+    const image = await db.digitalAssets.addImage(assetId, imageUrl.trim(), size || 0);
+    console.log(`[app] 新增数字资产图片: assetId=${assetId}, size=${size || 0}`);
     res.json({ success: true, data: image });
   } catch (error) {
     console.error('[app] 新增数字资产图片失败:', error.message);
@@ -5014,7 +5038,7 @@ app.get('/api/oss-upload-credential', async (req, res) => {
     const signature = crypto.createHmac('sha1', ALIYUN_ACCESS_KEY_SECRET).update(policy).digest('base64');
 
     res.json({
-      host: `https://${OSS_BUCKET}.oss-${OSS_REGION}.aliyuncs.com`,
+      host: `https://${OSS_BUCKET}.${OSS_REGION}.aliyuncs.com`,
       accessKeyId: ALIYUN_ACCESS_KEY_ID,
       policy,
       signature,

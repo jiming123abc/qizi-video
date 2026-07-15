@@ -24,7 +24,12 @@ function requestSignUrl(url: string) {
 
 // 组件级别：为单个 URL 获取签名 URL
 // 使用 pub-sub 订阅缓存更新，替代轮询；保留长间隔轮询作为兜底
-export function useSignedUrl(originalUrl: string | undefined | null): string {
+export interface SignedUrlResult {
+  url: string;
+  ready: boolean;
+}
+
+export function useSignedUrl(originalUrl: string | undefined | null): SignedUrlResult {
   const [signedUrl, setSignedUrl] = useState<string>('');
 
   useEffect(() => {
@@ -33,16 +38,13 @@ export function useSignedUrl(originalUrl: string | undefined | null): string {
       return;
     }
 
-    // 立即返回缓存中的值（同步）
     const cached = getSignedUrlFromCache(originalUrl);
     setSignedUrl(cached);
 
-    // 如果缓存未命中，请求签名
     if (cached === originalUrl) {
       requestSignUrl(originalUrl);
     }
 
-    // 订阅缓存更新：当本 URL 的签名就绪时立即更新 state
     const unsubscribe = subscribeSignUrlUpdate(updatedUrls => {
       if (updatedUrls.includes(originalUrl)) {
         const latest = getSignedUrlFromCache(originalUrl);
@@ -50,14 +52,12 @@ export function useSignedUrl(originalUrl: string | undefined | null): string {
       }
     });
 
-    // 兜底：长间隔轮询（2s），防止 pub-sub 遗漏；最多持续 30s
     const startTime = Date.now();
     const fallbackInterval = setInterval(() => {
       const latest = getSignedUrlFromCache(originalUrl);
       if (latest !== originalUrl) {
         setSignedUrl(prev => (prev !== latest ? latest : prev));
       }
-      // 签名就绪或超过 30s 则停止兜底轮询
       if (latest !== originalUrl || Date.now() - startTime > 30000) {
         clearInterval(fallbackInterval);
       }
@@ -69,5 +69,8 @@ export function useSignedUrl(originalUrl: string | undefined | null): string {
     };
   }, [originalUrl]);
 
-  return signedUrl || originalUrl || '';
+  const finalUrl = signedUrl || originalUrl || '';
+  const ready = !!finalUrl && signedUrl !== '' && signedUrl !== originalUrl;
+
+  return { url: finalUrl, ready };
 }
