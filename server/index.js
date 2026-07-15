@@ -985,6 +985,11 @@ app.delete('/api/shots/:id/media/:mediaId', async (req, res) => {
       return res.status(404).json({ success: false, message: '参考画面不存在' });
     }
     const mediaUrl = media.url;
+
+    // 获取 shot 对应的 projectId（用于封面检查）
+    const shot = await db.items.getById(shotId);
+    const projectId = shot ? shot.projectId : null;
+
     // 1. 删 shot_media 记录
     await db.shotMedia.delete(mId);
     // 2. 检查是否还有其他 shot_media 引用同一 URL
@@ -994,6 +999,23 @@ app.delete('/api/shots/:id/media/:mediaId', async (req, res) => {
     );
     const otherMediaCount = otherMediaRows[0]?.cnt || 0;
     if (otherMediaCount === 0) {
+      // 检查并清除项目封面（如果封面是该媒体）
+      if (projectId) {
+        try {
+          const project = await db.projects.getById(projectId);
+          if (project && project.coverUrl && !project.coverUrl.startsWith(DEFAULT_PROJECT_COVER_PREFIX)) {
+            const coverBaseUrl = project.coverUrl.split('?')[0];
+            const mediaBaseUrl = mediaUrl.split('?')[0];
+            if (coverBaseUrl === mediaBaseUrl) {
+              await db.projects.update(projectId, { coverUrl: '' });
+              console.log(`[app] 删除分镜参考画面，清除项目 ${projectId} 封面`);
+            }
+          }
+        } catch (e) {
+          console.warn('[app] 检查/清除项目封面失败:', e.message);
+        }
+      }
+
       // 3. 无其他 shot_media 引用：删 videos(reference=1) 记录（统计占用空间由此而来）
       //    必须在 deleteOssFileIfNotReferenced 之前删除，否则 isUrlReferenced 会因
       //    videos(reference=1) 记录仍存在而返回 true，阻止 OSS 删除
@@ -2987,6 +3009,25 @@ app.get('/api/aliyun/status', (req, res) => {
   });
 });
 
+// MPS 配置状态检查
+app.get('/api/aliyun/mps/status', (req, res) => {
+  try {
+    const creds = aliyunVideo.getAliyunCredentials ? aliyunVideo.getAliyunCredentials() : null;
+    const ossConfig = aliyunVideo.getOSSConfig ? aliyunVideo.getOSSConfig() : null;
+    res.json({
+      success: true,
+      configured: !!(creds && creds.mpsPipelineId),
+      pipelineId: creds && creds.mpsPipelineId ? `${creds.mpsPipelineId.substring(0, 8)}***` : '(未设置)',
+      ossBucket: ossConfig ? ossConfig.bucket : '(未设置)',
+      ossLocation: ossConfig ? ossConfig.location : '(未设置)',
+      mpsEndpoint: 'https://mts.cn-beijing.aliyuncs.com/',
+      mpsRegion: 'cn-beijing'
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 // ========== MPS 视频转码 API ==========
 
 // 提交转码任务
@@ -3939,6 +3980,28 @@ async function batchUpdateShots(req, res) {
       // batchHardDelete 返回 videos.url 列表
       const urls = await db.items.batchHardDelete(numIds);
       allUrls.push(...(urls || []).filter(Boolean));
+
+      // 检查并清除项目封面（如果封面来源于被删除的分镜）
+      try {
+        if (numIds.length > 0) {
+          const firstShot = await db.items.getById(numIds[0]);
+          const projectId = firstShot ? firstShot.projectId : null;
+          if (projectId) {
+            const project = await db.projects.getById(projectId);
+            if (project && project.coverUrl && !project.coverUrl.startsWith(DEFAULT_PROJECT_COVER_PREFIX)) {
+              const coverBaseUrl = project.coverUrl.split('?')[0];
+              const isCoverFromShots = allUrls.some(u => u.split('?')[0] === coverBaseUrl);
+              if (isCoverFromShots) {
+                await db.projects.update(projectId, { coverUrl: '' });
+                console.log(`[app] 批量硬删除分镜，清除项目 ${projectId} 封面`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[app] batchHardDelete 检查/清除封面失败:', e.message);
+      }
+
       // 手动删 shot_media 记录（SQLite 外键 CASCADE 未启用）
       try {
         const placeholders = numIds.map(() => '?').join(',');
@@ -5780,6 +5843,23 @@ setInterval(cleanupOrphanTasks, 10 * 60 * 1000);
 // 启动后 1 分钟执行一次首次扫描，清理上次服务重启前遗留的孤儿任务
 setTimeout(cleanupOrphanTasks, 60 * 1000);
 console.log('[orphan-scan] 孤儿任务扫描已启动（每 10 分钟一次）');
+
+// 启动时打印阿里云配置状态（脱敏）
+(function printAliyunConfigStatus() {
+  const creds = aliyunVideo.getAliyunCredentials ? aliyunVideo.getAliyunCredentials() : null;
+  if (creds) {
+    const mask = (s) => s ? `${s.substring(0, 4)}***${s.substring(s.length - 4)}` : '(未设置)';
+    console.log('========== 阿里云配置状态 ==========');
+    console.log('  AccessKey ID:', mask(creds.accessKeyId));
+    console.log('  AccessKey Secret:', creds.accessKeySecret ? '已设置' : '未设置');
+    console.log('  OSS Bucket:', creds.ossBucket || '(未设置)');
+    console.log('  OSS Region:', creds.ossRegion || '(未设置)');
+    console.log('  MPS Pipeline ID:', creds.mpsPipelineId || '(未设置)');
+    console.log('====================================');
+  } else {
+    console.warn('[aliyun] 无法获取阿里云配置状态');
+  }
+})();
 
 const server = app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);

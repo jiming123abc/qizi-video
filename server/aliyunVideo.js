@@ -4,8 +4,8 @@ const VIDEORECOG_ENDPOINT = 'https://videorecog.cn-shanghai.aliyuncs.com/';
 const VIDEORECOG_VERSION = '2020-03-20';
 const VIDEORECOG_REGION = 'cn-shanghai';
 
-const MPS_ENDPOINT = 'https://mts.cn-shanghai.aliyuncs.com/';
-const MPS_REGION = 'cn-shanghai';
+const MPS_ENDPOINT = 'https://mts.cn-beijing.aliyuncs.com/';
+const MPS_REGION = 'cn-beijing';
 const MPS_VERSION = '2014-06-18';
 
 function getAliyunCredentials() {
@@ -13,7 +13,8 @@ function getAliyunCredentials() {
     accessKeyId: process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID_DEV || process.env.OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID_DEV,
     accessKeySecret: process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET_DEV || process.env.OSS_ACCESS_KEY_SECRET || process.env.OSS_ACCESS_KEY_SECRET_DEV,
     ossBucket: process.env.OSS_BUCKET || process.env.OSS_BUCKET_DEV,
-    ossRegion: process.env.OSS_REGION || process.env.OSS_REGION_DEV
+    ossRegion: process.env.OSS_REGION || process.env.OSS_REGION_DEV,
+    mpsPipelineId: process.env.MPS_PIPELINE_ID || process.env.MPS_PIPELINE_ID_DEV || ''
   };
 }
 
@@ -378,11 +379,16 @@ async function submitTranscodeTask(videoUrl, options = {}) {
         Channels: 2
       }
     }],
-    PipelineId: options.pipelineId || process.env.MPS_PIPELINE_ID || ''
+    PipelineId: options.pipelineId || creds.mpsPipelineId || ''
   };
 
   // P3-5：未配置 PipelineId 时抛出明确错误，而非仅 warn 后继续（会导致 MPS 调用失败）
   if (!transcodingConfig.PipelineId) {
+    console.error('[MPS] PipelineId 配置检查失败:');
+    console.error('[MPS]   options.pipelineId:', options.pipelineId || '(未传入)');
+    console.error('[MPS]   process.env.MPS_PIPELINE_ID:', process.env.MPS_PIPELINE_ID || '(未设置)');
+    console.error('[MPS]   process.env.MPS_PIPELINE_ID_DEV:', process.env.MPS_PIPELINE_ID_DEV || '(未设置)');
+    console.error('[MPS]   getAliyunCredentials().mpsPipelineId:', creds.mpsPipelineId || '(空)');
     throw new Error('未配置 MPS_PIPELINE_ID，请在 .env 文件中设置该环境变量');
   }
 
@@ -509,6 +515,7 @@ async function getTranscodeResult(jobId) {
 }
 
 module.exports = {
+  getAliyunCredentials,
   isAliyunConfigured,
   submitSplitVideoTask,
   getSplitVideoResult,
