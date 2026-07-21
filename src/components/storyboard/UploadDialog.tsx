@@ -78,8 +78,8 @@ export function UploadDialog({
   return (
     <>
       <div className={`fixed inset-0 z-[60] p-8 sm:p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={handleBackdropClick}>
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
-          <div className="flex items-center justify-between mb-4 shrink-0">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl min-h-[420px] max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden p-6" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-5 shrink-0">
             <div>
               <h2 className="text-base font-semibold">批量上传</h2>
               {currentSceneName !== undefined && (
@@ -93,8 +93,30 @@ export function UploadDialog({
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
-            <label className="block border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-2xl p-8 text-center cursor-pointer transition bg-white/[0.02]">
+          {uploadingFiles.length === 0 ? (
+            <div className="flex-1 flex flex-col min-h-0">
+              <label className="flex-1 border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-2xl p-8 text-center cursor-pointer transition bg-white/[0.02] flex flex-col items-center justify-center">
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,video/*"
+                  className="hidden"
+                  onChange={handleFileInputChange}
+                />
+                <ImageIcon className="w-12 h-12 mx-auto mb-4 text-violet-300/60" />
+                <p className="text-sm font-medium mb-2">点击选择图片或视频</p>
+                <p className="text-xs text-slate-500">支持多选，最多 {maxFiles} 个文件，非图片视频文件会被自动忽略</p>
+              </label>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col min-h-0">
+              <button
+                onClick={() => document.querySelector<HTMLInputElement>('input[type="file"]')?.click()}
+                className="shrink-0 mb-3 px-4 py-2.5 rounded-xl border border-dashed border-white/15 hover:border-violet-400/40 text-center text-xs text-slate-400 hover:text-violet-300 hover:bg-white/[0.02] transition flex items-center justify-center gap-2"
+              >
+                <ImageIcon className="w-4 h-4" />
+                继续添加文件
+              </button>
               <input
                 type="file"
                 multiple
@@ -102,15 +124,7 @@ export function UploadDialog({
                 className="hidden"
                 onChange={handleFileInputChange}
               />
-              <ImageIcon className="w-10 h-10 mx-auto mb-3 text-violet-300/60" />
-              <p className="text-sm font-medium mb-1">点击选择图片或视频</p>
-              <p className="text-xs text-slate-500">支持多选，最多 {maxFiles} 个文件，非图片视频文件会被自动忽略</p>
-            </label>
-          </div>
-
-          {uploadingFiles.length > 0 && (
-            <div className="mt-5">
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-2 shrink-0">
                 <div className="text-xs text-slate-400">
                   {successCount > 0 && <span className="text-green-400 mr-3">成功 {successCount}</span>}
                   {errorCount > 0 && <span className="text-red-400 mr-3">失败 {errorCount}</span>}
@@ -124,7 +138,7 @@ export function UploadDialog({
                   >重试失败项</button>
                 )}
               </div>
-              <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
                 {uploadingFiles.map(f => (
                   <div key={f.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/10">
                     <div className="flex-1 min-w-0">
@@ -146,7 +160,7 @@ export function UploadDialog({
                   </div>
                 ))}
               </div>
-              <div className="text-center pt-3">
+              <div className="text-center pt-4 shrink-0">
                 <button
                   onClick={handleClearAndClose}
                   className="px-4 py-2 rounded-full text-xs text-slate-400 hover:text-white hover:bg-white/5 transition"

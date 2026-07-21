@@ -40,7 +40,6 @@ export interface Shot {
   aiImagePrompt: string;
   aiStylePrompt: string;
   mergedFrom: number[];
-  shotIndex: number;
 
   media: ShotMedia[];
 }
@@ -53,6 +52,7 @@ export interface ShotMedia {
   filename: string;
   size: number;
   duration?: number;
+  startTime?: number;
   sortOrder: number;
   source: 'upload' | 'ai_generated' | 'video_split';
   createdAt: string;

@@ -34,9 +34,11 @@ const API_BASE_URL = import.meta.env.DEV
   ? ''
   : (import.meta.env.VITE_API_URL || '');
 
-export function getVideoPoster(url: string): string {
+export function getVideoPoster(url: string, startTime?: number): string {
   if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
-    return url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
+    const t = startTime !== undefined && startTime > 0 ? Math.round(startTime * 1000) : 1000;
+    // 使用后端代理，避免前端直接请求 OSS 截图触发 ORB
+    return `/api/oss-snapshot?url=${encodeURIComponent(url)}&t=${t}&w=800`;
   }
   return '';
 }

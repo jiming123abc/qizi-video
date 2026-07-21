@@ -966,7 +966,13 @@ async function extractVideoFrame(videoUrl, time = 0) {
         settled = true;
         clearTimeout(timeout);
         const buffer = Buffer.concat(chunks);
+        console.log(`[aiClient] 提取视频帧成功，buffer大小: ${buffer.length} bytes`);
+        if (buffer.length < 100) {
+          reject(new Error('提取的视频帧数据过小'));
+          return;
+        }
         const base64 = `data:image/jpeg;base64,${buffer.toString('base64')}`;
+        console.log(`[aiClient] base64长度: ${base64.length} characters`);
         resolve(base64);
       })
       .on('error', (err) => {

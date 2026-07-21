@@ -58,26 +58,60 @@ export default function AddShotDialog({
 
   useEffect(() => {
     if (isOpen) {
-      setFormData({
-        sceneContent: '',
-        actors: '',
-        costume: '',
-        props: '',
-        location: '',
-        focalLength: '',
-        shotType: '',
-        shotAngle: '',
-        cameraMovement: '',
-        lighting: '',
-        narration: '',
-        estimatedDuration: '',
-        notes: ''
-      });
+      const cacheKey = `addShotCache_${projectId ?? 'null'}_${sceneId ?? 'null'}`;
+      let restored = false;
+      try {
+        const cached = sessionStorage.getItem(cacheKey);
+        if (cached) {
+          const data = JSON.parse(cached);
+          setFormData(prev => ({ ...prev, ...data }));
+          restored = true;
+        }
+      } catch (_) { /* 忽略反序列化错误 */ }
+
+      if (!restored) {
+        setFormData({
+          sceneContent: '',
+          actors: '',
+          costume: '',
+          props: '',
+          location: '',
+          focalLength: '',
+          shotType: '',
+          shotAngle: '',
+          cameraMovement: '',
+          lighting: '',
+          narration: '',
+          estimatedDuration: '',
+          notes: ''
+        });
+      }
       setError(null);
       setIsSubmitting(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [isOpen]);
+  }, [isOpen, projectId, sceneId]);
+
+  // 表单变化时持久化到 sessionStorage
+  useEffect(() => {
+    if (!isOpen) return;
+    const cacheKey = `addShotCache_${projectId ?? 'null'}_${sceneId ?? 'null'}`;
+    try {
+      sessionStorage.setItem(cacheKey, JSON.stringify(formData));
+    } catch (_) { /* 忽略写入错误 */ }
+  }, [isOpen, formData, projectId, sceneId]);
+
+  const clearAddShotCache = () => {
+    const cacheKey = `addShotCache_${projectId ?? 'null'}_${sceneId ?? 'null'}`;
+    try {
+      sessionStorage.removeItem(cacheKey);
+    } catch (_) { /* 忽略 */ }
+  };
+
+  const handleUserCancel = () => {
+    clearAddShotCache();
+    onClose();
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -129,6 +163,8 @@ export default function AddShotDialog({
       if (onAdd && data.data) {
         onAdd(data.data);
       }
+      // 成功提交：清空缓存
+      clearAddShotCache();
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建分镜失败');
@@ -449,7 +485,7 @@ export default function AddShotDialog({
         <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleUserCancel}
             className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
           >
             取消

@@ -24,6 +24,40 @@ export type VideoBitrateInfo = {
   resolution?: '1080p' | '720p' | '480p';
 };
 
+// 全局隐藏 video 元素，复用避免重复创建/销毁导致的 ERR_ABORTED
+let _probeVideo: HTMLVideoElement | null = null;
+let _probeBlobUrl: string | null = null;
+
+function getProbeVideo(): HTMLVideoElement {
+  if (!_probeVideo) {
+    _probeVideo = document.createElement('video');
+    _probeVideo.preload = 'metadata';
+    _probeVideo.style.display = 'none';
+    document.body.appendChild(_probeVideo);
+  }
+  return _probeVideo;
+}
+
+function cleanupProbeVideo() {
+  if (_probeBlobUrl) {
+    try { URL.revokeObjectURL(_probeBlobUrl); } catch (_) {}
+    _probeBlobUrl = null;
+  }
+  if (_probeVideo) {
+    try {
+      _probeVideo.pause();
+      _probeVideo.removeAttribute('src');
+      _probeVideo.load();
+    } catch (_) {}
+    try { _probeVideo.remove(); } catch (_) {}
+    _probeVideo = null;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', cleanupProbeVideo);
+}
+
 // 默认码率配置（作为备用）
 const DEFAULT_BITRATE_CONFIG = {
   '1080p': 3000,  // 1080p 及以上
@@ -139,25 +173,22 @@ export function needsCompression(
 }
 
 export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo> {
+  const video = getProbeVideo();
+  const url = URL.createObjectURL(file);
+
   return new Promise((resolve) => {
-    const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.style.display = 'none';
-    const url = URL.createObjectURL(file);
     let resolved = false;
 
     const done = (bitrateKbps: number | null, duration: number | null, width?: number, height?: number) => {
       if (resolved) return;
       resolved = true;
-      video.removeAttribute('src');
-      video.load();
-      document.body.removeChild(video);
-      URL.revokeObjectURL(url);
-
-      // 使用分辨率阶梯判断逻辑
       const resolution = getResolutionTier(height);
-
       resolve({ bitrateKbps, duration, width, height, resolution });
+      const oldUrl = _probeBlobUrl;
+      _probeBlobUrl = url;
+      if (oldUrl) {
+        setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
+      }
     };
 
     video.onloadedmetadata = () => {
@@ -177,7 +208,11 @@ export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo
       done(null, null);
     };
 
-    document.body.appendChild(video);
+    try {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    } catch (_) {}
     video.src = url;
   });
 }

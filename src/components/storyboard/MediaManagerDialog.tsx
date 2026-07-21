@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Upload, GripVertical, Sparkles, Image as ImageIcon, FileVideo } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
-import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
-import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate, getVideoPoster, batchGetSignedUrls, getSignedUrlFromCache } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
@@ -28,49 +27,40 @@ interface UploadingItem {
   message?: string;
 }
 
-function ImageWrapper({ url, alt }: { url: string; alt: string }) {
+// 统一缩略图组件：视频用封面图（img），图片直接用 img，避免 video 元素的请求中止问题
+function MediaThumb({ media, signedUrls }: { media: ShotMedia; signedUrls: Record<string, string> }) {
   const [hasError, setHasError] = useState(false);
-  const { url: signedUrl, ready } = useSignedUrl(url);
-  
-  if (!ready) {
-    return <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />;
-  }
-  
-  if (hasError) {
-    return <ImageIcon className="w-8 h-8 text-white/30" />;
-  }
-  return (
-    <img
-      src={signedUrl}
-      alt={alt}
-      className="w-full h-full object-cover absolute inset-0"
-      onError={(e) => {
-        console.error('[MediaManager] 图片加载失败:', { url: signedUrl, alt });
-        setHasError(true);
-      }}
-    />
-  );
-}
+  const isVideo = media.type === 'video';
 
-function VideoWrapper({ url }: { url: string }) {
-  const [hasError, setHasError] = useState(false);
-  const { url: signedUrl, ready } = useSignedUrl(url);
-  
-  if (!ready) {
-    return <FileVideo className="w-6 h-6 text-white/30 animate-pulse" />;
-  }
-  
-  if (hasError) {
-    return <FileVideo className="w-6 h-6 text-white/30" />;
-  }
+  // 视频缩略图用 OSS 的视频截图功能生成 jpg，避免直接请求 video
+  const thumbUrl = isVideo && media.url
+    ? signedUrls[getVideoPoster(media.url)]
+    : (media.url ? signedUrls[media.url] : undefined);
+
   return (
-    <video
-      src={signedUrl}
-      className="w-full h-full object-cover"
-      muted
-      preload="metadata"
-      onError={() => setHasError(true)}
-    />
+    <div className="absolute inset-0">
+      {thumbUrl && !hasError ? (
+        <img
+          src={thumbUrl}
+          alt={media.filename}
+          className="w-full h-full object-cover"
+          onError={() => setHasError(true)}
+        />
+      ) : (
+        <div className="absolute inset-0 flex items-center justify-center">
+          {isVideo ? (
+            <FileVideo className={`w-6 h-6 text-white/30 ${thumbUrl && !hasError ? '' : 'animate-pulse'}`} />
+          ) : (
+            <ImageIcon className={`w-8 h-8 text-white/30 ${thumbUrl && !hasError ? '' : 'animate-pulse'}`} />
+          )}
+        </div>
+      )}
+      {isVideo && thumbUrl && !hasError && (
+        <div className="absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center">
+          <FileVideo className="w-3 h-3 text-white/80" />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -83,19 +73,36 @@ export default function MediaManagerDialog({
   refreshTrigger = 0,
   childDialogOpen = false
 }: MediaManagerDialogProps) {
-  const [mediaList, setMediaList] = useState<ShotMedia[]>(shot?.media || []);
+  const [mediaList, setMediaList] = useState<ShotMedia[]>([]);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [uploadingFiles, setUploadingFiles] = useState<UploadingItem[]>([]);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const processedUrlsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToastContext();
-  // P3-23：sceneRefInputRef 已移除（场景参考图上传功能废弃）
 
-  // 从 API 拉取最新媒体列表
+  // 用户主动关闭按钮
+  const handleUserClose = () => {
+    if (uploadingFiles.some(f => f.status === 'uploading')) {
+      return;
+    }
+    onClose();
+  };
+
+  // Dialog 关闭时清理已处理 URL 集合
+  useEffect(() => {
+    if (!isOpen) {
+      processedUrlsRef.current.clear();
+    }
+  }, [isOpen]);
+
+  // 从 API 拉取最新媒体列表（打开时、切换 shot 时、refreshTrigger 变化时）
   const fetchMediaList = async () => {
     if (!shot?.id) return;
+    setMediaLoading(true);
     try {
       const res = await fetch(`/api/shots/${shot.id}/media`);
       const data = await res.json();
@@ -108,43 +115,84 @@ export default function MediaManagerDialog({
       }
     } catch (e) {
       console.error('[MediaManager] 拉取媒体列表失败:', e);
+    } finally {
+      setMediaLoading(false);
     }
   };
 
-  // 弹窗打开时 / refreshTrigger 变化时，从 API 拉取最新媒体列表
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !shot?.id) return;
     fetchMediaList();
-  }, [isOpen, shot.id, refreshTrigger]);
+  }, [isOpen, shot?.id, refreshTrigger]);
 
-  // 弹窗打开时批量签名所有媒体 URL
-  // 依赖 url 列表字符串（而非 length），确保删除一张又添加一张时新媒体也能签名
+  // 批量签名媒体 URL（含视频封面），只处理未处理过的 URL，避免重复触发重渲染
   useEffect(() => {
-    if (!isOpen) return;
-    const urls = mediaList.map(m => m.url).filter(Boolean);
-    if (urls.length === 0) return;
-    import('../../lib/ossUtils').then(({ batchGetSignedUrls, getSignedUrlFromCache }) => {
-      // 立即使用缓存中的 URL（同步）
-      const immediate: Record<string, string> = {};
-      urls.forEach(u => { immediate[u] = getSignedUrlFromCache(u); });
-      setSignedUrls(immediate);
-      // 异步请求剩余未缓存的
-      batchGetSignedUrls(urls).then(() => {
-        setSignedUrls(prev => {
-          const updated = { ...prev };
-          urls.forEach(u => { updated[u] = getSignedUrlFromCache(u); });
-          return updated;
-        });
-      });
+    if (!isOpen || mediaList.length === 0) return;
+
+    // 收集所有需要签名的 URL（媒体 URL + 视频封面 URL）
+    const allUrls: string[] = [];
+    mediaList.forEach(m => {
+      if (m.url && !allUrls.includes(m.url)) allUrls.push(m.url);
+      if (m.type === 'video' && m.url) {
+        const posterUrl = getVideoPoster(m.url);
+        if (posterUrl && !allUrls.includes(posterUrl)) allUrls.push(posterUrl);
+      }
     });
-  }, [isOpen, mediaList.map(m => m.url).join(',')]);
+
+    const newUrls = allUrls.filter(u => !processedUrlsRef.current.has(u));
+    if (newUrls.length === 0) return;
+
+    newUrls.forEach(u => processedUrlsRef.current.add(u));
+
+    // 判断是否已签名：getSignedUrlFromCache 未缓存时返回原始 URL
+    const initial: Record<string, string> = {};
+    const needSign: string[] = [];
+
+    newUrls.forEach(u => {
+      const cached = getSignedUrlFromCache(u);
+      if (cached && cached !== u) {
+        // 缓存命中，有签名 URL
+        initial[u] = cached;
+      } else {
+        // 未缓存，标记为需要签名
+        needSign.push(u);
+      }
+    });
+
+    if (Object.keys(initial).length > 0) {
+      setSignedUrls(prev => {
+        const changed = Object.keys(initial).some(k => prev[k] !== initial[k]);
+        return changed ? { ...prev, ...initial } : prev;
+      });
+    }
+
+    if (needSign.length > 0) {
+      batchGetSignedUrls(needSign).then(() => {
+        const updated: Record<string, string> = {};
+        needSign.forEach(u => {
+          const signed = getSignedUrlFromCache(u);
+          if (signed && signed !== u) {
+            updated[u] = signed;
+          }
+        });
+        if (Object.keys(updated).length > 0) {
+          setSignedUrls(prev => {
+            const changed = Object.keys(updated).some(k => prev[k] !== updated[k]);
+            return changed ? { ...prev, ...updated } : prev;
+          });
+        }
+      }).catch(() => {});
+    }
+  }, [isOpen, mediaList]);
 
   // 压缩选择对话框状态
   const [pendingVideo, setPendingVideo] = useState<File | null>(null);
   const [pendingDecision, setPendingDecision] = useState<UploadDecision | null>(null);
   const [pendingIsSceneRef, setPendingIsSceneRef] = useState(false);
-  const [pendingFileId, setPendingFileId] = useState<string | null>(null);
-  const pendingUploadRef = useRef<{ file: File; isSceneRef: boolean } | null>(null);
+  const pendingBatchRef = useRef<{
+    videos: { file: File; fileId: string }[];
+    isSceneRef: boolean;
+  } | null>(null);
 
   // 阿里云配置状态
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
@@ -154,6 +202,7 @@ export default function MediaManagerDialog({
     if (uploadingFiles.some(f => f.status === 'uploading')) {
       return;
     }
+    // 意外关闭（X/ESC/点遮罩）保留缓存
     onClose();
   };
 
@@ -239,22 +288,23 @@ export default function MediaManagerDialog({
     if (!files || files.length === 0) return;
 
     const remaining = MAX_MEDIA_COUNT - mediaList.length;
-    if (remaining <= 0) {
-      showToast(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
+    const validFilesAll = Array.from(files).filter(f => detectFileType(f).supported);
+
+    if (validFilesAll.length === 0) {
+      showToast('没有支持的文件格式', 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
-    const fileArray = Array.from(files).slice(0, remaining);
-    const validFiles = fileArray.filter(f => {
-      const d = detectFileType(f);
-      if (!d.supported) {
-        console.warn(`不支持的文件: ${f.name}`);
-      }
-      return d.supported;
-    });
+    if (validFilesAll.length > remaining) {
+      showToast(`选择了 ${validFilesAll.length} 个文件，最多还能添加 ${remaining} 个，请减少后重新选择`, 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
 
-    if (validFiles.length === 0) return;
+    const validFiles = validFilesAll;
 
+    // 第一阶段：检测所有视频的码率，收集需要压缩的视频
     const initial: UploadingItem[] = validFiles.map(f => ({
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
       name: f.name,
@@ -263,18 +313,13 @@ export default function MediaManagerDialog({
     }));
     setUploadingFiles(prev => [...prev, ...initial]);
 
+    const toUpload: { file: File; type: 'image' | 'video'; fileId: string; compression: 'none' | 'server' | 'browser' | 'aliyun' }[] = [];
+    const videosToCompress: { file: File; fileId: string; decision: Awaited<ReturnType<typeof checkVideoBitrate>> }[] = [];
+
     for (let i = 0; i < validFiles.length; i++) {
       const file = validFiles[i];
       const detected = detectFileType(file);
       const fileId = initial[i].id;
-
-      if (!detected.supported || detected.type === 'unknown') {
-        setUploadingFiles(prev => prev.map(uf =>
-          uf.id === fileId ? { ...uf, status: 'error', message: '不支持的文件格式' } : uf
-        ));
-        continue;
-      }
-
       const fileType = detected.type as 'image' | 'video';
 
       if (fileType === 'video') {
@@ -283,19 +328,29 @@ export default function MediaManagerDialog({
         ));
         const decision = await checkVideoBitrate(file);
         if (decision.decision === 'must_compress') {
+          videosToCompress.push({ file, fileId, decision });
           setUploadingFiles(prev => prev.map(uf =>
             uf.id === fileId ? { ...uf, status: 'pending', progress: 0, message: '等待压缩方式选择' } : uf
           ));
-          pendingUploadRef.current = { file, isSceneRef };
-          setPendingVideo(file);
-          setPendingDecision(decision);
-          setPendingIsSceneRef(isSceneRef);
-          setPendingFileId(fileId);
-          continue;
+        } else {
+          toUpload.push({ file, type: 'video', fileId, compression: 'none' });
         }
+      } else {
+        toUpload.push({ file, type: 'image', fileId, compression: 'none' });
       }
+    }
 
-      await doUploadFile(file, fileType, fileId, isSceneRef, 'none');
+    // 先上传不需要压缩的文件
+    for (const item of toUpload) {
+      await doUploadFile(item.file, item.type, item.fileId, isSceneRef, item.compression);
+    }
+
+    // 如果有需要压缩的视频，弹出对话框（一次选择，所有视频共用）
+    if (videosToCompress.length > 0) {
+      pendingBatchRef.current = { videos: videosToCompress, isSceneRef };
+      setPendingVideo(videosToCompress[0].file);
+      setPendingDecision(videosToCompress[0].decision);
+      setPendingIsSceneRef(isSceneRef);
     }
   };
 
@@ -311,7 +366,7 @@ export default function MediaManagerDialog({
         uf.id === fileId ? { ...uf, status: 'uploading', progress: 10, message: '准备上传...' } : uf
       ));
 
-      let result: { url: string; id?: number; filename?: string; ossKey?: string };
+      let result: { url: string; id?: number; filename?: string; ossKey?: string; compressedSizeKB?: number; originalSizeKB?: number };
       if (fileType === 'image') {
         result = await uploadImage(file, {
           projectId: shot.projectId,
@@ -336,13 +391,17 @@ export default function MediaManagerDialog({
         });
       }
 
-      console.log('[MediaManager] 上传成功:', { url: result.url, ossKey: result.ossKey, filename: result.filename });
+      console.log('[MediaManager] 上传成功:', { url: result.url, ossKey: result.ossKey, filename: result.filename, compressedSizeKB: result.compressedSizeKB });
 
       setUploadingFiles(prev => prev.map(uf =>
         uf.id === fileId ? { ...uf, progress: 100, status: 'done', message: '完成' } : uf
       ));
 
-      await saveMediaToShot(result.url, fileType, file.name, isSceneRef ? 'video_split' : 'upload', result.ossKey);
+      const fileSize = result.compressedSizeKB
+        ? Math.round(result.compressedSizeKB * 1024)
+        : file.size;
+
+      await saveMediaToShot(result.url, fileType, file.name, isSceneRef ? 'video_split' : 'upload', result.ossKey, fileSize);
     } catch (err) {
       console.error('上传失败:', file.name, err);
       setUploadingFiles(prev => prev.map(uf =>
@@ -355,46 +414,44 @@ export default function MediaManagerDialog({
     if (!pendingVideo || !pendingDecision) {
       setPendingVideo(null);
       setPendingDecision(null);
-      setPendingFileId(null);
+      setPendingIsSceneRef(false);
+      pendingBatchRef.current = null;
       return;
     }
 
-    if (method === 'cancel') {
-      setPendingVideo(null);
-      setPendingDecision(null);
-      // 取消时移除等待中的进度条
-      if (pendingFileId) {
-        setUploadingFiles(prev => prev.filter(uf => uf.id !== pendingFileId));
-      }
-      setPendingFileId(null);
-      return;
-    }
-
-    const file = pendingVideo;
+    const batch = pendingBatchRef.current;
     const isSceneRef = pendingIsSceneRef;
-    // 复用 handleFileSelect 创建的进度条 ID
-    const fileId = pendingFileId || `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
 
     setPendingVideo(null);
     setPendingDecision(null);
-    setPendingFileId(null);
+    setPendingIsSceneRef(false);
+    pendingBatchRef.current = null;
 
-    // 更新已有进度条状态，不创建新进度条
-    setUploadingFiles(prev => prev.map(uf =>
-      uf.id === fileId ? { ...uf, status: 'uploading', progress: 10, message: '准备上传...' } : uf
-    ));
+    const videos = batch?.videos || [];
 
-    await doUploadFile(file, 'video', fileId, isSceneRef, method);
+    if (method === 'cancel') {
+      // 取消时移除所有等待压缩的进度条
+      const pendingIds = new Set(videos.map(v => v.fileId));
+      if (pendingIds.size > 0) {
+        setUploadingFiles(prev => prev.filter(uf => !pendingIds.has(uf.id)));
+      }
+      return;
+    }
+
+    // 批量上传所有需要压缩的视频
+    for (const { file, fileId } of videos) {
+      await doUploadFile(file, 'video', fileId, isSceneRef, method);
+    }
   };
 
-  const saveMediaToShot = async (url: string, type: 'image' | 'video', filename: string, source: ShotMedia['source'], ossKey?: string) => {
+  const saveMediaToShot = async (url: string, type: 'image' | 'video', filename: string, source: ShotMedia['source'], ossKey?: string, fileSize?: number) => {
     try {
-      console.log('[MediaManager] 保存媒体到分镜:', { url, type, filename, source, ossKey, shotId: shot.id });
+      console.log('[MediaManager] 保存媒体到分镜:', { url, type, filename, source, ossKey, fileSize, shotId: shot.id });
       
       const res = await fetch(`/api/shots/${shot.id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, type, filename, source, ossKey })
+        body: JSON.stringify({ url, type, filename, source, ossKey, size: fileSize || 0 })
       });
       const data = await res.json();
       console.log('[MediaManager] 保存媒体响应:', data);
@@ -406,7 +463,7 @@ export default function MediaManagerDialog({
           url,
           type,
           filename,
-          size: 0,
+          size: fileSize || 0,
           sortOrder: mediaList.length,
           source,
           ossKey: ossKey || data.data?.ossKey,
@@ -456,6 +513,17 @@ export default function MediaManagerDialog({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
+          {/* Loading skeleton */}
+          {mediaLoading && mediaList.length === 0 && (
+            <div className="mb-6">
+              <div className="grid grid-cols-4 gap-3">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="aspect-video rounded-xl bg-white/5 animate-pulse" />
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Media Grid */}
           {mediaList.length > 0 && (
             <div className="mb-6">
@@ -481,11 +549,7 @@ export default function MediaManagerDialog({
                     >
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
-                        {media.type === 'image' ? (
-                          <ImageWrapper url={media.url} alt={media.filename} />
-                        ) : (
-                          <VideoWrapper url={media.url} />
-                        )}
+                        <MediaThumb media={media} signedUrls={signedUrls} />
 
                         {/* Delete button */}
                         <button
@@ -620,7 +684,7 @@ export default function MediaManagerDialog({
         {/* Footer */}
         <div className="px-6 py-4 border-t border-white/10 flex justify-end">
           <button
-            onClick={handleClose}
+            onClick={handleUserClose}
             className="px-5 py-2 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
           >
             关闭
@@ -630,7 +694,7 @@ export default function MediaManagerDialog({
 
       <VideoCompressionDialog
         isOpen={pendingVideo !== null}
-        onClose={() => { setPendingVideo(null); setPendingDecision(null); }}
+        onClose={() => { setPendingVideo(null); setPendingDecision(null); setPendingIsSceneRef(false); pendingBatchRef.current = null; }}
         file={pendingVideo}
         decision={pendingDecision}
         aliyunConfigured={aliyunConfigured}

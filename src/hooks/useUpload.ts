@@ -31,10 +31,11 @@ export interface UseUploadOptions {
   loadShots?: () => void | Promise<void>;
   loadStats?: () => void | Promise<void>;
   loadProject?: () => void | Promise<void>;
+  loadSceneStats?: () => void | Promise<void>;
 }
 
 export function useUpload(options: UseUploadOptions) {
-  const { projectId, currentSceneId, showToast, onUploadComplete, loadShots, loadStats, loadProject } = options;
+  const { projectId, currentSceneId, showToast, onUploadComplete, loadShots, loadStats, loadProject, loadSceneStats } = options;
 
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
 
@@ -81,8 +82,9 @@ export function useUpload(options: UseUploadOptions) {
     if (loadShots) await loadShots();
     if (loadStats) await loadStats();
     if (loadProject) await loadProject();
+    if (loadSceneStats) await loadSceneStats();
     onUploadComplete?.();
-  }, [loadShots, loadStats, loadProject, onUploadComplete]);
+  }, [loadShots, loadStats, loadProject, loadSceneStats, onUploadComplete]);
 
   const uploadSingleFile = useCallback(async (file: File, index: number, retry: number = 0, compressionMethod: 'none' | 'server' | 'browser' | 'aliyun' = 'none') => {
     if (uploadCancelledRef.current) {

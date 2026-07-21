@@ -873,6 +873,9 @@ app.post('/api/shots', async (req, res) => {
   }
 });
 
+// 批量更新分镜（必须在 /api/shots/:id 之前定义，否则 batch-update 会被当作 :id 匹配）
+app.put('/api/shots/batch-update', batchUpdateShots);
+
 // 更新分镜字段
 app.put('/api/shots/:id', async (req, res) => {
   try {
@@ -946,11 +949,24 @@ app.get('/api/shots/:id/media', async (req, res) => {
 app.post('/api/shots/:id/media', async (req, res) => {
   try {
     const { id } = req.params;
-    const { url, type, filename, size, source } = req.body;
+    const { url, type, filename, size, source, startTime, duration } = req.body;
     
     const shot = await db.items.getById(parseInt(id));
     if (!shot) {
       return res.status(404).json({ success: false, message: '分镜不存在' });
+    }
+
+    // 兜底：如果 size 为 0 或未传入，且 URL 是 OSS URL，自动从 OSS 获取文件大小
+    let finalSize = size || 0;
+    if (!finalSize && url && url.startsWith('http') && isOSSConfigured && ossClient) {
+      try {
+        finalSize = await getOssFileSize(url);
+        if (finalSize > 0) {
+          console.log(`[shot-media] 自动获取 OSS 文件大小: ${url} → ${finalSize} bytes`);
+        }
+      } catch (e) {
+        console.warn('[shot-media] 获取 OSS 文件大小失败:', url, e.message);
+      }
     }
     
     const media = await db.shotMedia.create({
@@ -958,8 +974,10 @@ app.post('/api/shots/:id/media', async (req, res) => {
       url,
       type: type || 'image',
       filename: filename || '',
-      size: size || 0,
-      source: source || 'upload'
+      size: finalSize,
+      source: source || 'upload',
+      startTime: startTime !== undefined ? startTime : 0,
+      duration: duration !== undefined ? duration : null
     });
     
     res.json({ success: true, data: media });
@@ -1080,14 +1098,6 @@ app.get('/api/settings', async (req, res) => {
           apiKey: process.env.GEEKAI_API_KEY || '',
           docsUrl: 'https://geekai.co/docs',
           builtIn: true
-        },
-        {
-          id: 'siliconflow',
-          name: '硅基流动',
-          baseUrl: 'https://api.siliconflow.cn/v1',
-          apiKey: process.env.SILICONFLOW_API_KEY || '',
-          docsUrl: 'https://siliconflow.cn/docs',
-          builtIn: true
         }
       ];
       await db.settings.set('ai_platforms', settings.ai_platforms);
@@ -1095,10 +1105,12 @@ app.get('/api/settings', async (req, res) => {
     
     // 脱敏 ai_platforms 中的 apiKey
     if (settings.ai_platforms && Array.isArray(settings.ai_platforms)) {
-      settings.ai_platforms = settings.ai_platforms.map(p => ({
-        ...p,
-        apiKey: p.apiKey ? maskApiKey(p.apiKey) : ''
-      }));
+      settings.ai_platforms = settings.ai_platforms
+        .filter(p => p.id !== 'siliconflow')
+        .map(p => ({
+          ...p,
+          apiKey: p.apiKey ? maskApiKey(p.apiKey) : ''
+        }));
     }
     
     // 保留旧的脱敏逻辑（兼容）
@@ -1616,7 +1628,7 @@ async function deleteAiGeneratedByOwner(ownerType, ownerId) {
 // AI 视频分割
 app.post('/api/ai/split-video', async (req, res) => {
   try {
-    const { videoUrl, projectId, sceneId, mode, splitPoints, filterNonShots, autoAssignScenes } = req.body;
+    const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration } = req.body;
 
     if (!videoUrl) {
       return res.status(400).json({ success: false, message: '缺少 videoUrl' });
@@ -1637,8 +1649,7 @@ app.post('/api/ai/split-video', async (req, res) => {
       sceneId: sceneId !== undefined && sceneId !== null ? parseInt(sceneId) : null,
       mode,
       splitPoints: splitPoints || [],
-      filterNonShots: filterNonShots !== undefined ? !!filterNonShots : false,
-      autoAssignScenes: autoAssignScenes !== undefined ? !!autoAssignScenes : true
+      videoDuration: videoDuration || 0
     });
     
     res.json({ success: true, taskId: task.id });
@@ -1693,7 +1704,29 @@ async function processAnalyzeShot(taskId, mediaUrl, mediaType, provider, model) 
     await db.aiTasks.update(taskId, { status: 'processing', progress: 10 });
     const settings = await db.settings.getAll();
 
-    const result = await aiClient.analyzeShotImage(mediaUrl, mediaType, provider, model, settings);
+    let finalMediaUrl = mediaUrl;
+    let finalMediaType = mediaType;
+
+    if (isOSSConfigured && ossClient && mediaUrl) {
+      try {
+        const ossKey = extractOssKeyFromUrl(mediaUrl);
+        if (ossKey) {
+          if (mediaType === 'video') {
+            finalMediaUrl = ossClient.signatureUrl(ossKey, {
+              expires: 3600,
+              process: 'video/snapshot,t_1000,f_jpg,w_800,m_fast'
+            });
+            finalMediaType = 'image';
+          } else {
+            finalMediaUrl = ossClient.signatureUrl(ossKey, { expires: 3600 });
+          }
+        }
+      } catch (e) {
+        console.warn('[analyze-shot] OSS URL签名失败，使用原始URL:', e.message);
+      }
+    }
+
+    const result = await aiClient.analyzeShotImage(finalMediaUrl, finalMediaType, provider, model, settings);
 
     await db.aiTasks.update(taskId, {
       status: 'done',
@@ -2347,7 +2380,7 @@ async function processVideoSplitAIFrameMode(taskId, videoUrl, params) {
 
 async function processVideoSplitManual(taskId, videoUrl, params) {
   // 手动模式直接按分割点创建分镜（不实际切割视频，只是记录分割点）
-  const { splitPoints } = params;
+  const { splitPoints, videoDuration = 0 } = params;
   
   if (!splitPoints || splitPoints.length === 0) {
     await db.aiTasks.update(taskId, {
@@ -2357,29 +2390,30 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
     return;
   }
   
-  const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
-  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
-  let sceneMap = new Map();
-
-  if (enableAutoScenes && splitPoints.length > 0) {
-    sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
-  }
+  const defaultSceneId = params.sceneId || null;
   
-  const defaultSceneId = sceneMap.size > 0 ? sceneMap.values().next().value : params.sceneId;
+  // 过滤首尾帧附近的分割点（0.5秒阈值）
+  const EDGE_THRESHOLD = 0.5;
+  const sortedPoints = [...splitPoints]
+    .filter(p => p > EDGE_THRESHOLD && p < videoDuration - EDGE_THRESHOLD)
+    .sort((a, b) => a - b);
   
-  // 创建分镜记录（每个分割点作为一个分镜）
+  // 创建分镜记录（N个分割点生成N+1个分镜）
   const createdShots = [];
-  const sortedPoints = [...splitPoints].sort((a, b) => a - b);
   
-  for (let i = 0; i < sortedPoints.length; i++) {
-    const startTime = sortedPoints[i];
-    const endTime = sortedPoints[i + 1] || null;
+  const times = [0, ...sortedPoints, videoDuration || 0];
+  const segmentCount = times.length - 1;
+  
+  for (let i = 0; i < segmentCount; i++) {
+    const startTime = times[i];
+    const endTime = times[i + 1];
+    const segmentDuration = endTime - startTime;
     
     const shot = await db.items.createShot({
       projectId: params.projectId,
       sceneId: defaultSceneId,
       sceneContent: `镜头 ${i + 1}`,
-      notes: endTime ? `时间范围: ${startTime}s - ${endTime}s` : `起始时间: ${startTime}s`,
+      notes: `时间范围: ${startTime.toFixed(2)}s - ${endTime.toFixed(2)}s`,
       status: 'pending'
     });
     
@@ -2390,7 +2424,8 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
       type: 'video',
       filename: '',
       size: params.videoSize || 0,
-      duration: endTime ? endTime - startTime : null,
+      duration: segmentDuration,
+      startTime: startTime,
       sortOrder: 0,
       source: 'video_split'
     });
@@ -2398,17 +2433,17 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
     createdShots.push({ ...shot, media: [media] });
     
     await db.aiTasks.update(taskId, {
-      progress: Math.round(((i + 1) / sortedPoints.length) * 100)
+      progress: Math.round(((i + 1) / segmentCount) * 100)
     });
   }
   
   await db.aiTasks.update(taskId, {
     status: 'done',
     progress: 100,
-    output: { shots: createdShots, total: createdShots.length, scenesCreated: sceneMap.size }
+    output: { shots: createdShots, total: createdShots.length }
   });
   
-  console.log(`[AI] 手动视频分割完成: 生成了 ${createdShots.length} 个分镜，自动创建了 ${sceneMap.size} 个场次`);
+  console.log(`[AI] 手动视频分割完成: 生成了 ${createdShots.length} 个分镜`);
 }
 
 async function processVideoSplitAliyun(taskId, videoUrl, params, settings) {
@@ -2602,60 +2637,11 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
     output: { stage: 'creating_shots', shotsCount: shots.length }
   });
 
-  const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
-  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
-  const enableFilter = params.filterNonShots === true;
-  let defaultSceneId = params.sceneId;
-  let sceneMap = new Map();
-
-  // 自动划分场次：使用阿里云返回的主题片段名称
-  if (enableAutoScenes && shots.length > 0) {
-    if (themeSegments && themeSegments.length > 0) {
-      // 使用主题片段的 Theme 作为场次名
-      const sceneNames = themeSegments
-        .map(seg => (seg.theme || '').trim())
-        .filter(name => name.length > 0);
-      const uniqueNames = [...new Set(sceneNames)];
-      if (uniqueNames.length > 0) {
-        sceneMap = await autoAssignScenesByNames(params.projectId, uniqueNames, null);
-      } else {
-        sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
-      }
-    } else {
-      // 没有主题片段时，使用默认场次
-      sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
-    }
-    defaultSceneId = sceneMap.size > 0 ? sceneMap.values().next().value : params.sceneId;
-  }
-
-  /**
-   * 根据时间范围查找所属的主题片段
-   */
-  function findThemeForTime(startTime, endTime, themeSegments) {
-    if (!themeSegments || themeSegments.length === 0) {
-      return null;
-    }
-    for (const seg of themeSegments) {
-      if (startTime >= seg.beginTime && endTime <= seg.endTime) {
-        return seg;
-      }
-    }
-    return null;
-  }
-
-  // 滤除非实拍分镜：阿里云模式中，type === 'theme' 的主题片段可能是非实拍内容
-  let filteredShots = shots;
-  if (enableFilter) {
-    // 阿里云的 type='theme' 片段是主题分组，不一定是非实拍
-    // 这里不直接过滤 type='theme'，而是保留所有 shots
-    // 非实拍过滤在阿里云模式下需要额外的 LLM 调用，暂不支持
-    console.log('[AI] 阿里云模式暂不支持自动滤除非实拍分镜');
-  }
-
+  const defaultSceneId = params.sceneId || null;
   const createdShots = [];
 
   // 按 beginTime 升序排列
-  const sortedShots = [...filteredShots].sort((a, b) => (a.beginTime || 0) - (b.beginTime || 0));
+  const sortedShots = [...shots].sort((a, b) => (a.beginTime || 0) - (b.beginTime || 0));
 
   for (let i = 0; i < sortedShots.length; i++) {
     const shotInfo = sortedShots[i];
@@ -2666,36 +2652,17 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
     let sceneContent = '';
     let notes = `时间范围: ${formatTime(startTime)} - ${formatTime(endTime)}`;
 
-    // 确定场次 ID
-    let shotSceneId = defaultSceneId;
-    if (enableAutoScenes && themeSegments && themeSegments.length > 0) {
-      const theme = findThemeForTime(startTime, endTime, themeSegments);
-      if (theme && theme.theme) {
-        const sceneKey = theme.theme.toLowerCase();
-        if (sceneMap.has(sceneKey)) {
-          shotSceneId = sceneMap.get(sceneKey);
-        }
-      }
-    }
-
     if (shotInfo.type === 'theme' && shotInfo.theme) {
       sceneContent = shotInfo.theme;
       notes += `\n类型: 主题片段 - ${shotInfo.theme}`;
     } else {
       sceneContent = `镜头 ${i + 1}`;
       notes += `\n类型: 镜头转场`;
-
-      if (themeSegments && themeSegments.length > 0) {
-        const theme = findThemeForTime(startTime, endTime, themeSegments);
-        if (theme) {
-          notes += `\n所属主题: ${theme.theme || `主题 ${theme.index}`}`;
-        }
-      }
     }
 
     const shot = await db.items.createShot({
       projectId: params.projectId,
-      sceneId: shotSceneId,
+      sceneId: defaultSceneId,
       sceneContent: sceneContent,
       notes: notes,
       estimatedDuration: Math.round(duration).toString(),
@@ -2709,8 +2676,9 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
       filename: '',
       size: params.videoSize || 0,
       duration: duration,
+      startTime: startTime,
       sortOrder: 0,
-      source: 'video_split_aliyun'
+      source: 'video_split'
     });
 
     createdShots.push({ ...shot, media: [media] });
@@ -2726,63 +2694,24 @@ async function createShotsFromSplitPoints(taskId, videoUrl, shots, params, theme
     output: {
       shots: createdShots,
       total: createdShots.length,
-      provider: 'aliyun',
-      scenesCreated: autoAssignScene ? 1 : 0
+      provider: 'aliyun'
     }
   });
 }
 
 async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSize) {
-  const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
-  const enableAutoScenes = autoAssignScene && params.autoAssignScenes !== false;
-  const enableFilter = params.filterNonShots === true;
-
-  // 滤除非实拍分镜
-  let filteredShots = shots;
-  if (enableFilter) {
-    filteredShots = shots.filter(s => s.type !== 'non_shot');
-    if (filteredShots.length < shots.length) {
-      console.log(`[AI] 滤除了 ${shots.length - filteredShots.length} 个非实拍分镜`);
-    }
-  }
-
-  // 自动划分场次
-  let sceneMap = new Map();
-  if (enableAutoScenes && filteredShots.length > 0) {
-    // 收集 LLM 返回的场次名称
-    const sceneNames = filteredShots
-      .map(s => (s.scene || '').trim())
-      .filter(name => name.length > 0);
-    const uniqueNames = [...new Set(sceneNames)];
-    if (uniqueNames.length > 0) {
-      sceneMap = await autoAssignScenesByNames(params.projectId, uniqueNames, null);
-    } else {
-      // 没有场次名称时，使用默认场次
-      sceneMap = await autoAssignScenesByNames(params.projectId, ['视频分割'], null);
-    }
-  }
-
-  const defaultSceneId = sceneMap.size > 0 ? sceneMap.values().next().value : params.sceneId;
+  const defaultSceneId = params.sceneId || null;
   const createdShots = [];
 
-  for (let i = 0; i < filteredShots.length; i++) {
-    const shotInfo = filteredShots[i];
+  for (let i = 0; i < shots.length; i++) {
+    const shotInfo = shots[i];
     const startTime = shotInfo.startTime || shotInfo.beginTime || 0;
     const endTime = shotInfo.endTime || 0;
     const duration = endTime - startTime;
 
-    // 根据是否有场次信息决定 sceneId
-    let shotSceneId = defaultSceneId;
-    if (enableAutoScenes && shotInfo.scene) {
-      const sceneKey = shotInfo.scene.toLowerCase();
-      if (sceneMap.has(sceneKey)) {
-        shotSceneId = sceneMap.get(sceneKey);
-      }
-    }
-
     const shot = await db.items.createShot({
       projectId: params.projectId,
-      sceneId: shotSceneId,
+      sceneId: defaultSceneId,
       sceneContent: `镜头 ${i + 1}（AI 自动分割）`,
       notes: `时间范围: ${formatTime(startTime)} - ${formatTime(endTime)}`,
       estimatedDuration: Math.round(duration).toString(),
@@ -2796,14 +2725,15 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
       filename: '',
       size: videoSize || 0,
       duration: duration,
+      startTime: startTime,
       sortOrder: 0,
-      source: 'video_split_ai'
+      source: 'video_split'
     });
 
     createdShots.push({ ...shot, media: [media] });
 
     await db.aiTasks.update(taskId, {
-      progress: 80 + Math.round(((i + 1) / filteredShots.length) * 20)
+      progress: 80 + Math.round(((i + 1) / shots.length) * 20)
     });
   }
 
@@ -2813,9 +2743,7 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
     output: {
       shots: createdShots,
       total: createdShots.length,
-      provider: 'ai_frame',
-      scenesCreated: sceneMap.size,
-      filteredOut: shots.length - filteredShots.length
+      provider: 'ai_frame'
     }
   });
 }
@@ -3589,7 +3517,7 @@ app.get('/api/projects/:id/export', async (req, res) => {
           const shot = sceneShots[i];
           worksheet.addRow({
             scene: i === 0 ? sceneName : '',
-            index: shot.shotIndex || (i + 1),
+            index: i + 1,
             shotNo: shot.shotNo || '',
             sceneContent: shot.sceneContent || shot.title || '',
             shotType: shot.shotType || '',
@@ -3653,8 +3581,9 @@ app.get('/api/projects/:id/export', async (req, res) => {
           doc.moveDown();
         }
 
-        for (const shot of sceneShots) {
-          doc.fontSize(13).fillColor('#111').text(`分镜 #${shot.shotIndex || ''} ${shot.sceneContent || shot.title || ''}`);
+        for (let i = 0; i < sceneShots.length; i++) {
+          const shot = sceneShots[i];
+          doc.fontSize(13).fillColor('#111').text(`分镜 #${i + 1} ${shot.sceneContent || shot.title || ''}`);
           doc.moveDown(0.3);
 
           const details = [
@@ -3738,9 +3667,10 @@ app.get('/api/projects/:id/export', async (req, res) => {
       }
       
       // 分镜表格
-      for (const shot of sceneShots) {
+      for (let i = 0; i < sceneShots.length; i++) {
+        const shot = sceneShots[i];
         children.push(new Paragraph({
-          text: `分镜 #${shot.shotIndex || ''} ${shot.sceneContent || shot.title || ''}`,
+          text: `分镜 #${i + 1} ${shot.sceneContent || shot.title || ''}`,
           heading: HeadingLevel.HEADING_2,
           spacing: { before: 200, after: 100 }
         }));
@@ -4061,7 +3991,6 @@ async function batchUpdateShots(req, res) {
     res.status(500).json({ success: false, message: error.message });
   }
 }
-app.put('/api/shots/batch-update', batchUpdateShots);
 
 // ==================== Projects API ====================
 
@@ -4511,8 +4440,21 @@ app.post('/api/projects/:projectId/assets/:assetId/images', async (req, res) => 
       return res.status(400).json({ success: false, message: '数字资产不属于该项目' });
     }
 
-    const image = await db.digitalAssets.addImage(assetId, imageUrl.trim(), size || 0);
-    console.log(`[app] 新增数字资产图片: assetId=${assetId}, size=${size || 0}`);
+    // 兜底：如果 size 为 0 或未传入，且 URL 是 OSS URL，自动从 OSS 获取文件大小
+    let finalSize = size || 0;
+    if (!finalSize && imageUrl && imageUrl.startsWith('http') && isOSSConfigured && ossClient) {
+      try {
+        finalSize = await getOssFileSize(imageUrl);
+        if (finalSize > 0) {
+          console.log(`[digital-asset] 自动获取 OSS 文件大小: ${imageUrl} → ${finalSize} bytes`);
+        }
+      } catch (e) {
+        console.warn('[digital-asset] 获取 OSS 文件大小失败:', imageUrl, e.message);
+      }
+    }
+
+    const image = await db.digitalAssets.addImage(assetId, imageUrl.trim(), finalSize);
+    console.log(`[app] 新增数字资产图片: assetId=${assetId}, size=${finalSize}`);
     res.json({ success: true, data: image });
   } catch (error) {
     console.error('[app] 新增数字资产图片失败:', error.message);
@@ -5105,6 +5047,104 @@ app.get('/api/oss-sign-urls', async (req, res) => {
   } catch (error) {
     console.error('[oss-sign-urls] 批量签名失败:', error.message);
     res.status(500).json({ error: '批量签名失败: ' + error.message });
+  }
+});
+
+// OSS 视频截图代理接口：避免浏览器 ORB 拦截
+app.get('/api/oss-snapshot', async (req, res) => {
+  try {
+    const { url, t, w } = req.query;
+    if (!url) {
+      return res.status(400).json({ error: '缺少 url 参数' });
+    }
+    if (!isOSSConfigured || !ossClient) {
+      return res.status(400).json({ error: 'OSS 未配置' });
+    }
+    const rawUrl = String(url);
+    if (!rawUrl.includes('aliyuncs.com') && !rawUrl.includes('qiziwenhua.top')) {
+      return res.status(400).json({ error: '仅支持 OSS URL' });
+    }
+
+    // 从 URL 中提取 OSS key
+    let ossKey = '';
+    const match = rawUrl.match(/^https?:\/\/([^.]+)\.oss-[^.]+\.aliyuncs\.com\/([^?]+)(\?.*)?$/);
+    if (match) {
+      ossKey = decodeURIComponent(match[2]);
+    } else {
+      try {
+        const urlObj = new URL(rawUrl);
+        ossKey = decodeURIComponent(urlObj.pathname.replace(/^\//, ''));
+      } catch (e) {
+        return res.status(400).json({ error: '无法解析 OSS key' });
+      }
+    }
+    if (!ossKey) {
+      return res.status(400).json({ error: '无法获取 OSS key' });
+    }
+
+    const time = t ? String(t) : '1000';
+    const width = w ? String(w) : '160';
+
+    // 截图持久化缓存：首次截图后保存到 OSS，后续直接读取，避免重复收取视频截帧处理费
+    // 截图保存路径：与源视频同项目下 thumbnails/ 目录
+    let projectIdFromKey = '';
+    const projMatch = ossKey.match(/^projects\/(\d+)\//);
+    if (projMatch) projectIdFromKey = projMatch[1];
+    const thumbnailDir = projectIdFromKey
+      ? `projects/${projectIdFromKey}/thumbnails`
+      : 'thumbnails';
+    const thumbnailKey = `${thumbnailDir}/${crypto.createHash('md5').update(ossKey + '_' + time + '_' + width).digest('hex')}.jpg`;
+
+    // 先检查截图缓存是否已存在
+    let cacheExists = false;
+    try {
+      await ossClient.head(thumbnailKey);
+      cacheExists = true;
+    } catch (headErr) {
+      if (headErr.code !== 'NoSuchKey' && headErr.status !== 404) {
+        console.warn('[oss-snapshot] 检查缓存失败，将重新生成截图:', headErr.message);
+      }
+    }
+
+    if (cacheExists) {
+      // 缓存命中：直接读取已保存的截图，仅产生 GET 请求费和流量费，不产生视频截帧处理费
+      const cachedSignedUrl = ossClient.signatureUrl(thumbnailKey, { expires: 3600 });
+      const response = await fetch(cachedSignedUrl);
+      if (response.ok) {
+        const buffer = Buffer.from(await response.arrayBuffer());
+        res.set('Content-Type', 'image/jpeg');
+        res.set('Cache-Control', 'public, max-age=86400');
+        return res.send(buffer);
+      }
+      // 读取失败则回退到重新生成
+      console.warn('[oss-snapshot] 缓存读取失败，重新生成截图');
+    }
+
+    // 缓存未命中或读取失败：调用 OSS 视频截帧
+    const process = `video/snapshot,t_${time},f_jpg,w_${width},m_fast`;
+    const signedUrl = ossClient.signatureUrl(ossKey, {
+      expires: 3600,
+      process
+    });
+
+    const response = await fetch(signedUrl);
+    if (!response.ok) {
+      console.error('[oss-snapshot] OSS 返回错误:', response.status, response.statusText);
+      return res.status(response.status).send('截图失败');
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    // 异步保存截图到 OSS（不阻塞响应）
+    ossClient.put(thumbnailKey, buffer).catch(putErr => {
+      console.warn('[oss-snapshot] 保存截图缓存失败:', putErr.message);
+    });
+
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (error) {
+    console.error('[oss-snapshot] 失败:', error.message);
+    res.status(500).send('截图失败');
   }
 });
 

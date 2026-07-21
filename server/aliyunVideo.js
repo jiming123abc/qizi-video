@@ -86,6 +86,20 @@ async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT
 
   const url = `${endpoint}?${queryString}`;
 
+  // 打印调试日志（敏感信息脱敏）
+  if (endpoint === MPS_ENDPOINT) {
+    const maskedParams = { ...finalParams };
+    if (maskedParams.AccessKeyId) {
+      maskedParams.AccessKeyId = maskedParams.AccessKeyId.substring(0, 4) + '***';
+    }
+    if (maskedParams.Signature) {
+      maskedParams.Signature = '***';
+    }
+    console.log('[MPS] 调用 API:', action);
+    console.log('[MPS] 请求参数（脱敏）:', JSON.stringify(maskedParams, null, 2));
+    console.log('[MPS] URL 长度:', url.length);
+  }
+
   try {
     const response = await fetch(url, {
       method: 'GET',
@@ -354,6 +368,7 @@ async function submitTranscodeTask(videoUrl, options = {}) {
 
   // 构建转码配置（JSON 格式）
   // P3-5：移除无效的 Inputs 字段（实际 Input 通过 params.Input 单独传递）
+  // 注意：所有数值参数必须转为字符串，Codec 使用小写，与 MPS API 文档一致
   const transcodingConfig = {
     Outputs: [{
       OutputObject: outputObject,
@@ -362,21 +377,21 @@ async function submitTranscodeTask(videoUrl, options = {}) {
       },
       Video: {
         Codec: 'H.264',
-        Bitrate: targetBitrate,
+        Bitrate: String(targetBitrate),
         // 与浏览器端压缩参数对齐（ABR 模式，无 CRF）：实际码率尽量接近目标码率
         Maxrate: String(targetBitrate),
         Bufsize: String(targetBitrate * 2),
-        Width: options.width || 1280,
-        Height: options.height || 720,
-        Fps: 30,
+        Width: String(options.width || 1280),
+        Height: String(options.height || 720),
+        Fps: String(30),
         Profile: 'High',
         Level: '4.1'
       },
       Audio: {
-        Codec: 'AAC',
-        Bitrate: 128,
-        SampleRate: 44100,
-        Channels: 2
+        Codec: 'aac',
+        Bitrate: String(128),
+        SampleRate: String(44100),
+        Channels: String(2)
       }
     }],
     PipelineId: options.pipelineId || creds.mpsPipelineId || ''
@@ -396,27 +411,35 @@ async function submitTranscodeTask(videoUrl, options = {}) {
     Input: JSON.stringify({
       Location: ossConfig.location,
       Bucket: ossConfig.bucket,
-      Object: inputObject
+      Object: percentEncode(inputObject)
     }),
     OutputBucket: ossConfig.bucket,
     OutputLocation: ossConfig.location,
-    Outputs: JSON.stringify(transcodingConfig.Outputs),
+    Outputs: JSON.stringify(transcodingConfig.Outputs.map(o => ({
+      ...o,
+      OutputObject: percentEncode(o.OutputObject)
+    }))),
     PipelineId: transcodingConfig.PipelineId || ''
   };
 
   try {
-    console.log('[MPS] 提交转码任务参数:', JSON.stringify({
-      inputLocation: ossConfig.location,
-      inputBucket: ossConfig.bucket,
-      inputObject,
-      outputBucket: ossConfig.bucket,
-      outputLocation: ossConfig.location,
-      outputObject,
-      pipelineId: transcodingConfig.PipelineId,
-      targetBitrate,
-      mpsEndpoint: MPS_ENDPOINT,
-      mpsRegion: MPS_REGION
+    console.log('[MPS] ========== 提交转码任务 ==========');
+    console.log('[MPS] Input（JSON 内部 Object 已编码）:', JSON.stringify({
+      Location: ossConfig.location,
+      Bucket: ossConfig.bucket,
+      Object: percentEncode(inputObject)
     }));
+    console.log('[MPS] Outputs（JSON 内部 OutputObject 已编码）:', JSON.stringify(transcodingConfig.Outputs.map(o => ({
+      ...o,
+      OutputObject: percentEncode(o.OutputObject)
+    }))));
+    console.log('[MPS] 原始 inputObject:', inputObject);
+    console.log('[MPS] 原始 outputObject:', outputObject);
+    console.log('[MPS] 编码后 inputObject:', percentEncode(inputObject));
+    console.log('[MPS] 编码后 outputObject:', percentEncode(outputObject));
+    console.log('[MPS] PipelineId:', transcodingConfig.PipelineId);
+    console.log('[MPS] MPS Endpoint:', MPS_ENDPOINT);
+    console.log('[MPS] ================================');
 
     const result = await callAliyunApi('SubmitJobs', params, MPS_ENDPOINT);
 
@@ -463,6 +486,8 @@ async function getTranscodeResult(jobId) {
   try {
     const result = await callAliyunApi('QueryJobList', params, MPS_ENDPOINT);
 
+    console.log('[MPS] QueryJobList 原始响应:', JSON.stringify(result));
+
     if (result.JobList && result.JobList.Job) {
       const job = result.JobList.Job[0];
 
@@ -486,16 +511,21 @@ async function getTranscodeResult(jobId) {
         // MPS QueryJobList 返回的输出文件信息在 Output.OutputFile 下（含 Object/Bucket/Location）
         const outputFile = output.OutputFile || {};
         const outputObject = outputFile.Object;
+        console.log('[MPS] 转码成功，OutputFile:', JSON.stringify(outputFile));
+        console.log('[MPS] outputObject (原始):', outputObject);
         if (outputObject) {
           // 优先使用 OutputFile 中返回的 Bucket/Location 构造 URL（跨区域转码场景更准确）
           const outBucket = outputFile.Bucket || ossConfig.bucket;
           const outLocation = outputFile.Location || ossConfig.location;
           outputUrl = `https://${outBucket}.${outLocation}.aliyuncs.com/${outputObject}`;
+          console.log('[MPS] 构造的 outputUrl:', outputUrl);
         }
       }
 
       if (job.State === 'TranscodeFail') {
         error = job.Code ? `${job.Code}: ${job.Message}` : '转码失败';
+        console.error('[MPS] 转码失败:', error);
+        console.error('[MPS] 失败详情 Job:', JSON.stringify(job));
       }
 
       return {

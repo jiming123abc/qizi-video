@@ -1,16 +1,18 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload, Video } from 'lucide-react';
-import { checkVideoBitrate, uploadVideo } from '../../lib/ossUtils';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload, Video, ZoomIn, ZoomOut, Maximize2, Scissors, Sparkles, ChevronDown, ArrowLeft } from 'lucide-react';
+import { checkVideoBitrate, uploadVideo, getVideoPoster } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { VideoCompressionDialog } from './VideoCompressionDialog';
 import type { SplitShot } from '../../lib/types';
 import type { AiTaskUpdate } from '../../lib/taskStream';
+import { useSignedUrl } from '../../hooks/useSignedUrl';
 
 interface UploadedVideo {
   id: string;
   url: string;
   name: string;
   thumbnail?: string;
+  isFromShot?: boolean;
 }
 
 interface VideoSplitDialogProps {
@@ -23,10 +25,12 @@ interface VideoSplitDialogProps {
   onSplit?: (shots: SplitShot[], videoUrl: string) => void;
   onVideoUpload?: (file: File) => Promise<string>;
   maxUploads?: number;
+  source?: 'global' | 'shot';
+  shotId?: number | null;
 }
 
 type SplitMode = 'manual' | 'ai_frame' | 'aliyun';
-type DialogState = 'initial' | 'processing' | 'completed';
+type DialogState = 'initial' | 'processing' | 'preview' | 'completed';
 
 interface SplitPoint {
   id: string;
@@ -68,6 +72,14 @@ function generateId(): string {
   return Math.random().toString(36).substring(2, 9);
 }
 
+function getVideoThumbnail(url: string): string {
+  if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
+    // 使用后端代理，避免前端直接请求 OSS 截图触发 ORB
+    return `/api/oss-snapshot?url=${encodeURIComponent(url)}&t=1000&w=160`;
+  }
+  return '';
+}
+
 export default function VideoSplitDialog({
   isOpen,
   onClose,
@@ -77,8 +89,11 @@ export default function VideoSplitDialog({
   sceneId,
   onSplit,
   onVideoUpload,
-  maxUploads = 5
+  maxUploads = 10,
+  source = 'global',
+  shotId = null
 }: VideoSplitDialogProps) {
+  const isShotMode = source === 'shot';
   const [mode, setMode] = useState<SplitMode>('manual');
   const [state, setState] = useState<DialogState>('initial');
   const [progress, setProgress] = useState(0);
@@ -90,6 +105,14 @@ export default function VideoSplitDialog({
   const [taskId, setTaskId] = useState<string | null>(null);
   const [shotThumbnails, setShotThumbnails] = useState<Record<string, string>>({});
   const [generatingThumbs, setGeneratingThumbs] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
@@ -101,14 +124,128 @@ export default function VideoSplitDialog({
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [draggingPoint, setDraggingPoint] = useState<string | null>(null);
+  const dragStartPointRef = useRef<number>(0);
+  const [selectedSplitPoint, setSelectedSplitPoint] = useState<string | null>(null);
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
   const [aiMode, setAiMode] = useState<'ai_frame' | 'aliyun'>('ai_frame');
+  const [zoom, setZoom] = useState(1);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const PIXELS_PER_SECOND = 50;
+  const EDGE_MARGIN = 0.2;
+  const MIN_SPLIT_INTERVAL = 0.2;
+  const initialZoomSetRef = useRef(false);
+  // 分割结果预览
+  const [previewShots, setPreviewShots] = useState<SplitShot[]>([]);
+  const [playingPreviewIndex, setPlayingPreviewIndex] = useState<number | null>(null);
+  // AI 辅助分析入口展开状态
+  const [showAIMode, setShowAIMode] = useState(false);
+  // 确认创建分镜对话框
+  const [confirmDialog, setConfirmDialog] = useState(false);
+
+  const timelineWidth = useMemo(() => {
+    return videoDuration * PIXELS_PER_SECOND * zoom;
+  }, [videoDuration, zoom]);
+
+  const ticks = useMemo(() => {
+    if (!videoDuration || videoDuration === 0) return [];
+
+    const pixelsPerSecond = PIXELS_PER_SECOND * zoom;
+    const minTickSpacing = 40;
+
+    let majorInterval = 1;
+    const intervals = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    for (const interval of intervals) {
+      if (interval * pixelsPerSecond >= minTickSpacing) {
+        majorInterval = interval;
+        break;
+      }
+    }
+
+    const result: { time: number; isMajor: boolean; label: string }[] = [];
+    const minorCount = majorInterval >= 1 ? 5 : (majorInterval >= 0.5 ? 5 : 2);
+    const minorInterval = majorInterval / minorCount;
+
+    const lastTime = videoDuration;
+    let t = 0;
+    const usedLabels = new Set<string>();
+
+    while (t <= lastTime + 0.001) {
+      const clamped = Math.min(t, lastTime);
+      // 使用更鲁棒的比较，避免浮点累计误差
+      const isMajor = Math.abs(t / majorInterval - Math.round(t / majorInterval)) < 0.01;
+      
+      let label = '';
+      if (isMajor) {
+        const formatted = formatTime(clamped);
+        if (!usedLabels.has(formatted)) {
+          label = formatted;
+          usedLabels.add(formatted);
+        }
+      }
+
+      result.push({
+        time: clamped,
+        isMajor,
+        label
+      });
+
+      if (clamped >= lastTime) break;
+      t += minorInterval;
+    }
+
+    return result;
+  }, [videoDuration, zoom]);
+
+  const handleZoomIn = () => {
+    setZoom(prev => Math.min(prev * 1.5, 10));
+  };
+
+  const handleZoomOut = () => {
+    setZoom(prev => Math.max(prev / 1.5, 0.2));
+  };
+
+  const handleZoomReset = () => {
+    setZoom(1);
+    if (timelineScrollRef.current) {
+      timelineScrollRef.current.scrollLeft = 0;
+    }
+  };
+
+  const handleTimelineWheel = useCallback((e: React.WheelEvent) => {
+    if (!timelineScrollRef.current || !videoDuration) return;
+    e.preventDefault();
+
+    const delta = e.deltaY > 0 ? 0.85 : 1.15;
+    const newZoom = Math.max(0.2, Math.min(10, zoom * delta));
+    if (newZoom === zoom) return;
+
+    const rect = timelineScrollRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const scrollLeft = timelineScrollRef.current.scrollLeft;
+    const mouseTime = (scrollLeft + mouseX) / (PIXELS_PER_SECOND * zoom);
+
+    setZoom(newZoom);
+
+    requestAnimationFrame(() => {
+      if (timelineScrollRef.current) {
+        const newScrollLeft = mouseTime * PIXELS_PER_SECOND * newZoom - mouseX;
+        timelineScrollRef.current.scrollLeft = Math.max(0, newScrollLeft);
+      }
+    });
+  }, [zoom, videoDuration]);
 
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState('');
+
+  useEffect(() => {
+    initialZoomSetRef.current = false;
+    setVideoDuration(0);
+    setCurrentTime(0);
+  }, [selectedVideoId]);
+
   const [currentUploadIndex, setCurrentUploadIndex] = useState(0);
   const [totalUploadCount, setTotalUploadCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -118,12 +255,10 @@ export default function VideoSplitDialog({
   const pendingUploadRef = useRef<{ file: File; queue?: File[] } | null>(null);
   const pendingCompressionVideoRef = useRef<File | null>(null);
 
-  // 视频分割增强选项
-  const [filterNonShots, setFilterNonShots] = useState(true);
-  const [autoAssignScenes, setAutoAssignScenes] = useState(true);
-
   const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
-  const currentVideoUrl = currentVideo?.url || '';
+  const currentVideoRawUrl = currentVideo?.url || '';
+  const { url: signedVideoUrl } = useSignedUrl(currentVideoRawUrl);
+  const currentVideoUrl = signedVideoUrl;
 
   useEffect(() => {
     fetch('/api/aliyun/status')
@@ -139,30 +274,167 @@ export default function VideoSplitDialog({
   useEffect(() => {
     if (!isOpen) return;
 
-    if (initialVideos && initialVideos.length > 0) {
-      setUploadedVideos(initialVideos);
-      setSelectedVideoId(initialVideos[0].id);
-    } else if (initialVideoUrl) {
-      const video: UploadedVideo = {
-        id: generateId(),
-        url: initialVideoUrl,
-        name: '视频'
-      };
-      setUploadedVideos([video]);
-      setSelectedVideoId(video.id);
+    // 重新打开时重置主动关闭标记
+    userClosedRef.current = false;
+
+    if (!isShotMode) {
+      // global 模式：从 sessionStorage 恢复全部状态（含 uploadedVideos）
+      const cacheKey = `videoSplitCache_global_${projectId}_${sceneId ?? 'null'}`;
+      let restored = false;
+      try {
+        const cached = sessionStorage.getItem(cacheKey);
+        if (cached) {
+          const data = JSON.parse(cached);
+          if (data.uploadedVideos && Array.isArray(data.uploadedVideos) && data.uploadedVideos.length > 0) {
+            // 缩略图（dataURL）过大且为上传时本地生成，关闭后失效；仅保留 url/name
+            setUploadedVideos(data.uploadedVideos.map((v: any) => ({
+              id: v.id,
+              url: v.url,
+              name: v.name,
+              isFromShot: v.isFromShot
+            })));
+            setSelectedVideoId(data.selectedVideoId || (data.uploadedVideos[0]?.id ?? null));
+            if (data.splitPoints && Array.isArray(data.splitPoints)) setSplitPoints(data.splitPoints);
+            if (data.mode) setMode(data.mode);
+            if (data.zoom !== undefined) setZoom(data.zoom);
+            // 恢复 preview 状态相关
+            if (data.previewShots && Array.isArray(data.previewShots)) setPreviewShots(data.previewShots);
+            if (typeof data.showAIMode === 'boolean') setShowAIMode(data.showAIMode);
+            // 如果有 previewShots，恢复到 preview 状态；否则恢复到 initial
+            setState(data.previewShots && data.previewShots.length > 0 ? 'preview' : 'initial');
+            restored = true;
+          }
+        }
+      } catch (_) { /* 忽略反序列化错误 */ }
+
+      if (!restored) {
+        if (initialVideos && initialVideos.length > 0) {
+          setUploadedVideos(initialVideos);
+          setSelectedVideoId(initialVideos[0].id);
+        } else if (initialVideoUrl) {
+          const video: UploadedVideo = {
+            id: generateId(),
+            url: initialVideoUrl,
+            name: '视频'
+          };
+          setUploadedVideos([video]);
+          setSelectedVideoId(video.id);
+        } else {
+          setUploadedVideos([]);
+          setSelectedVideoId(null);
+        }
+        resetSplitState();
+        setPreviewShots([]);
+        setShowAIMode(false);
+      }
     } else {
-      setUploadedVideos([]);
-      setSelectedVideoId(null);
+      // shot 模式：视频列表始终从 initialVideos 初始化，但分割点等状态从缓存（按 shotId）恢复
+      const videos = (initialVideos && initialVideos.length > 0) ? initialVideos : [];
+      setUploadedVideos(videos);
+
+      let restored = false;
+      if (shotId != null) {
+        const cacheKey = `videoSplitCache_shot_${shotId}`;
+        try {
+          const cached = sessionStorage.getItem(cacheKey);
+          if (cached) {
+            const data = JSON.parse(cached);
+            // 恢复选中的视频（用 url 匹配，因为 id 是稳定的 shot_media id）
+            const cachedSelectedUrl = data.selectedVideoUrl;
+            const matchedVideo = cachedSelectedUrl
+              ? videos.find(v => v.url === cachedSelectedUrl)
+              : null;
+            setSelectedVideoId(matchedVideo ? matchedVideo.id : (videos[0]?.id ?? null));
+            if (data.splitPoints && Array.isArray(data.splitPoints)) setSplitPoints(data.splitPoints);
+            else setSplitPoints([]);
+            if (data.mode) setMode(data.mode);
+            else setMode('manual');
+            if (data.zoom !== undefined) setZoom(data.zoom);
+            else setZoom(1);
+            if (data.previewShots && Array.isArray(data.previewShots)) setPreviewShots(data.previewShots);
+            else setPreviewShots([]);
+            if (typeof data.showAIMode === 'boolean') setShowAIMode(data.showAIMode);
+            else setShowAIMode(false);
+            setState(data.previewShots && data.previewShots.length > 0 ? 'preview' : 'initial');
+            restored = true;
+          }
+        } catch (_) { /* 忽略反序列化错误 */ }
+      }
+
+      if (!restored) {
+        setSelectedVideoId(videos[0]?.id ?? null);
+        resetSplitState();
+        setPreviewShots([]);
+        setShowAIMode(false);
+      }
     }
-    resetSplitState();
-  }, [isOpen, initialVideos, initialVideoUrl]);
+  }, [isOpen, initialVideos, initialVideoUrl, projectId, sceneId, isShotMode, shotId]);
+
+  // 状态变化时写入 sessionStorage
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!isShotMode) {
+      // global 模式：缓存全部状态
+      const cacheKey = `videoSplitCache_global_${projectId}_${sceneId ?? 'null'}`;
+      try {
+        const data = {
+          uploadedVideos: uploadedVideos.map(v => ({
+            id: v.id,
+            url: v.url,
+            name: v.name,
+            isFromShot: v.isFromShot
+          })),
+          selectedVideoId,
+          splitPoints,
+          mode,
+          zoom,
+          previewShots,
+          showAIMode
+        };
+        sessionStorage.setItem(cacheKey, JSON.stringify(data));
+      } catch (_) { /* 忽略写入错误（可能存储空间已满） */ }
+    } else if (shotId != null) {
+      // shot 模式：缓存分割点等状态（不缓存 uploadedVideos，每次从分镜重新传入）
+      const cacheKey = `videoSplitCache_shot_${shotId}`;
+      const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
+      try {
+        const data = {
+          selectedVideoUrl: currentVideo?.url || null,
+          splitPoints,
+          mode,
+          zoom,
+          previewShots,
+          showAIMode
+        };
+        sessionStorage.setItem(cacheKey, JSON.stringify(data));
+      } catch (_) { /* 忽略写入错误 */ }
+    }
+  }, [isOpen, uploadedVideos, selectedVideoId, splitPoints, mode, zoom, previewShots, showAIMode, projectId, sceneId, isShotMode, shotId]);
+
+  const clearSplitCache = useCallback(() => {
+    if (!isShotMode) {
+      const cacheKey = `videoSplitCache_global_${projectId}_${sceneId ?? 'null'}`;
+      try {
+        sessionStorage.removeItem(cacheKey);
+      } catch (_) { /* 忽略 */ }
+    } else if (shotId != null) {
+      const cacheKey = `videoSplitCache_shot_${shotId}`;
+      try {
+        sessionStorage.removeItem(cacheKey);
+      } catch (_) { /* 忽略 */ }
+    }
+  }, [projectId, sceneId, isShotMode, shotId]);
 
   // P2-11：对话框关闭时清理未被分割使用的孤儿视频（已被 shot_media 引用的不删）
+  // 改进：仅在用户主动关闭（取消/应用）时清理；意外关闭（X/ESC/点遮罩）保留视频和缓存
+  // shot 模式不涉及 OSS 清理（视频属于分镜）
+  const userClosedRef = useRef(false);
   const prevIsOpenRef = useRef(false);
   useEffect(() => {
     // 检测 isOpen 从 true → false 的变化
-    if (prevIsOpenRef.current && !isOpen && uploadedVideos.length > 0) {
+    if (prevIsOpenRef.current && !isOpen && uploadedVideos.length > 0 && userClosedRef.current && !isShotMode) {
       const urlsToClean = uploadedVideos
+        .filter(v => !v.isFromShot)
         .map(v => v.url)
         .filter(u => u && u.startsWith('http'));
       // 使用 keepalive 确保页面卸载/导航时也能发请求
@@ -181,7 +453,54 @@ export default function VideoSplitDialog({
       setSelectedVideoId(null);
     }
     prevIsOpenRef.current = isOpen;
-  }, [isOpen, uploadedVideos]);
+  }, [isOpen, uploadedVideos, isShotMode]);
+
+  // 重写 handleUserCancel 以标记主动关闭
+  const handleUserCancelMarked = () => {
+    userClosedRef.current = true;
+    clearSplitCache();
+    onClose();
+  };
+
+  // 重写 handleConfirm 以标记主动关闭
+  const handleConfirmMarked = () => {
+    // 进入预览状态：弹出确认对话框
+    setConfirmDialog(true);
+  };
+
+  // 确认创建分镜：使用 previewShots 而非 splitPoints
+  const confirmCreate = () => {
+    userClosedRef.current = true;
+    if (onSplit && currentVideoRawUrl) {
+      // 重新计算索引，防止用户删除后索引不连续
+      const shotsToCreate = previewShots.map((s, i) => ({
+        startTime: s.startTime,
+        endTime: s.endTime,
+        index: i
+      }));
+      onSplit(shotsToCreate, currentVideoRawUrl);
+    }
+    setConfirmDialog(false);
+    clearSplitCache();
+    onClose();
+  };
+
+  // 从预览列表中删除指定镜头
+  const removePreviewShot = (index: number) => {
+    if (playingPreviewIndex === index) {
+      setPlayingPreviewIndex(null);
+    } else if (playingPreviewIndex !== null && playingPreviewIndex > index) {
+      setPlayingPreviewIndex(playingPreviewIndex - 1);
+    }
+    setPreviewShots(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // 从预览状态返回手动调整（保留 splitPoints，丢弃 previewShots）
+  const backToManualFromPreview = () => {
+    setPlayingPreviewIndex(null);
+    setState('initial');
+    setPreviewShots([]);
+  };
 
   const generateVideoThumbnail = (file: File): Promise<string> => {
     return new Promise((resolve) => {
@@ -189,11 +508,24 @@ export default function VideoSplitDialog({
       video.preload = 'metadata';
       video.muted = true;
       video.playsInline = true;
-      video.src = URL.createObjectURL(file);
+      const blobUrl = URL.createObjectURL(file);
+      let settled = false;
+
+      const cleanup = () => {
+        // 延迟清理，避免浏览器报 ERR_ABORTED
+        setTimeout(() => {
+          video.removeAttribute('src');
+          video.load();
+          URL.revokeObjectURL(blobUrl);
+        }, 0);
+      };
+
       video.onloadeddata = () => {
         video.currentTime = 0.1;
       };
       video.onseeked = () => {
+        if (settled) return;
+        settled = true;
         try {
           const canvas = document.createElement('canvas');
           canvas.width = 160;
@@ -208,12 +540,16 @@ export default function VideoSplitDialog({
         } catch {
           resolve('');
         } finally {
-          URL.revokeObjectURL(video.src);
+          cleanup();
         }
       };
       video.onerror = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve('');
       };
+      video.src = blobUrl;
     });
   };
 
@@ -389,8 +725,45 @@ export default function VideoSplitDialog({
 
   const handleSelectVideo = (videoId: string) => {
     if (videoId === selectedVideoId) return;
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
+    if (thumbVideoRef.current) {
+      thumbVideoRef.current.pause();
+      thumbVideoRef.current.removeAttribute('src');
+      thumbVideoRef.current.load();
+    }
     setSelectedVideoId(videoId);
     resetSplitState();
+  };
+
+  // 删除已上传视频（仅 global 模式）：调用后端删除 OSS 文件并从列表移除
+  const handleDeleteVideo = (videoId: string) => {
+    const video = uploadedVideos.find(v => v.id === videoId);
+    if (!video) return;
+    // 调用后端删除 OSS 孤儿文件
+    if (video.url && video.url.startsWith('http')) {
+      try {
+        fetch('/api/upload/orphan', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: video.url }),
+          keepalive: true
+        }).catch(() => {});
+      } catch { /* 忽略 */ }
+    }
+    const remaining = uploadedVideos.filter(v => v.id !== videoId);
+    setUploadedVideos(remaining);
+    // 若删除的是当前选中视频，切换到第一个
+    if (selectedVideoId === videoId) {
+      if (remaining.length > 0) {
+        setSelectedVideoId(remaining[0].id);
+        resetSplitState();
+      } else {
+        setSelectedVideoId(null);
+        resetSplitState();
+      }
+    }
   };
 
   const resetSplitState = useCallback(() => {
@@ -431,7 +804,25 @@ export default function VideoSplitDialog({
 
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setVideoDuration(videoRef.current.duration);
+      const duration = videoRef.current.duration;
+      setVideoDuration(duration);
+      // 视频时长就绪时计算初始缩放，确保时间轴初始就显示整个时间轴
+      if (!initialZoomSetRef.current) {
+        // 使用 setTimeout 确保 DOM 完全渲染后再计算
+        setTimeout(() => {
+          if (initialZoomSetRef.current || !timelineScrollRef.current) return;
+          const rect = timelineScrollRef.current.getBoundingClientRect();
+          const containerWidth = rect.width;
+          if (containerWidth <= 0) return;
+          const targetWidth = duration * PIXELS_PER_SECOND;
+          // 计算缩放比例，让时间轴完全填充容器
+          if (targetWidth > 0) {
+            const newZoom = Math.min(1, containerWidth / targetWidth);
+            setZoom(Math.max(0.2, newZoom));
+          }
+          initialZoomSetRef.current = true;
+        }, 50);
+      }
     }
   };
 
@@ -448,6 +839,14 @@ export default function VideoSplitDialog({
     }
   };
 
+  const togglePreviewPlay = (index: number) => {
+    if (playingPreviewIndex === index) {
+      setPlayingPreviewIndex(null);
+    } else {
+      setPlayingPreviewIndex(index);
+    }
+  };
+
   const seekTo = (time: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = time;
@@ -456,6 +855,24 @@ export default function VideoSplitDialog({
   };
 
   const addSplitPoint = () => {
+    if (videoDuration === 0) return;
+
+    if (currentTime < EDGE_MARGIN) {
+      setError('分割点距离视频开头不能小于 5 帧');
+      return;
+    }
+    if (currentTime > videoDuration - EDGE_MARGIN) {
+      setError('分割点距离视频结尾不能小于 5 帧');
+      return;
+    }
+
+    const tooClose = splitPoints.some(p => Math.abs(p.time - currentTime) < MIN_SPLIT_INTERVAL);
+    if (tooClose) {
+      setError('两个分割点之间的间隔不能小于 5 帧');
+      return;
+    }
+
+    setError(null);
     const newPoint: SplitPoint = {
       id: generateId(),
       time: currentTime
@@ -473,6 +890,19 @@ export default function VideoSplitDialog({
 
   const handleTimelineMouseDown = (e: React.MouseEvent, pointId: string) => {
     e.preventDefault();
+    const point = splitPoints.find(p => p.id === pointId);
+    if (point) {
+      dragStartPointRef.current = point.time;
+    }
+    setDraggingPoint(pointId);
+  };
+
+  const handleTimelineTouchStart = (e: React.TouchEvent, pointId: string) => {
+    e.stopPropagation();
+    const point = splitPoints.find(p => p.id === pointId);
+    if (point) {
+      dragStartPointRef.current = point.time;
+    }
     setDraggingPoint(pointId);
   };
 
@@ -486,38 +916,212 @@ export default function VideoSplitDialog({
     setSplitPoints(prev =>
       prev.map(p => (p.id === draggingPoint ? { ...p, time: newTime } : p))
     );
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = newTime;
+      setCurrentTime(newTime);
+    }
+  }, [draggingPoint, videoDuration]);
+
+  const handleTimelineTouchMove = useCallback((e: TouchEvent) => {
+    if (!draggingPoint || !timelineRef.current || !videoDuration) return;
+    if (e.touches.length !== 1) return;
+
+    const touch = e.touches[0];
+    const rect = timelineRef.current.getBoundingClientRect();
+    const percentage = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
+    const newTime = percentage * videoDuration;
+
+    setSplitPoints(prev =>
+      prev.map(p => (p.id === draggingPoint ? { ...p, time: newTime } : p))
+    );
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = newTime;
+      setCurrentTime(newTime);
+    }
   }, [draggingPoint, videoDuration]);
 
   const handleTimelineMouseUp = useCallback(() => {
+    if (draggingPoint && videoDuration > 0) {
+      const point = splitPoints.find(p => p.id === draggingPoint);
+      if (point) {
+        let valid = true;
+        if (point.time < EDGE_MARGIN || point.time > videoDuration - EDGE_MARGIN) {
+          valid = false;
+          setError('分割点距离视频开头或结尾不能小于 5 帧');
+        }
+        const tooClose = splitPoints.some(p => p.id !== draggingPoint && Math.abs(p.time - point.time) < MIN_SPLIT_INTERVAL);
+        if (tooClose) {
+          valid = false;
+          setError('两个分割点之间的间隔不能小于 5 帧');
+        }
+        if (!valid) {
+          setSplitPoints(prev =>
+            prev.map(p => (p.id === draggingPoint ? { ...p, time: dragStartPointRef.current } : p))
+          );
+        } else {
+          setError(null);
+        }
+      }
+    }
     setDraggingPoint(null);
+  }, [draggingPoint, splitPoints, videoDuration, EDGE_MARGIN, MIN_SPLIT_INTERVAL]);
+
+  const handleTimelineTouchEnd = useCallback(() => {
+    if (draggingPoint && videoDuration > 0) {
+      const point = splitPoints.find(p => p.id === draggingPoint);
+      if (point) {
+        let valid = true;
+        if (point.time < EDGE_MARGIN || point.time > videoDuration - EDGE_MARGIN) {
+          valid = false;
+          setError('分割点距离视频开头或结尾不能小于 5 帧');
+        }
+        const tooClose = splitPoints.some(p => p.id !== draggingPoint && Math.abs(p.time - point.time) < MIN_SPLIT_INTERVAL);
+        if (tooClose) {
+          valid = false;
+          setError('两个分割点之间的间隔不能小于 5 帧');
+        }
+        if (!valid) {
+          setSplitPoints(prev =>
+            prev.map(p => (p.id === draggingPoint ? { ...p, time: dragStartPointRef.current } : p))
+          );
+        } else {
+          setError(null);
+        }
+      }
+    }
+    setDraggingPoint(null);
+  }, [draggingPoint, splitPoints, videoDuration, EDGE_MARGIN, MIN_SPLIT_INTERVAL]);
+
+  const pinchRef = useRef<{
+    active: boolean;
+    startDist: number;
+    startZoom: number;
+    startCenterX: number;
+  }>({ active: false, startDist: 0, startZoom: 1, startCenterX: 0 });
+
+  const handlePinchStart = useCallback((e: TouchEvent) => {
+    if (e.touches.length !== 2) return;
+    e.preventDefault();
+
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    const centerX = (t1.clientX + t2.clientX) / 2;
+
+    pinchRef.current = {
+      active: true,
+      startDist: dist,
+      startZoom: zoom,
+      startCenterX: centerX
+    };
+  }, [zoom]);
+
+  const handlePinchMove = useCallback((e: TouchEvent) => {
+    if (!pinchRef.current.active || e.touches.length !== 2) return;
+    if (!timelineScrollRef.current || !videoDuration) return;
+    e.preventDefault();
+
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    const scale = dist / pinchRef.current.startDist;
+    const newZoom = Math.max(0.2, Math.min(10, pinchRef.current.startZoom * scale));
+
+    if (newZoom === zoom) return;
+
+    const scrollRect = timelineScrollRef.current.getBoundingClientRect();
+    const mouseX = pinchRef.current.startCenterX - scrollRect.left;
+    const scrollLeft = timelineScrollRef.current.scrollLeft;
+    const mouseTime = (scrollLeft + mouseX) / (PIXELS_PER_SECOND * pinchRef.current.startZoom);
+
+    setZoom(newZoom);
+
+    requestAnimationFrame(() => {
+      if (timelineScrollRef.current) {
+        const newScrollLeft = mouseTime * PIXELS_PER_SECOND * newZoom - mouseX;
+        timelineScrollRef.current.scrollLeft = Math.max(0, newScrollLeft);
+      }
+    });
+  }, [zoom, videoDuration]);
+
+  const handlePinchEnd = useCallback(() => {
+    pinchRef.current.active = false;
   }, []);
 
   useEffect(() => {
     if (draggingPoint) {
       document.addEventListener('mousemove', handleTimelineMouseMove);
       document.addEventListener('mouseup', handleTimelineMouseUp);
+      document.addEventListener('touchmove', handleTimelineTouchMove, { passive: false });
+      document.addEventListener('touchend', handleTimelineTouchEnd);
       return () => {
         document.removeEventListener('mousemove', handleTimelineMouseMove);
         document.removeEventListener('mouseup', handleTimelineMouseUp);
+        document.removeEventListener('touchmove', handleTimelineTouchMove);
+        document.removeEventListener('touchend', handleTimelineTouchEnd);
       };
     }
-  }, [draggingPoint, handleTimelineMouseMove, handleTimelineMouseUp]);
+  }, [draggingPoint, handleTimelineMouseMove, handleTimelineMouseUp, handleTimelineTouchMove, handleTimelineTouchEnd]);
+
+  useEffect(() => {
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl) return;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        handlePinchStart(e);
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        handlePinchMove(e);
+      }
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        handlePinchEnd();
+      }
+    };
+
+    scrollEl.addEventListener('touchstart', onTouchStart, { passive: false });
+    scrollEl.addEventListener('touchmove', onTouchMove, { passive: false });
+    scrollEl.addEventListener('touchend', onTouchEnd);
+    scrollEl.addEventListener('touchcancel', onTouchEnd);
+
+    return () => {
+      scrollEl.removeEventListener('touchstart', onTouchStart);
+      scrollEl.removeEventListener('touchmove', onTouchMove);
+      scrollEl.removeEventListener('touchend', onTouchEnd);
+      scrollEl.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [handlePinchStart, handlePinchMove, handlePinchEnd]);
 
   const handleTimelineClick = (e: React.MouseEvent) => {
     if (draggingPoint || !timelineRef.current || !videoDuration) return;
 
     const rect = timelineRef.current.getBoundingClientRect();
     const percentage = (e.clientX - rect.left) / rect.width;
-    const clickTime = percentage * videoDuration;
+    const clickTime = Math.max(0, Math.min(videoDuration, percentage * videoDuration));
 
-    const existingPoint = splitPoints.find(p => Math.abs(p.time - clickTime) < 0.5);
-    if (existingPoint) return;
+    const clickedPoint = splitPoints.find(p => Math.abs(p.time - clickTime) < 0.5);
+    if (clickedPoint) {
+      setSelectedSplitPoint(clickedPoint.id);
+    } else {
+      setSelectedSplitPoint(null);
+    }
 
-    const newPoint: SplitPoint = {
-      id: generateId(),
-      time: clickTime
-    };
-    setSplitPoints(prev => [...prev, newPoint].sort((a, b) => a.time - b.time));
+    seekTo(clickTime);
+  };
+
+  const handleSplitPointClick = (e: React.MouseEvent, pointId: string) => {
+    e.stopPropagation();
+    setSelectedSplitPoint(pointId);
+    const point = splitPoints.find(p => p.id === pointId);
+    if (point) {
+      seekTo(point.time);
+    }
   };
 
   const pollTaskStatus = useCallback((tid: string) => {
@@ -545,6 +1149,14 @@ export default function VideoSplitDialog({
 
           if (data.output?.shots) {
             const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
+            // 生成预览镜头列表
+            const newPreviewShots: SplitShot[] = splitShots.map((shot, i) => ({
+              startTime: shot.startTime,
+              endTime: shot.endTime,
+              index: i
+            }));
+            setPreviewShots(newPreviewShots);
+            // 同步更新 splitPoints，便于用户返回手动调整
             const newSplitPoints: SplitPoint[] = splitShots.slice(1).map((shot, idx: number) => ({
               id: generateId(),
               time: shot.startTime
@@ -552,7 +1164,9 @@ export default function VideoSplitDialog({
             setSplitPoints(newSplitPoints);
           }
 
-          setState('completed');
+          setMode('manual');
+          setShowAIMode(false);
+          setState('preview');  // 进入预览状态
         } else if (data.status === 'error' || data.status === 'failed') {
           sseClosed = true;
           eventSource.close();
@@ -615,7 +1229,8 @@ export default function VideoSplitDialog({
                 setSplitPoints(newSplitPoints);
               }
 
-              setState('completed');
+              setMode('manual');
+              setState('initial');
             } else if (data.status === 'error') {
               if (pollIntervalRef.current) {
                 clearInterval(pollIntervalRef.current);
@@ -652,14 +1267,24 @@ export default function VideoSplitDialog({
             setEstimatedCost(data.output?.estimatedCost || 0);
 
             if (data.output?.shots) {
-              const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot, idx) => ({
+              const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
+              // 生成预览镜头列表
+              const newPreviewShots: SplitShot[] = splitShots.map((shot, i) => ({
+                startTime: shot.startTime,
+                endTime: shot.endTime,
+                index: i
+              }));
+              setPreviewShots(newPreviewShots);
+              const newSplitPoints: SplitPoint[] = splitShots.slice(1).map((shot, idx) => ({
                 id: generateId(),
                 time: shot.startTime
               }));
               setSplitPoints(newSplitPoints);
             }
 
-            setState('completed');
+            setMode('manual');
+            setShowAIMode(false);
+            setState('preview');  // 进入预览状态
           } else if (data.status === 'error') {
             if (pollIntervalRef.current) {
               clearInterval(pollIntervalRef.current);
@@ -678,6 +1303,28 @@ export default function VideoSplitDialog({
   const handleStartSplit = async () => {
     if (!currentVideoUrl) return;
 
+    // 手动模式：直接基于当前分割点生成分割结果预览，不调用后端 API
+    if (mode === 'manual') {
+      const shots: SplitShot[] = splitPoints.length > 0
+        ? (() => {
+            const result: SplitShot[] = [];
+            const times = [0, ...splitPoints.map(p => p.time), videoDuration];
+            for (let i = 0; i < times.length - 1; i++) {
+              result.push({
+                startTime: times[i],
+                endTime: times[i + 1],
+                index: i
+              });
+            }
+            return result;
+          })()
+        : [{ startTime: 0, endTime: videoDuration, index: 0 }];
+      setPreviewShots(shots);
+      setState('preview');
+      return;
+    }
+
+    // AI 模式：调用后端 API
     setError(null);
     setState('processing');
     setProgress(5);
@@ -690,16 +1337,13 @@ export default function VideoSplitDialog({
         videoUrl: string;
         projectId: number;
         mode: string;
-        filterNonShots: boolean;
-        autoAssignScenes: boolean;
         sceneId?: number | null;
         splitPoints?: number[];
+        videoDuration?: number;
       } = {
         videoUrl: currentVideoUrl,
         projectId,
-        mode: actualMode,
-        filterNonShots: actualMode !== 'manual' ? filterNonShots : false,
-        autoAssignScenes
+        mode: actualMode
       };
 
       if (sceneId !== undefined && sceneId !== null) {
@@ -708,6 +1352,7 @@ export default function VideoSplitDialog({
 
       if (mode === 'manual' && splitPoints.length > 0) {
         body.splitPoints = splitPoints.map(p => p.time);
+        body.videoDuration = videoDuration;
       }
 
       const res = await fetch('/api/ai/split-video', {
@@ -802,27 +1447,6 @@ export default function VideoSplitDialog({
     setProgress(0);
   };
 
-  const handleConfirm = () => {
-    if (onSplit && currentVideoUrl) {
-      const shots = splitPoints.length > 0
-        ? (() => {
-            const result: SplitShot[] = [];
-            const times = [0, ...splitPoints.map(p => p.time), videoDuration];
-            for (let i = 0; i < times.length - 1; i++) {
-              result.push({
-                startTime: times[i],
-                endTime: times[i + 1],
-                index: i
-              });
-            }
-            return result;
-          })()
-        : [{ startTime: 0, endTime: videoDuration, index: 0 }];
-      onSplit(shots, currentVideoUrl);
-    }
-    onClose();
-  };
-
   const getShotCount = () => {
     if (splitPoints.length === 0) return 1;
     return splitPoints.length + 1;
@@ -834,64 +1458,135 @@ export default function VideoSplitDialog({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4"
+      className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] ${isMobile ? 'p-0' : 'p-8 sm:p-4'}`}
       onClick={onClose}
     >
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className={`absolute ${isMobile ? 'inset-0 rounded-none max-h-none' : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[90vh] rounded-3xl'} w-full border border-white/10 bg-slate-900 flex flex-col shadow-2xl`}
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-          <h2 className="text-lg font-semibold">视频分割为分镜</h2>
+        <div className={`flex items-center justify-between ${isMobile ? 'px-4 py-3' : 'px-6 py-4'} border-b border-white/10`}>
+          <h2 className={`${isMobile ? 'text-base' : 'text-lg'} font-semibold`}>视频分割为分镜</h2>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center transition"
+            className="w-10 h-10 rounded-full hover:bg-white/10 flex items-center justify-center transition"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-hidden flex">
-          <div className="w-36 border-r border-white/10 p-3 space-y-2 overflow-y-auto flex-shrink-0">
-            <div className="text-xs text-slate-400 mb-2">
-              已上传 ({uploadedVideos.length}/{maxUploads})
-            </div>
-            <div className="space-y-2">
-              {uploadedVideos.map(video => (
-                <div
-                  key={video.id}
-                  onClick={() => handleSelectVideo(video.id)}
-                  className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all ${
-                    selectedVideoId === video.id
-                      ? 'border-violet-500 ring-1 ring-violet-500/30'
-                      : 'border-white/10 hover:border-white/20'
-                  }`}
-                >
-                  <div className="aspect-video bg-black relative">
-                    {video.thumbnail ? (
-                      <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <Video className="w-6 h-6 text-slate-600" />
-                      </div>
+        <div className={`flex-1 overflow-hidden flex ${isMobile ? 'flex-col' : 'flex-row'}`}>
+          <div className={`${isMobile ? 'w-full border-b border-r-0 h-24 px-3 py-2 flex items-center gap-2 overflow-x-auto custom-scrollbar' : 'w-36 border-r border-white/10 p-3 space-y-2 overflow-y-auto custom-scrollbar'} flex-shrink-0`}>
+            {isMobile ? (
+              <>
+                {uploadedVideos.map(video => (
+                  <div
+                    key={video.id}
+                    onClick={() => handleSelectVideo(video.id)}
+                    className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all flex-shrink-0 w-20 relative ${
+                      selectedVideoId === video.id
+                        ? 'border-violet-500 ring-1 ring-violet-500/30'
+                        : 'border-white/10'
+                    }`}
+                  >
+                    <div className="aspect-video bg-black relative">
+                      {video.thumbnail ? (
+                        <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
+                      ) : (() => {
+                        const ossThumb = getVideoThumbnail(video.url);
+                        if (ossThumb) {
+                          return <img src={ossThumb} alt={video.name} className="w-full h-full object-cover" />;
+                        }
+                        return (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Video className="w-5 h-5 text-slate-600" />
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    {!isShotMode && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteVideo(video.id); }}
+                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition"
+                        title="删除视频"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     )}
                   </div>
-                  <div className="px-2 py-1 text-xs text-slate-400 truncate bg-white/5">
-                    {video.name}
-                  </div>
+                ))}
+                {!isShotMode && uploadedVideos.length < maxUploads && (
+                  <button
+                    onClick={handleUploadClick}
+                    disabled={isUploading}
+                    className="w-20 h-auto aspect-video flex-shrink-0 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50 flex flex-col items-center justify-center"
+                  >
+                    <Upload className="w-4 h-4 text-slate-400 mb-1" />
+                    <div className="text-[10px] text-slate-400">上传</div>
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="text-xs text-slate-400 mb-2">
+                  {isShotMode
+                    ? `参考视频 (${uploadedVideos.length})`
+                    : `已上传 (${uploadedVideos.length}/${maxUploads})`
+                  }
                 </div>
-              ))}
-            </div>
+                <div className="space-y-2">
+                  {uploadedVideos.map(video => (
+                    <div
+                      key={video.id}
+                      onClick={() => handleSelectVideo(video.id)}
+                      className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all relative ${
+                        selectedVideoId === video.id
+                          ? 'border-violet-500 ring-1 ring-violet-500/30'
+                          : 'border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      <div className="aspect-video bg-black relative">
+                        {video.thumbnail ? (
+                          <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
+                        ) : (() => {
+                          const ossThumb = getVideoThumbnail(video.url);
+                          if (ossThumb) {
+                            return <img src={ossThumb} alt={video.name} className="w-full h-full object-cover" />;
+                          }
+                          return (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Video className="w-6 h-6 text-slate-600" />
+                            </div>
+                          );
+                        })()}
+                        {!isShotMode && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteVideo(video.id); }}
+                            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition"
+                            title="删除视频"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="px-2 py-1 text-xs text-slate-400 truncate bg-white/5">
+                        {video.name}
+                      </div>
+                    </div>
+                  ))}
+                </div>
 
-            {uploadedVideos.length < maxUploads && (
-              <button
-                onClick={handleUploadClick}
-                disabled={isUploading}
-                className="w-full p-3 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50"
-              >
-                <Upload className="w-4 h-4 mx-auto text-slate-400 mb-1" />
-                <div className="text-xs text-slate-400">上传视频</div>
-              </button>
+                {!isShotMode && uploadedVideos.length < maxUploads && (
+                  <button
+                    onClick={handleUploadClick}
+                    disabled={isUploading}
+                    className="w-full p-3 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50"
+                  >
+                    <Upload className="w-4 h-4 mx-auto text-slate-400 mb-1" />
+                    <div className="text-xs text-slate-400">上传视频</div>
+                  </button>
+                )}
+              </>
             )}
 
             <input
@@ -904,7 +1599,7 @@ export default function VideoSplitDialog({
             />
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          <div className={`flex-1 overflow-y-auto custom-scrollbar ${isMobile ? 'p-3 space-y-3' : 'p-6 space-y-5'}`}>
             {error && (
               <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -940,118 +1635,19 @@ export default function VideoSplitDialog({
 
             {currentVideoUrl && (
               <>
-                <div className="space-y-3">
-                  <div className="text-sm text-slate-300">选择分割方式：</div>
-                  <div className="flex gap-3">
-                    <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                      mode === 'manual' 
-                        ? 'border-violet-500 bg-violet-500/10' 
-                        : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-                    }`}>
-                      <input
-                        type="radio"
-                        name="splitMode"
-                        value="manual"
-                        checked={mode === 'manual'}
-                        onChange={() => setMode('manual')}
-                        disabled={state === 'processing' || state === 'completed'}
-                        className="hidden"
-                      />
-                      <div className="text-sm font-medium text-white mb-1">手动标记分割</div>
-                      <div className="text-xs text-slate-400">自己播放视频，在时间轴上标记分割点</div>
-                    </label>
-                    <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                      mode !== 'manual' 
-                        ? 'border-violet-500 bg-violet-500/10' 
-                        : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-                    }`}>
-                      <input
-                        type="radio"
-                        name="splitMode"
-                        value="ai"
-                        checked={mode !== 'manual'}
-                        onChange={() => setMode(aliyunConfigured ? 'aliyun' : 'ai_frame')}
-                        disabled={state === 'processing' || state === 'completed'}
-                        className="hidden"
-                      />
-                      <div className="text-sm font-medium text-white mb-1">AI 自动分割</div>
-                      <div className="text-xs text-slate-400">人工智能自动识别镜头切换点</div>
-                    </label>
-                  </div>
-                </div>
-
-                {mode !== 'manual' && state === 'initial' && (
-                  <div className="space-y-3 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
-                    <div className="text-sm font-medium text-white">选择 AI 分析方式：</div>
-                    <div className="space-y-2">
-                      {[
-                        {
-                          id: 'ai_frame' as const,
-                          name: 'AI 抽帧分析',
-                          description: '抽取视频关键帧，通过多模态大模型分析镜头切换点',
-                          cost: '约 ¥0.3-0.8 / 5分钟',
-                          accuracy: '⭐⭐⭐⭐ 较好',
-                          speed: '约 30秒-2分钟',
-                          available: true
-                        },
-                        {
-                          id: 'aliyun' as const,
-                          name: '阿里云视频拆条',
-                          description: '阿里云视觉智能平台专业视频分析',
-                          cost: '约 ¥0.5-2.5 / 5分钟',
-                          accuracy: '⭐⭐⭐⭐⭐ 精准',
-                          speed: '约 1-3分钟',
-                          available: aliyunConfigured
-                        }
-                      ].map(option => (
-                        <label 
-                          key={option.id}
-                          className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                            !option.available 
-                              ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed' 
-                              : aiMode === option.id
-                                ? 'border-violet-500 bg-violet-500/10'
-                                : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="aiMode"
-                            value={option.id}
-                            checked={aiMode === option.id}
-                            onChange={() => option.available && setAiMode(option.id)}
-                            disabled={!option.available || state === 'processing'}
-                            className="hidden"
-                          />
-                          <div className="flex items-start gap-3">
-                            <div className="flex-1">
-                              <div className="text-sm font-medium text-white">{option.name}</div>
-                              <div className="text-xs text-slate-400 mt-1">{option.description}</div>
-                              <div className="flex gap-4 mt-2 text-xs">
-                                <span className="text-amber-400">费用：{option.cost}</span>
-                                <span className="text-emerald-400">精度：{option.accuracy}</span>
-                                <span className="text-sky-400">速度：{option.speed}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {mode === 'manual' && state === 'initial' && (
-                  <div className="space-y-5">
-                    <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
-                      <video
-                        ref={videoRef}
-                        src={currentVideoUrl}
-                        className="w-full h-full object-contain"
-                        onTimeUpdate={handleTimeUpdate}
-                        onLoadedMetadata={handleLoadedMetadata}
-                        onPlay={handlePlay}
-                        onPause={handlePause}
-                      />
+                <div className="space-y-5">
+                  <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
+                    <video
+                      ref={videoRef}
+                      src={currentVideoUrl}
+                      poster={currentVideoRawUrl ? getVideoPoster(currentVideoRawUrl) : undefined}
+                      className="w-full h-full object-contain"
+                      onTimeUpdate={handleTimeUpdate}
+                      onLoadedMetadata={handleLoadedMetadata}
+                      onPlay={handlePlay}
+                      onPause={handlePause}
+                    />
+                    {state !== 'processing' && (
                       <button
                         onClick={togglePlay}
                         className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
@@ -1062,273 +1658,462 @@ export default function VideoSplitDialog({
                           <Play className="w-12 h-12 text-white/80" />
                         )}
                       </button>
-                    </div>
+                    )}
+                    {state === 'processing' && (
+                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                        <div className="text-center">
+                          <Loader2 className="w-8 h-8 text-violet-400 animate-spin mx-auto mb-2" />
+                          <div className="text-sm text-white">正在分割视频... {progress}%</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm text-slate-300">时间轴：</span>
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm text-slate-300">时间轴：</span>
+                      <div className="flex items-center gap-2">
                         <span className="text-sm text-slate-400">
                           {formatTime(currentTime)} / {formatTime(videoDuration)}
                         </span>
+                        <div className="flex items-center gap-1 ml-2">
+                          <button
+                            onClick={handleZoomOut}
+                            disabled={zoom <= 0.2 || !videoDuration}
+                            className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="缩小"
+                          >
+                            <ZoomOut className="w-4 h-4" />
+                          </button>
+                          <span className="text-xs text-slate-400 w-12 text-center">
+                            {zoom.toFixed(1)}x
+                          </span>
+                          <button
+                            onClick={handleZoomIn}
+                            disabled={zoom >= 10 || !videoDuration}
+                            className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="放大"
+                          >
+                            <ZoomIn className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={handleZoomReset}
+                            disabled={zoom === 1 || !videoDuration}
+                            className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="重置缩放"
+                          >
+                            <Maximize2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
+                    </div>
+
+                    <div
+                      ref={timelineScrollRef}
+                      className={`relative overflow-x-auto overflow-y-hidden rounded-none bg-white/5 ${zoom >= 1 ? '' : 'custom-scrollbar'} ${state === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
+                      style={{ height: 80 }}
+                      onWheel={state === 'processing' ? undefined : handleTimelineWheel}
+                    >
                       <div
                         ref={timelineRef}
-                        className="relative h-12 bg-white/10 rounded-lg cursor-pointer"
-                        onClick={handleTimelineClick}
+                        className={`relative h-12 ${state === 'processing' ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        style={{ width: timelineWidth }}
+                        onClick={state === 'processing' ? undefined : handleTimelineClick}
                       >
+                        <div className="absolute inset-0 bg-white/10 rounded-lg" />
+
                         <div
-                          className="absolute top-0 left-0 h-full bg-violet-500/20 rounded-lg"
+                          className="absolute top-0 left-0 h-full bg-violet-500/20 rounded-l-lg pointer-events-none"
                           style={{ width: `${(currentTime / videoDuration) * 100}%` }}
                         />
+
                         {splitPoints.map(point => (
                           <div
                             key={point.id}
-                            className="absolute top-0 w-1 h-full bg-violet-500 cursor-ew-resize z-10"
+                            className={`absolute top-0 ${isMobile ? 'w-8 -ml-4' : 'w-1'} h-full cursor-ew-resize z-10 ${state === 'processing' ? 'pointer-events-none' : ''}`}
                             style={{ left: `${(point.time / videoDuration) * 100}%` }}
-                            onMouseDown={e => handleTimelineMouseDown(e, point.id)}
+                            onMouseDown={state === 'processing' ? undefined : (e => handleTimelineMouseDown(e, point.id))}
+                            onTouchStart={state === 'processing' ? undefined : (e => handleTimelineTouchStart(e, point.id))}
+                            onClick={state === 'processing' ? undefined : (e => handleSplitPointClick(e, point.id))}
                           >
-                            <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-4 h-4 bg-violet-500 rounded-full border-2 border-white shadow-lg" />
+                            <div className={`absolute top-0 left-1/2 -translate-x-1/2 ${isMobile ? 'w-0.5' : 'w-full'} h-full ${selectedSplitPoint === point.id ? 'bg-yellow-400' : 'bg-violet-500'}`} />
+                            <div className={`absolute -top-1 left-1/2 -translate-x-1/2 ${isMobile ? 'w-6 h-6' : 'w-4 h-4'} rounded-full border-2 border-white shadow-lg ${selectedSplitPoint === point.id ? 'bg-yellow-400' : 'bg-violet-500'}`} />
                           </div>
                         ))}
+
                         <div
-                          className="absolute top-0 w-0.5 h-full bg-white z-20"
+                          className="absolute top-0 w-0.5 h-full bg-white z-20 pointer-events-none"
                           style={{ left: `${(currentTime / videoDuration) * 100}%` }}
                         />
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={addSplitPoint}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 text-sm transition"
+                      {/* 刻度：在时间轴下方，刻度线顶端对齐时间轴底部 */}
+                      <div
+                        className="absolute top-12 left-0 pointer-events-none"
+                        style={{ width: timelineWidth }}
                       >
-                        <Plus className="w-4 h-4" />
-                        添加分割点
-                      </button>
-                      <button
-                        onClick={clearAllSplitPoints}
-                        disabled={splitPoints.length === 0}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                        清除全部
-                      </button>
-                    </div>
-
-                    <div className="text-sm text-slate-400">
-                      已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
-                      <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
-                    </div>
-
-                    {splitPoints.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {splitPoints.map((point, idx) => (
+                        {ticks.map((tick, idx) => (
                           <div
-                            key={point.id}
-                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
+                            key={idx}
+                            className="absolute top-0"
+                            style={{ left: (tick.time / videoDuration) * 100 + '%' }}
                           >
-                            <span className="text-slate-400">#{idx + 1}</span>
-                            <span className="text-white">{formatTime(point.time)}</span>
-                            <button
-                              onClick={() => removeSplitPoint(point.id)}
-                              className="text-slate-500 hover:text-red-400 transition"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
+                            <div
+                              className={`border-l ${tick.isMajor ? 'border-slate-500 h-3' : 'border-slate-600/60 h-1.5'}`}
+                              style={{ marginLeft: -0.5 }}
+                            />
+                            {tick.label && (
+                              <div className="absolute top-3 left-1 text-[10px] text-slate-500 whitespace-nowrap -translate-x-1/2">
+                                {tick.label}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
-                    )}
-                  </div>
-                )}
-
-                {mode !== 'manual' && state === 'initial' && (
-                  <div className="py-4">
-                    <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3">
-                      <div className="flex items-center gap-2 text-amber-300 font-medium">
-                        <AlertTriangle className="w-5 h-5" />
-                        <span>AI自动分割提示</span>
-                      </div>
-                      <ul className="space-y-2 text-sm text-amber-200/80 list-disc list-inside">
-                        <li>处理时间根据视频时长约 30秒 ~ 5分钟</li>
-                        <li>根据选择的模型不同，费用有所差异</li>
-                        <li>分割结果可能需要手动调整</li>
-                      </ul>
                     </div>
                   </div>
-                )}
 
-                {state === 'processing' && (
-                  <div className="py-8 text-center">
-                    <div className="flex items-center justify-center gap-3 mb-6">
-                      <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
-                      <span className="text-base text-slate-200">正在分割视频...</span>
-                      <span className="text-base text-violet-400 font-medium">{progress}%</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-white/10 overflow-hidden mb-4">
-                      <div
-                        className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-500"
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                    <p className="text-sm text-slate-400 mb-2">当前阶段：{currentPhase}</p>
-                    {detectedShots > 0 && (
-                      <p className="text-sm text-slate-400 mb-6">已识别 {detectedShots} 个镜头</p>
-                    )}
-                    <button
-                      onClick={handleCancel}
-                      className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
-                    >
-                      取消处理
-                    </button>
-                  </div>
-                )}
-
-                {state === 'completed' && (
-                  <div className="py-4 space-y-5">
-                    <div className="flex items-center gap-3">
-                      <CheckCircle2 className="w-6 h-6 text-green-400" />
-                      <div>
-                        <h3 className="text-base font-semibold text-white">分割完成！</h3>
-                        <p className="text-sm text-slate-400">
-                          已生成 {sceneCount} 个分镜片段
-                        </p>
+                  {state === 'initial' && (
+                    <>
+                      <div className={`flex ${isMobile ? 'flex-col gap-2' : 'items-center gap-3'}`}>
+                        <button
+                          onClick={addSplitPoint}
+                          disabled={!currentVideoUrl}
+                          className={`flex items-center justify-center gap-2 ${isMobile ? 'w-full py-3 text-base' : 'px-4 py-2 text-sm'} rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 transition disabled:opacity-40`}
+                        >
+                          <Plus className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+                          {isMobile ? '添加分割点' : '添加分割点'}
+                        </button>
+                        <button
+                          onClick={clearAllSplitPoints}
+                          disabled={splitPoints.length === 0}
+                          className={`flex items-center justify-center gap-2 ${isMobile ? 'w-full py-3 text-base' : 'px-4 py-2 text-sm'} rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 transition disabled:opacity-40 disabled:cursor-not-allowed`}
+                        >
+                          <Trash2 className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+                          {isMobile ? '清除全部' : '清除全部'}
+                        </button>
+                        {mode === 'manual' && (
+                          <button
+                            onClick={handleStartSplit}
+                            disabled={splitPoints.length === 0}
+                            className={`flex items-center justify-center gap-2 ${isMobile ? 'w-full py-3 text-base' : 'px-4 py-2 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
+                          >
+                            <Scissors className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+                            开始分割
+                          </button>
+                        )}
                       </div>
-                    </div>
 
-                    {estimatedCost > 0 && (
-                      <div className="flex items-center justify-between p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                        <span className="text-sm text-slate-300">预估费用：</span>
-                        <span className="text-base font-semibold text-green-400">¥{estimatedCost.toFixed(2)}</span>
+                      <div className="text-sm text-slate-400">
+                        已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
+                        <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
                       </div>
-                    )}
 
-                    {videoDuration > 0 && (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-slate-400">分镜预览</span>
-                          {generatingThumbs && (
-                            <span className="text-slate-500 flex items-center gap-1">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              生成缩略图中...
-                            </span>
-                          )}
+                      {splitPoints.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {splitPoints.map((point, idx) => (
+                            <div
+                              key={point.id}
+                              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm cursor-pointer transition ${selectedSplitPoint === point.id ? 'bg-yellow-500/10 border-yellow-500/50' : 'bg-white/5 border-white/10 hover:bg-white/10'}`}
+                              onClick={() => {
+                                setSelectedSplitPoint(point.id);
+                                seekTo(point.time);
+                              }}
+                            >
+                              <span className="text-slate-400">#{idx + 1}</span>
+                              <span className="text-white">{formatTime(point.time)}</span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); removeSplitPoint(point.id); }}
+                                className="text-slate-500 hover:text-red-400 transition"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
                         </div>
-                        <div className="flex gap-2 overflow-x-auto pb-2">
-                          {(() => {
-                            const shotTimes = [0, ...splitPoints.map(p => p.time)];
-                            return shotTimes.map((time, idx) => {
-                              const endTime = idx < splitPoints.length ? splitPoints[idx].time : videoDuration;
-                              const thumbKey = `shot_${idx}`;
-                              return (
-                                <div
-                                  key={idx}
-                                  className="shrink-0 w-36 space-y-1 cursor-pointer group"
-                                  onClick={() => {
-                                    if (videoRef.current) {
-                                      videoRef.current.currentTime = time;
-                                    }
-                                  }}
+                      )}
+                    </>
+                  )}
+
+                  {state === 'preview' && previewShots.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-slate-300">
+                          分割结果：共 <span className="text-violet-400 font-medium">{previewShots.length}</span> 个镜头（可删除不需要的）
+                        </div>
+                        <button
+                          onClick={backToManualFromPreview}
+                          className="text-xs text-slate-400 hover:text-violet-400 transition flex items-center gap-1"
+                        >
+                          <ArrowLeft className="w-3.5 h-3.5" />
+                          返回调整
+                        </button>
+                      </div>
+                      <div className={`grid gap-3 ${isMobile ? 'grid-cols-2 max-h-72' : 'grid-cols-3 max-h-80'} overflow-y-auto custom-scrollbar pr-1`}>
+                        {previewShots.map((shot, idx) => {
+                          const posterTime = Math.floor(shot.startTime * 1000);
+                          const posterUrl = currentVideoRawUrl
+                            ? `/api/oss-snapshot?url=${encodeURIComponent(currentVideoRawUrl)}&t=${posterTime}&w=320`
+                            : '';
+                          const isPlaying = playingPreviewIndex === idx;
+
+                          return (
+                            <div
+                              key={idx}
+                              className="relative rounded-xl overflow-hidden bg-slate-800/50 border border-white/10 group"
+                            >
+                              <div className="aspect-video bg-black relative">
+                                {posterUrl && !isPlaying && (
+                                  <img
+                                    src={posterUrl}
+                                    alt={`分镜 ${idx + 1}`}
+                                    className="w-full h-full object-cover"
+                                  />
+                                )}
+                                {isPlaying && currentVideoUrl && (
+                                  <video
+                                    className="w-full h-full object-contain"
+                                    src={currentVideoUrl}
+                                    autoPlay
+                                    muted
+                                    playsInline
+                                    onTimeUpdate={(e) => {
+                                      const v = e.currentTarget;
+                                      if (v.currentTime >= shot.endTime) {
+                                        v.currentTime = shot.startTime;
+                                      }
+                                    }}
+                                  />
+                                )}
+                                <button
+                                  onClick={() => togglePreviewPlay(idx)}
+                                  className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition group-hover:bg-black/30"
                                 >
-                                  <div className="relative aspect-video rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-violet-400/50 transition">
-                                    {shotThumbnails[thumbKey] ? (
-                                      <img
-                                        src={shotThumbnails[thumbKey]}
-                                        alt={`分镜 ${idx + 1}`}
-                                        className="w-full h-full object-cover"
-                                      />
+                                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isPlaying ? 'bg-white/90' : 'bg-white/80'}`}>
+                                    {isPlaying ? (
+                                      <Pause className="w-5 h-5 text-slate-800" />
                                     ) : (
-                                      <div className="w-full h-full flex items-center justify-center">
-                                        <Loader2 className="w-5 h-5 text-slate-500 animate-spin" />
-                                      </div>
+                                      <Play className="w-5 h-5 text-slate-800 ml-0.5" />
                                     )}
-                                    <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-xs text-white">
-                                      #{idx + 1}
+                                  </div>
+                                </button>
+                                <div className="absolute top-1.5 left-1.5 px-2 py-0.5 rounded-md bg-black/60 text-xs font-medium text-white">
+                                  #{idx + 1}
+                                </div>
+                              </div>
+                              <div className="p-2.5">
+                                <div className="text-xs text-white">
+                                  {formatTime(shot.startTime)} - {formatTime(shot.endTime)}
+                                </div>
+                                <div className="flex items-center justify-between mt-1">
+                                  <div className="text-[10px] text-slate-500">
+                                    时长：{(shot.endTime - shot.startTime).toFixed(1)}秒
+                                  </div>
+                                  <button
+                                    onClick={() => removePreviewShot(idx)}
+                                    className="w-6 h-6 rounded-md flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition"
+                                    title="删除该镜头"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {state === 'processing' && (
+                    <div className="text-center">
+                      <div className="h-2 rounded-full bg-white/10 overflow-hidden mb-3">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-500"
+                          style={{ width: `${progress}%` }}
+                        />
+                      </div>
+                      <p className="text-sm text-slate-400 mb-2">当前阶段：{currentPhase}</p>
+                      {detectedShots > 0 && (
+                        <p className="text-sm text-slate-400 mb-4">已识别 {detectedShots} 个镜头</p>
+                      )}
+                      <button
+                        onClick={handleCancel}
+                        className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
+                      >
+                        取消处理
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {state === 'initial' && (
+                  <div className={`${isMobile ? 'mt-4 space-y-2' : 'mt-6 space-y-3'}`}>
+                    <button
+                      onClick={() => setShowAIMode(!showAIMode)}
+                      className={`w-full flex items-center justify-between ${isMobile ? 'p-3' : 'p-4'} rounded-xl border-2 transition-all ${
+                        showAIMode
+                          ? 'border-violet-500 bg-violet-500/10'
+                          : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 text-left">
+                        <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-5 h-5'} text-violet-400`} />
+                        <div>
+                          <div className="text-sm font-medium text-white">AI 辅助分析</div>
+                          <div className="text-xs text-slate-400 mt-0.5">
+                            人工智能自动识别镜头切换点，生成后仍可手动调整
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronDown className={`w-5 h-5 text-slate-400 transition-transform ${showAIMode ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {showAIMode && (
+                      <>
+                        <div className="space-y-3 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
+                          <div className="text-sm font-medium text-white">选择 AI 分析方式：</div>
+                          <div className="space-y-2">
+                            {[
+                              {
+                                id: 'ai_frame' as const,
+                                name: 'AI 抽帧分析',
+                                description: '抽取视频关键帧，通过多模态大模型分析镜头切换点',
+                                cost: '约 ¥0.3-0.8 / 5分钟',
+                                accuracy: '⭐⭐⭐⭐ 较好',
+                                speed: '约 30秒-2分钟',
+                                available: true
+                              },
+                              {
+                                id: 'aliyun' as const,
+                                name: '阿里云视频拆条',
+                                description: '阿里云视觉智能平台专业视频分析',
+                                cost: '约 ¥0.5-2.5 / 5分钟',
+                                accuracy: '⭐⭐⭐⭐⭐ 精准',
+                                speed: '约 1-3分钟',
+                                available: aliyunConfigured
+                              }
+                            ].map(option => (
+                              <label 
+                                key={option.id}
+                                className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
+                                  !option.available 
+                                    ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed' 
+                                    : aiMode === option.id
+                                      ? 'border-violet-500 bg-violet-500/10'
+                                      : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name="aiMode"
+                                  value={option.id}
+                                  checked={aiMode === option.id}
+                                  onChange={() => option.available && setAiMode(option.id)}
+                                  disabled={!option.available || state === 'processing'}
+                                  className="hidden"
+                                />
+                                <div className="flex items-start gap-3">
+                                  <div className="flex-1">
+                                    <div className="text-sm font-medium text-white">{option.name}</div>
+                                    <div className="text-xs text-slate-400 mt-1">{option.description}</div>
+                                    <div className="flex gap-4 mt-2 text-xs">
+                                      <span className="text-amber-400">费用：{option.cost}</span>
+                                      <span className="text-emerald-400">精度：{option.accuracy}</span>
+                                      <span className="text-sky-400">速度：{option.speed}</span>
                                     </div>
                                   </div>
-                                  <div className="text-xs text-slate-400 text-center">
-                                    {formatTime(time)} - {formatTime(endTime)}
-                                  </div>
                                 </div>
-                              );
-                            });
-                          })()}
+                              </label>
+                            ))}
+                          </div>
                         </div>
-                      </div>
+                        <button
+                          onClick={() => { setMode(aiMode === 'aliyun' ? 'aliyun' : 'ai_frame'); handleStartSplit(); }}
+                          disabled={state === 'processing'}
+                          className={`w-full flex items-center justify-center gap-2 ${isMobile ? 'py-3 text-base' : 'py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed mt-3`}
+                        >
+                          <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+                          开始进行AI分析
+                        </button>
+                      </>
                     )}
                   </div>
                 )}
 
-                {currentVideoUrl && (
-                  <div className="hidden">
-                    <video
-                      ref={thumbVideoRef}
-                      src={currentVideoUrl}
-                      crossOrigin="anonymous"
-                      muted
-                      playsInline
-                    />
-                    <canvas ref={thumbCanvasRef} />
-                  </div>
-                )}
+                <div className="hidden">
+                  <video
+                    ref={thumbVideoRef}
+                    src={currentVideoUrl}
+                    crossOrigin="anonymous"
+                    muted
+                    playsInline
+                  />
+                  <canvas ref={thumbCanvasRef} />
+                </div>
               </>
             )}
           </div>
         </div>
 
-        {/* 分割增强选项 */}
-        {state === 'initial' && currentVideoUrl && (
-          <div className="px-6 py-3 border-t border-white/10 flex flex-wrap items-center gap-4">
-            <label className={`flex items-center gap-2 text-sm transition ${
-              mode === 'manual' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer text-slate-300 hover:text-white'
-            }`}>
-              <input
-                type="checkbox"
-                checked={mode === 'manual' ? false : filterNonShots}
-                onChange={(e) => setFilterNonShots(e.target.checked)}
-                disabled={mode === 'manual'}
-                className="w-4 h-4 rounded accent-violet-500"
-              />
-              滤除非实拍分镜
-              <span className="text-xs text-slate-500">（如标题卡、黑屏过渡等）</span>
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer text-slate-300 hover:text-white transition">
-              <input
-                type="checkbox"
-                checked={autoAssignScenes}
-                onChange={(e) => setAutoAssignScenes(e.target.checked)}
-                className="w-4 h-4 rounded accent-violet-500"
-              />
-              自动划分场次
-            </label>
-          </div>
-        )}
-
-        <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
+        <div className={`${isMobile ? 'px-4 py-3' : 'px-6 py-4'} border-t border-white/10 flex justify-end gap-3`}>
           <button
-            onClick={onClose}
-            className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/10 text-sm transition"
+            onClick={handleUserCancelMarked}
+            className={`${isMobile ? 'flex-1 py-3 text-base' : 'px-5 py-2.5 text-sm'} rounded-xl border border-white/15 hover:bg-white/10 transition`}
           >
             取消
           </button>
           {state === 'initial' && currentVideoUrl && (
             <button
               onClick={handleStartSplit}
-              disabled={!currentVideoUrl || (mode === 'manual' && splitPoints.length === 0)}
-              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={mode === 'manual' && splitPoints.length === 0}
+              className={`${isMobile ? 'flex-1 py-3 text-base' : 'px-5 py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               开始分割
             </button>
           )}
-          {state === 'completed' && (
+          {state === 'preview' && currentVideoUrl && (
             <button
-              onClick={handleConfirm}
-              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-sm font-medium transition"
+              onClick={handleConfirmMarked}
+              disabled={previewShots.length === 0}
+              className={`${isMobile ? 'flex-1 py-3 text-base' : 'px-5 py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
             >
-              确认并添加
+              应用
             </button>
           )}
         </div>
+
+        {/* 确认创建分镜对话框 */}
+        {confirmDialog && (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            onClick={() => setConfirmDialog(false)}
+          >
+            <div
+              className="bg-slate-900 rounded-2xl p-6 max-w-sm w-full mx-4 border border-white/10 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-white mb-2">确认创建分镜</h3>
+              <p className="text-sm text-slate-300 mb-6">
+                即将创建 <span className="text-violet-400 font-medium">{previewShots.length}</span> 个分镜，是否继续？
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setConfirmDialog(false)}
+                  className="px-4 py-2 rounded-xl border border-white/15 hover:bg-white/10 text-sm text-slate-300 transition"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={confirmCreate}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-sm font-medium transition"
+                >
+                  确认创建
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <VideoCompressionDialog

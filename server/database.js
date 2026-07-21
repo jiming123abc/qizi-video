@@ -483,8 +483,7 @@ function initStoryboardDatabase() {
       'estimatedDuration TEXT DEFAULT \'\'',
       'aiImagePrompt TEXT DEFAULT \'\'',
       'aiStylePrompt TEXT DEFAULT \'\'',
-      'mergedFrom TEXT DEFAULT \'\'',
-      'shotIndex INTEGER DEFAULT 0'
+      'mergedFrom TEXT DEFAULT \'\''
     ];
     shotColumns.forEach(function(colDef) {
       storyboardDb.run(`ALTER TABLE videos ADD COLUMN ${colDef}`, function(err) {
@@ -511,6 +510,12 @@ function initStoryboardDatabase() {
       )
     `);
     storyboardDb.run('CREATE INDEX IF NOT EXISTS idx_shot_media_shot ON shot_media(shotId)');
+
+    storyboardDb.run('ALTER TABLE shot_media ADD COLUMN startTime REAL DEFAULT 0', (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.warn('[db] shot_media.startTime 列添加失败:', err.message);
+      }
+    });
 
     // ========== ai_generated_images 表（P3-22：AI 生图历史持久化） ==========
     storyboardDb.run(`
@@ -712,46 +717,6 @@ function initStoryboardDatabase() {
       });
     });
   });
-}
-
-// 重新计算指定项目内分镜的 shotIndex（按需触发，仅重算单个项目，避免全表扫描）
-function recalcShotIndex(callback, projectId) {
-  const whereClause = projectId != null
-    ? 'WHERE deleted = 0 AND projectId = ?'
-    : 'WHERE deleted = 0';
-  const params = projectId != null ? [projectId] : [];
-  storyboardDb.all(
-    'SELECT id, projectId, sceneId FROM ' + 'videos ' + whereClause + ' ORDER BY projectId ASC, sceneId ASC, sortOrder ASC, id ASC',
-    params,
-    function(err, rows) {
-      if (err) {
-        console.error('[app] 计算 shotIndex 失败:', err.message);
-        callback && callback();
-        return;
-      }
-
-      const stmt = storyboardDb.prepare('UPDATE videos SET shotIndex = ? WHERE id = ?');
-      let currentProj = null;
-      let currentScene = null;
-      let idx = 0;
-
-      (rows || []).forEach(function(row) {
-        if (row.projectId !== currentProj || row.sceneId !== currentScene) {
-          idx = 1;
-          currentProj = row.projectId;
-          currentScene = row.sceneId;
-        } else {
-          idx++;
-        }
-        stmt.run(idx, row.id);
-      });
-
-      stmt.finalize(function() {
-        console.log('[app] shotIndex 计算完成: ' + (rows ? rows.length : 0) + ' 条' + (projectId != null ? ' (projectId=' + projectId + ')' : ''));
-        callback && callback();
-      });
-    }
-  );
 }
 
 // ========== 初始化默认设置 ==========
@@ -1196,7 +1161,7 @@ const items = {
       `SELECT id, title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
               narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
               props, costume, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
-              focalLength, lighting, estimatedDuration, aiStylePrompt, shotIndex
+              focalLength, lighting, estimatedDuration, aiStylePrompt
        FROM videos WHERE projectId = ? AND deleted = 0
        ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC`,
       [projectId]
@@ -1266,8 +1231,8 @@ const items = {
           `INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
             narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
             props, costume, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
-            aiStylePrompt, shotIndex)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            aiStylePrompt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sh.title, sh.filename, sh.url, sh.status || 'pending', sh.size || 0, sh.duration || 0,
             sh.sortOrder ?? null, newProjectId, newSceneId, sh.type || 'video',
@@ -1277,7 +1242,7 @@ const items = {
             sh.durationSeconds || null, sh.props || null, sh.costume || null, sh.notes || null,
             sh.mergedFrom || null, sh.aiImageTaskId || null, sh.aiImagePrompt || null,
             sh.focalLength || null, sh.lighting || null, sh.estimatedDuration || null,
-            sh.aiStylePrompt || null, sh.shotIndex || 0
+            sh.aiStylePrompt || null
           ]
         );
         shotIdMap[sh.id] = result.lastID;
@@ -1289,10 +1254,11 @@ const items = {
         const newShotId = shotIdMap[m.shotId];
         if (!newShotId) continue;
         await storyboardAsync.run(
-          'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, startTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
             newShotId, m.url, m.type || 'image', m.filename || '',
-            m.size || 0, m.duration || null, m.sortOrder ?? 0, m.source || 'upload'
+            m.size || 0, m.duration || null, m.sortOrder ?? 0, m.source || 'upload',
+            m.startTime !== undefined ? m.startTime : 0
           ]
         );
       }
@@ -1541,9 +1507,6 @@ const items = {
       return { newId: r.lastID, nextSort };
     });
 
-    // 重新计算 shotIndex（事务外执行，避免长事务）
-    await recalcShotIndexPromise(item.projectId);
-
     return formatShot({ id: newId, sortOrder: nextSort, ...item });
   },
 
@@ -1578,7 +1541,7 @@ const items = {
     // 合并 sceneContent（拼接）
     const mergedContent = shots.map(s => s.sceneContent || s.title || '').filter(t => t).join(' / ');
 
-    // P4-2：用事务包裹"迁移 media + 删除原 shot + 更新首 shot + 重算 shotIndex"，保证原子性
+    // P4-2：用事务包裹"迁移 media + 删除原 shot + 更新首 shot"，保证原子性
     // 中途任何步骤失败都会 ROLLBACK，避免出现孤儿 media 或媒体丢失
     await storyboardAsync.transaction(async (tx) => {
       // 合并后第一个分镜保留，其他分镜的media迁移过来
@@ -1594,8 +1557,8 @@ const items = {
         const media = await tx.all('SELECT * FROM shot_media WHERE shotId = ? ORDER BY sortOrder ASC', [shot.id]);
         for (let i = 0; i < media.length; i++) {
           await tx.run(
-            'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [firstShot.id, media[i].url, media[i].type, media[i].filename, media[i].size, media[i].duration, baseSort + i, media[i].source, media[i].createdAt]
+            'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, createdAt, startTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [firstShot.id, media[i].url, media[i].type, media[i].filename, media[i].size, media[i].duration, baseSort + i, media[i].source, media[i].createdAt, media[i].startTime || 0]
           );
         }
 
@@ -1626,9 +1589,6 @@ const items = {
         'UPDATE videos SET sceneContent = ?, title = ?, mergedFrom = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
         [mergedContent, mergedContent, JSON.stringify(mergedFromArray), firstShot.id]
       );
-
-      // 重新计算 shotIndex（事务内执行，确保原子性）
-      await recalcShotIndexPromise(projectId);
     });
 
     // 返回合并后的分镜
@@ -1655,12 +1615,13 @@ const shotMedia = {
     const nextSort = (maxRow ? maxRow.maxSort : -1) + 1;
 
     const r = await storyboardAsync.run(
-      'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO shot_media (shotId, url, type, filename, size, duration, sortOrder, source, startTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         item.shotId, item.url, item.type || 'image', item.filename || '',
         item.size || 0, item.duration || null,
         item.sortOrder !== undefined ? item.sortOrder : nextSort,
-        item.source || 'upload'
+        item.source || 'upload',
+        item.startTime !== undefined ? item.startTime : 0
       ]
     );
     return { id: r.lastID, sortOrder: nextSort, ...item };
@@ -1937,13 +1898,6 @@ const transcodeTasks = {
     return r.changes > 0;
   }
 };
-
-// 辅助：Promise 版重新计算 shotIndex
-function recalcShotIndexPromise(projectId) {
-  return new Promise(function(resolve) {
-    recalcShotIndex(resolve, projectId);
-  });
-}
 
 // ========== digital_assets（数字资产：演员/道具/场景） ==========
 const digitalAssets = {

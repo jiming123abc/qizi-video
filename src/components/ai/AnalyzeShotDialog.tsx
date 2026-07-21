@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Loader2, Play, Check, ChevronDown, AlertCircle, Settings as SettingsIcon, Image as ImageIcon } from 'lucide-react';
 import type { Shot, ShotMedia, Settings, ModelConfig } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
-import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { batchGetSignedUrls, getSignedUrlFromCache, getVideoPoster } from '../../lib/ossUtils';
 import { AiErrorGuide } from './AiErrorGuide';
 
 interface AnalyzeShotDialogProps {
@@ -41,10 +41,48 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
   // P3-1：120s 超时 ref，用于清理
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 
-  const { url: signedUrl, ready } = useSignedUrl(currentMedia?.url);
+  const mediaUrl = currentMedia?.url || '';
+  const signedUrl = getSignedUrlFromCache(mediaUrl) || mediaUrl;
 
   useEscapeKey(onClose, isOpen);
+
+  useEffect(() => {
+    if (!isOpen || !mediaUrl) {
+      setMediaReady(false);
+      setIsVideoPlaying(false);
+      return;
+    }
+    if (getSignedUrlFromCache(mediaUrl)) {
+      setMediaReady(true);
+      return;
+    }
+    setMediaReady(false);
+    const urlsToSign = [mediaUrl];
+    if (currentMedia?.type === 'video') {
+      const posterUrl = getVideoPoster(mediaUrl);
+      if (posterUrl) urlsToSign.push(posterUrl);
+    }
+    batchGetSignedUrls(urlsToSign).then(() => {
+      setMediaReady(true);
+    }).catch(() => {
+      setMediaReady(true);
+    });
+  }, [isOpen, mediaUrl, currentMedia?.type]);
+
+  useEffect(() => {
+    return () => {
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        } catch (_) {}
+      }
+    };
+  }, []);
 
   // P3-1：组件卸载或对话框关闭时清理所有 timer，防止内存泄漏
   useEffect(() => {
@@ -57,6 +95,14 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
       }
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        } catch (_) {}
+      }
+      setIsVideoPlaying(false);
       setIsAnalyzing(false);
     }
     return () => {
@@ -90,9 +136,9 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
             if (visionModels.length > 0) {
               setSelectedProvider(visionModels[0].provider);
               setSelectedModel(visionModels[0].model);
-            } else if ((data.data.llm_fallback_chain || []).length > 0) {
-              setSelectedProvider(data.data.llm_fallback_chain[0].provider);
-              setSelectedModel(data.data.llm_fallback_chain[0].model);
+            } else {
+              setSelectedProvider('');
+              setSelectedModel('');
             }
           }
         })
@@ -107,7 +153,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
 
   const visionModels = settings?.llm_fallback_chain?.filter((m: ModelConfig) => m.supportsVision) || [];
   const hasVisionModels = visionModels.length > 0;
-  const availableModels = hasVisionModels ? visionModels : (settings?.llm_fallback_chain || []);
+  const availableModels = visionModels;
 
   const filteredModels = availableModels.filter((m: ModelConfig) => m.provider === selectedProvider);
 
@@ -249,19 +295,30 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
           <div>
             <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-2">素材预览</label>
             <div className="relative aspect-video rounded-xl overflow-hidden bg-white/5 border border-white/10">
-              {ready ? (
-                currentMedia.type === 'video' ? (
+              {!mediaReady ? (
+                <div className="w-full h-full flex items-center justify-center bg-black/40">
+                  <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+                </div>
+              ) : currentMedia.type === 'video' ? (
+                isVideoPlaying ? (
+                  <video
+                    ref={videoRef}
+                    src={signedUrl}
+                    className="w-full h-full object-cover"
+                    playsInline
+                    muted
+                    controls
+                    autoPlay
+                  />
+                ) : (
                   <>
-                    <video
-                      ref={videoRef}
-                      src={signedUrl}
+                    <img
+                      src={getSignedUrlFromCache(getVideoPoster(mediaUrl)) || getVideoPoster(mediaUrl)}
+                      alt="视频封面"
                       className="w-full h-full object-cover"
-                      poster={shot.coverUrl || signedUrl}
-                      playsInline
-                      muted
                     />
                     <button
-                      onClick={() => videoRef.current?.play()}
+                      onClick={() => setIsVideoPlaying(true)}
                       className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
                     >
                       <Play className="w-10 sm:w-12 h-10 sm:h-12 text-white/90" />
@@ -272,13 +329,9 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                       </div>
                     )}
                   </>
-                ) : (
-                  <img src={signedUrl} alt="素材预览" className="w-full h-full object-cover" />
                 )
               ) : (
-                <div className="w-full h-full flex items-center justify-center bg-black/40">
-                  <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
-                </div>
+                <img src={signedUrl} alt="素材预览" className="w-full h-full object-cover" />
               )}
             </div>
             <div className="text-xs text-slate-500 mt-1 truncate">{currentMedia.filename}</div>
@@ -310,10 +363,10 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                   value={selectedProvider}
                   onChange={e => setSelectedProvider(e.target.value)}
                   className="w-full px-3 py-2.5 sm:py-2 pr-8 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50 min-h-[44px]"
-                  disabled={isAnalyzing}
+                  disabled={isAnalyzing || !hasVisionModels}
                 >
                   <option value="" className="bg-slate-800 text-slate-100">选择平台</option>
-                  {settings?.ai_platforms?.map(p => (
+                  {settings?.ai_platforms?.filter(p => visionModels.some(m => m.provider === p.id)).map(p => (
                     <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
                   ))}
                 </select>
@@ -324,12 +377,12 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
                   value={selectedModel}
                   onChange={e => setSelectedModel(e.target.value)}
                   className="w-full px-3 py-2.5 sm:py-2 pr-8 rounded-lg bg-slate-800 border border-white/10 text-white text-sm appearance-none cursor-pointer focus:outline-none focus:border-violet-400/50 min-h-[44px]"
-                  disabled={isAnalyzing}
+                  disabled={isAnalyzing || !hasVisionModels}
                 >
                   <option value="" className="bg-slate-800 text-slate-100">选择模型</option>
                   {filteredModels.map(m => (
                     <option key={m.model} value={m.model} className="bg-slate-800 text-slate-100">
-                      {m.model} {m.supportsVision ? '(视觉)' : ''}
+                      {m.model} (视觉)
                     </option>
                   ))}
                 </select>
@@ -342,7 +395,7 @@ export default function AnalyzeShotDialog({ isOpen, onClose, shot, currentMedia,
           <div className="flex gap-2">
             <button
               onClick={startAnalysis}
-              disabled={isAnalyzing || !selectedProvider || !selectedModel}
+              disabled={isAnalyzing || !hasVisionModels || !selectedProvider || !selectedModel}
               className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 hover:from-emerald-500/30 hover:to-teal-500/30 border border-emerald-400/30 text-emerald-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition min-h-[44px]"
             >
               {isAnalyzing ? (

@@ -105,6 +105,8 @@ export function SceneTabs({
                 onClick={() => onSelectScene(scene.id)}
                 draggable={!isMobile}
                 onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   if (dragShotId !== null) {
                     onShotDragOverScene(e, scene.id);
                   } else {
@@ -166,6 +168,8 @@ export function SceneTabs({
             <button
               onClick={onSelectUnclassified}
               onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 if (dragShotId !== null) {
                   onShotDragOverScene(e, null);
                 }

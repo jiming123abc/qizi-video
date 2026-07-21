@@ -30,7 +30,8 @@ export interface SignedUrlResult {
 }
 
 export function useSignedUrl(originalUrl: string | undefined | null): SignedUrlResult {
-  const [signedUrl, setSignedUrl] = useState<string>('');
+  const initialValue = originalUrl ? getSignedUrlFromCache(originalUrl) : '';
+  const [signedUrl, setSignedUrl] = useState<string>(initialValue);
 
   useEffect(() => {
     if (!originalUrl) {
@@ -39,7 +40,9 @@ export function useSignedUrl(originalUrl: string | undefined | null): SignedUrlR
     }
 
     const cached = getSignedUrlFromCache(originalUrl);
-    setSignedUrl(cached);
+    if (cached !== signedUrl) {
+      setSignedUrl(cached);
+    }
 
     if (cached === originalUrl) {
       requestSignUrl(originalUrl);

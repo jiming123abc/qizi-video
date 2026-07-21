@@ -25,7 +25,6 @@ import { VideoCompressionDialog } from './VideoCompressionDialog';
 import { getVideoPoster, uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
-import { useSignedUrl } from '../../hooks/useSignedUrl';
 
 interface FieldSuggestions {
   location: string[];
@@ -60,6 +59,7 @@ interface ShotCardProps {
   onFullscreen?: (media: ShotMedia) => void;
   isFirst?: boolean;
   isLast?: boolean;
+  index?: number;
   isMobile?: boolean;
   currentTab?: 'pending' | 'done' | 'trash';
   // P4-1：搜索状态下禁用拖拽，手柄显示禁用样式
@@ -75,6 +75,8 @@ interface ShotCardProps {
   onOpenSettings?: () => void;
   // P3-4：上传失败等提示改用 toast 而非 alert
   onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
+  // 父级批量签名后的媒体 URL（参考项目列表页模式）
+  signedMediaUrls?: Record<string, string>;
 }
 
 const SHOT_TYPES = ['大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写'];
@@ -313,6 +315,7 @@ export function ShotCard({
   onFullscreen,
   isFirst = false,
   isLast = false,
+  index = 0,
   isMobile = false,
   currentTab = 'pending',
   dragDisabled = false,
@@ -326,6 +329,7 @@ export function ShotCard({
   onDeleteMedia,
   onOpenSettings,
   onShowToast,
+  signedMediaUrls,
 }: ShotCardProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -334,9 +338,7 @@ export function ShotCard({
   const [imgError, setImgError] = useState(false);
   const [posterRetryCount, setPosterRetryCount] = useState(0);
   const [showMergedFrom, setShowMergedFrom] = useState(false);
-  const [isVisible, setIsVisible] = useState(false);
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
-  const cardRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
@@ -364,40 +366,27 @@ export function ShotCard({
   const videoKey = `${shot.id}-${currentMedia?.id}`;
   const isThisVideoPlaying = playingVideoKey === videoKey;
 
-  // 签名 URL
-  const { url: signedMediaUrl, ready: mediaReady } = useSignedUrl(currentMedia?.url);
-  const { url: signedPosterUrl, ready: posterReady } = useSignedUrl(currentMedia?.url ? getVideoPoster(currentMedia.url) : undefined);
+  // 从父级传入的批量签名结果中获取签名 URL（参考项目列表页模式）
+  const mediaUrl = currentMedia?.url || '';
+  const posterUrl = isVideo ? getVideoPoster(mediaUrl, currentMedia?.startTime) : '';
+  const signedMediaUrl = signedMediaUrls?.[mediaUrl] || mediaUrl;
+  // poster URL 现在使用后端代理 /api/oss-snapshot，不需要 OSS 签名
+  const signedPosterUrl = posterUrl;
+  const mediaReady = !!mediaUrl && signedMediaUrl !== mediaUrl;
+  const posterReady = !!posterUrl;
 
-  // 当签名 URL 就绪或媒体切换时，重置图片错误状态
+  // 媒体切换时重置错误和播放状态
   useEffect(() => {
-    if ((signedPosterUrl || signedMediaUrl) && imgError) {
-      setImgError(false);
-      setPosterRetryCount(0);
+    // 切换 media 前先清理 video 元素
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch (e) {}
     }
-  }, [signedPosterUrl, signedMediaUrl, currentIndex]);
-
-  // 媒体切换时重置错误状态
-  useEffect(() => {
     setImgError(false);
     setPosterRetryCount(0);
+    setShouldLoadVideo(false);
   }, [currentIndex, currentMedia?.id]);
-
-  useEffect(() => {
-    if (!cardRef.current) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            setIsVisible(true);
-            observer.disconnect();
-          }
-        });
-      },
-      { rootMargin: '200px' }
-    );
-    observer.observe(cardRef.current);
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     if (onVideoRefReady && videoRef.current) {
@@ -409,6 +398,20 @@ export function ShotCard({
       }
     };
   }, [videoKey, onVideoRefReady, shouldLoadVideo]);
+
+  useEffect(() => {
+    return () => {
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+          videoRef.current.removeAttribute('src');
+          // 不再调用 load()，避免触发空 src 的 abort
+        } catch (e) {
+          // 忽略清理时的错误
+        }
+      }
+    };
+  }, []);
 
   const handleFieldUpdate = useCallback((field: keyof Shot, value: string) => {
     onUpdate?.(shot.id, { [field]: value });
@@ -446,6 +449,10 @@ export function ShotCard({
       setUploadMessage('保存到分镜...');
 
       // 保存到分镜
+      const fileSize = result.compressedSizeKB
+        ? Math.round(result.compressedSizeKB * 1024)
+        : file.size;
+
       const res = await fetch(`/api/shots/${shot.id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -454,7 +461,8 @@ export function ShotCard({
           type: 'video',
           filename: file.name,
           source: 'upload',
-          ossKey: result.ossKey
+          ossKey: result.ossKey,
+          size: fileSize
         })
       });
 
@@ -466,7 +474,7 @@ export function ShotCard({
           url: result.url,
           type: 'video',
           filename: file.name,
-          size: 0,
+          size: fileSize,
           sortOrder: media.length,
           source: 'upload',
           ossKey: result.ossKey,
@@ -541,6 +549,10 @@ export function ShotCard({
         setUploadProgress(100);
         setUploadMessage('保存到分镜...');
 
+        const fileSize = result.compressedSizeKB
+          ? Math.round(result.compressedSizeKB * 1024)
+          : file.size;
+
         const res = await fetch(`/api/shots/${shot.id}/media`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -549,7 +561,8 @@ export function ShotCard({
             type: 'image',
             filename: file.name,
             source: 'upload',
-            ossKey: result.ossKey
+            ossKey: result.ossKey,
+            size: fileSize
           })
         });
 
@@ -561,7 +574,7 @@ export function ShotCard({
             url: result.url,
             type: 'image',
             filename: file.name,
-            size: 0,
+            size: fileSize,
             sortOrder: media.length,
             source: 'upload',
             ossKey: result.ossKey,
@@ -666,6 +679,27 @@ export function ShotCard({
     }
   }, []);
 
+  const handleVideoLoadedMetadata = useCallback(() => {
+    if (videoRef.current && currentMedia?.startTime !== undefined && currentMedia.startTime > 0) {
+      videoRef.current.currentTime = currentMedia.startTime;
+    }
+  }, [currentMedia?.startTime]);
+
+  const handleVideoTimeUpdate = useCallback(() => {
+    if (!videoRef.current || currentMedia?.startTime === undefined) return;
+    const startTime = currentMedia.startTime || 0;
+    const segmentDuration = currentMedia.duration || 0;
+    if (segmentDuration > 0) {
+      const endTime = startTime + segmentDuration;
+      if (videoRef.current.currentTime >= endTime - 0.1) {
+        videoRef.current.currentTime = startTime;
+        if (!videoRef.current.paused) {
+          videoRef.current.play().catch(() => {});
+        }
+      }
+    }
+  }, [currentMedia?.startTime, currentMedia?.duration]);
+
   const handleFullscreen = useCallback((mediaItem: ShotMedia) => {
     handlePauseVideo();
     onFullscreen?.(mediaItem);
@@ -703,7 +737,6 @@ export function ShotCard({
   return (
     <>
       <div
-        ref={cardRef}
         id={`shot-card-${shot.id}`}
       className={`relative rounded-2xl border overflow-hidden transition-all ${
         highlighted
@@ -731,120 +764,45 @@ export function ShotCard({
               >
                 {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
               </button>
-              {isVideo ? (
-                <>
-                  {/* 封面图（懒加载，未播放时显示） */}
-                  {(!shouldLoadVideo || !isVisible) && (
-                    <>
-                      {imgError ? (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/30">
-                            <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
-                            <circle cx="9" cy="9" r="2"/>
-                            <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
-                          </svg>
-                        </div>
-                      ) : isVisible ? (
-                        posterReady ? (
-                          <img
-                            key={`poster-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
-                            src={signedPosterUrl || signedMediaUrl}
-                            alt={currentMedia.filename}
-                            className="w-full h-full object-cover"
-                            loading="lazy"
-                            onError={() => {
-                              console.error('[ShotCard] 封面加载失败:', { url: currentMedia.url, shotId: shot.id });
-                              setImgError(true);
-                              if (posterRetryCount < 3) {
-                                setTimeout(() => {
-                                  setImgError(false);
-                                  setPosterRetryCount(c => c + 1);
-                                }, 1000 * (posterRetryCount + 1));
-                              }
-                            }}
-                          />
-                        ) : (
-                          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                            <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
-                          </div>
-                        )
-                      ) : (
-                        <div className="absolute inset-0 bg-black/40" />
-                      )}
-                    </>
-                  )}
-
-                  {/* 视频元素（仅在可见且点击播放后创建） */}
-                  {shouldLoadVideo && isVisible && mediaReady && (
-                    <video
-                      ref={videoRef}
-                      src={signedMediaUrl}
-                      muted={false}
-                      playsInline
-                      loop
-                      controls={isMobile}
-                      className="w-full h-full object-cover"
-                      onPlay={handleVideoPlay}
-                      onPause={handleVideoPause}
-                      onWaiting={handleVideoWaiting}
-                      onCanPlay={handleVideoCanPlay}
-                      onProgress={handleVideoProgress}
-                      onClick={(e) => {
-                        if (!isMobile && isThisVideoPlaying) {
-                          e.preventDefault();
-                          handleTogglePlay();
-                        }
-                      }}
-                    />
-                  )}
-
-                  {/* 播放按钮（未播放时显示） */}
-                  {!isThisVideoPlaying && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handlePlayVideo(); }}
-                      className="absolute inset-0 z-10 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
-                    >
-                      <div className="w-16 h-16 rounded-full bg-white/20 backdrop-blur-sm border border-white/30 flex items-center justify-center hover:bg-white/30 transition">
-                        <Play className="w-8 h-8 text-white fill-white ml-1" />
-                      </div>
-                    </button>
-                  )}
-
-                  {/* 加载进度条 */}
-                  {(isVideoLoading || bufferProgress < 100) && isThisVideoPlaying && (
-                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40 z-20">
-                      <div
-                        className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
-                        style={{ width: `${bufferProgress}%` }}
-                      />
-                    </div>
-                  )}
-
-                  {/* 加载指示器 */}
-                  {isVideoLoading && (
-                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/20">
-                      <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    </div>
-                  )}
-                </>
-              ) : (
-                imgError ? (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/30">
-                      <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
-                      <circle cx="9" cy="9" r="2"/>
-                      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
-                    </svg>
-                  </div>
-                ) : mediaReady ? (
-                  <img
-                    key={`img-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
+              {/* 媒体内容（条件渲染，参考项目卡片模式） */}
+              {!currentMedia || !mediaReady ? (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                  <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
+                </div>
+              ) : isVideo ? (
+                shouldLoadVideo ? (
+                  <video
+                    ref={videoRef}
                     src={signedMediaUrl}
-                    alt={currentMedia.filename}
+                    preload="none"
+                    muted={false}
+                    playsInline
+                    loop
+                    controls={isMobile}
+                    className="w-full h-full object-cover"
+                    onPlay={handleVideoPlay}
+                    onPause={handleVideoPause}
+                    onWaiting={handleVideoWaiting}
+                    onCanPlay={handleVideoCanPlay}
+                    onProgress={handleVideoProgress}
+                    onLoadedMetadata={handleVideoLoadedMetadata}
+                    onTimeUpdate={handleVideoTimeUpdate}
+                    onClick={(e) => {
+                      if (!isMobile && isThisVideoPlaying) {
+                        e.preventDefault();
+                        handleTogglePlay();
+                      }
+                    }}
+                  />
+                ) : (
+                  <img
+                    key={`poster-${shot.id}-${currentMedia?.id}-${posterRetryCount}`}
+                    src={posterReady ? signedPosterUrl : signedMediaUrl}
+                    alt={currentMedia?.filename || ''}
                     className="w-full h-full object-cover"
                     loading="lazy"
                     onError={() => {
-                      console.error('[ShotCard] 图片加载失败:', { url: currentMedia.url, filename: currentMedia.filename, shotId: shot.id });
+                      console.error('[ShotCard] 封面加载失败:', { url: currentMedia?.url, shotId: shot.id });
                       setImgError(true);
                       if (posterRetryCount < 3) {
                         setTimeout(() => {
@@ -854,11 +812,64 @@ export function ShotCard({
                       }
                     }}
                   />
-                ) : (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                    <ImageIcon className="w-8 h-8 text-white/30 animate-pulse" />
-                  </div>
                 )
+              ) : (
+                <img
+                  src={signedMediaUrl}
+                  alt={currentMedia?.filename || ''}
+                  className="w-full h-full object-cover"
+                  loading="lazy"
+                  onError={() => {
+                    console.error('[ShotCard] 图片加载失败:', { url: currentMedia?.url, filename: currentMedia?.filename, shotId: shot.id });
+                    setImgError(true);
+                    if (posterRetryCount < 3) {
+                      setTimeout(() => {
+                        setImgError(false);
+                        setPosterRetryCount(c => c + 1);
+                      }, 1000 * (posterRetryCount + 1));
+                    }
+                  }}
+                />
+              )}
+
+              {/* 媒体错误 overlay */}
+              {imgError && mediaReady && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-10">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/30">
+                    <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+                    <circle cx="9" cy="9" r="2"/>
+                    <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+                  </svg>
+                </div>
+              )}
+
+              {/* 播放按钮（仅视频类型且未播放时显示） */}
+              {isVideo && mediaReady && !isThisVideoPlaying && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); handlePlayVideo(); }}
+                  className="absolute inset-0 z-10 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
+                >
+                  <div className="w-16 h-16 rounded-full bg-white/20 backdrop-blur-sm border border-white/30 flex items-center justify-center hover:bg-white/30 transition">
+                    <Play className="w-8 h-8 text-white fill-white ml-1" />
+                  </div>
+                </button>
+              )}
+
+              {/* 加载进度条（仅视频类型且播放中显示） */}
+              {isVideo && (isVideoLoading || bufferProgress < 100) && isThisVideoPlaying && (
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40 z-20">
+                  <div
+                    className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+                    style={{ width: `${bufferProgress}%` }}
+                  />
+                </div>
+              )}
+
+              {/* 加载指示器（仅视频类型且加载中显示） */}
+              {isVideo && isVideoLoading && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/20">
+                  <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                </div>
               )}
 
               {/* 左箭头 */}
@@ -896,6 +907,29 @@ export function ShotCard({
                   ))}
                 </div>
               )}
+
+              {/* 来源徽章 */}
+              {currentMedia && (() => {
+                const src = currentMedia.source;
+                let badgeText = '';
+                let badgeClass = '';
+                if (src === 'ai_generated') {
+                  badgeText = 'AI';
+                  badgeClass = 'bg-purple-500/80 text-white';
+                } else if (src === 'upload') {
+                  badgeText = '上传';
+                  badgeClass = 'bg-slate-500/80 text-white';
+                } else if (src === 'video_split') {
+                  badgeText = '分割';
+                  badgeClass = 'bg-blue-500/80 text-white';
+                }
+                if (!badgeText) return null;
+                return (
+                  <div className={`absolute top-2 left-1/2 -translate-x-1/2 z-20 px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeClass}`}>
+                    {badgeText}
+                  </div>
+                );
+              })()}
 
             </div>
           </>
@@ -1028,7 +1062,7 @@ export function ShotCard({
             </button>
           </div>
         )}
-        {currentTab === 'pending' && !isMobile && currentMedia && (
+        {currentTab === 'pending' && !isMobile && currentMedia && currentMedia.source !== 'ai_generated' && (
           <div className="absolute bottom-3 right-3 z-20">
             <button
               onClick={(e) => { e.stopPropagation(); handleAnalyzeShot(); }}
@@ -1205,7 +1239,7 @@ export function ShotCard({
           />
 
           {/* 视频分割按钮 */}
-          {media.some(m => m.type === 'video') && (
+          {currentTab === 'pending' && media.some(m => m.type === 'video') && (
             <button
               onClick={() => onSplitVideo?.(shot)}
               className="w-full mt-2 py-2 rounded-xl border border-dashed border-amber-400/30 bg-amber-500/10 hover:bg-amber-500/20 text-xs font-medium text-amber-200 transition flex items-center justify-center gap-2"
@@ -1271,7 +1305,7 @@ export function ShotCard({
               <GripVertical className="w-4 h-4" />
             </button>
           )}
-          <span className="text-xs text-slate-500 ml-1">分镜 {shot.shotIndex}</span>
+          <span className="text-xs text-slate-500 ml-1">分镜 {index + 1}</span>
         </div>
 
         <div className="flex items-center gap-1.5">

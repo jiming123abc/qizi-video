@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Settings as SettingsIcon, Sparkles, Scissors, BarChart3, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
+import { Upload, Play, CheckCircle2, Trash2, X, FileVideo, Maximize2, Share2, Plus, ArrowLeft, RotateCcw, Image as ImageIcon, Check, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sparkles, Scissors, Search, XCircle, Info, MoreHorizontal, Merge, Archive } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat as checkIsWeChat } from '../lib/shareUtils';
-import { uploadVideo, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
+import { uploadVideo, detectFileType, checkVideoBitrate, batchGetSignedUrls, getSignedUrlFromCache } from '../lib/ossUtils';
 import type { UploadDecision } from '../lib/ossUtils';
-import { useSignedUrl } from '../hooks/useSignedUrl';
 import { ShareHint } from '../components/WeChatShareHint';
 import { useEscapeKey } from '../hooks/useEscapeKey';
 import { useToastContext } from '../components/ToastProvider';
@@ -44,14 +43,6 @@ import type { Shot, ShotMedia, Project, Scene, SceneStat } from '../lib/types';
 interface StoryboardPageProps {
   projectId: number;
   onBack?: () => void;
-}
-
-// 视频 poster（OSS 截图）
-function getPosterUrl(videoUrl: string): string {
-  if (videoUrl && (videoUrl.includes('aliyuncs.com') || videoUrl.includes('qiziwenhua.top'))) {
-    return videoUrl + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
-  }
-  return '';
 }
 
 export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
@@ -201,6 +192,9 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 
+  // 所有分镜媒体 URL 的签名结果（批量签名，参考项目列表页模式）
+  const [signedMediaUrls, setSignedMediaUrls] = useState<Record<string, string>>({});
+
   // 视频元素 ref 管理（微信播放需要同步手势调用）
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
 
@@ -236,8 +230,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const [fullscreenItem, setFullscreenItem] = useState<ShotMedia | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
-  const { url: signedFullscreenUrl } = useSignedUrl(fullscreenItem?.url);
-  const { url: signedFullscreenPoster } = useSignedUrl(fullscreenItem?.url ? getPosterUrl(fullscreenItem.url) : undefined);
 
   // ============ 新对话框状态 ============
   const [showAddShotDialog, setShowAddShotDialog] = useState(false);
@@ -252,6 +244,9 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [mediaRefreshTrigger, setMediaRefreshTrigger] = useState(0);
   const [selectedShotForAIGen, setSelectedShotForAIGen] = useState<Shot | null>(null);
   const [selectedVideoForSplit, setSelectedVideoForSplit] = useState<string | null>(null);
+  const [initialVideosForSplit, setInitialVideosForSplit] = useState<Array<{ id: string; url: string; name: string; thumbnail?: string; isFromShot?: boolean }>>([]);
+  const [videoSplitSource, setVideoSplitSource] = useState<'global' | 'shot'>('global');
+  const [videoSplitShotId, setVideoSplitShotId] = useState<number | null>(null);
   const [pendingSplitVideo, setPendingSplitVideo] = useState<File | null>(null);
   const [pendingSplitDecision, setPendingSplitDecision] = useState<UploadDecision | null>(null);
   const [showDigitalAssetDialog, setShowDigitalAssetDialog] = useState(false);
@@ -420,6 +415,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     loadShots,
     loadStats,
     loadProject,
+    loadSceneStats,
   });
 
   const refreshAll = useCallback(async () => {
@@ -444,14 +440,61 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     });
   }, [project]);
 
+  // 批量签名所有分镜媒体 URL（参考项目列表页模式）
+  useEffect(() => {
+    if (!shots || shots.length === 0) return;
+
+    const allUrls: string[] = [];
+    shots.forEach(shot => {
+      (shot.media || []).forEach(m => {
+        if (m.url && !allUrls.includes(m.url)) {
+          allUrls.push(m.url);
+        }
+        // poster URL 现在使用后端代理 /api/oss-snapshot，不需要 OSS 签名
+        // 移除 poster URL 的签名请求
+      });
+    });
+
+    if (allUrls.length === 0) return;
+
+    // 先用缓存填充，立即渲染
+    const immediate: Record<string, string> = {};
+    allUrls.forEach(u => {
+      immediate[u] = getSignedUrlFromCache(u);
+    });
+    setSignedMediaUrls(prev => ({ ...prev, ...immediate }));
+
+    // 批量签名未缓存的 URL
+    batchGetSignedUrls(allUrls).then(() => {
+      const updated: Record<string, string> = {};
+      allUrls.forEach(u => {
+        updated[u] = getSignedUrlFromCache(u);
+      });
+      setSignedMediaUrls(prev => ({ ...prev, ...updated }));
+    });
+  }, [shots]);
+
   // 切换场次 / tab
   useEffect(() => {
-    loadShots();
-    loadStats();
-    // 切换 tab 时停止当前播放
+    // 先停止所有正在播放的视频，清理 video 元素，避免 ERR_ABORTED
+    videoRefs.current.forEach((v) => {
+      try {
+        v.pause();
+        v.removeAttribute('src');
+        // 不再调用 load()，避免触发空 src 的 abort
+      } catch (_) {}
+    });
+    videoRefs.current.clear();
+    setPlayingVideoKey(null);
     setPlayingItemId(null);
     // P3-14：切换场次/tab 时清空选中，避免选中不可见分镜导致误操作
     setSelectedIds(new Set());
+    // 延迟一帧加载，给旧视频元素卸载留时间
+    const timer = setTimeout(() => {
+      loadShots();
+      loadStats();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [currentSceneId, currentTab, loadShots, loadStats, setSelectedIds]);
 
   // P3-13：从 URL 恢复 scene 状态（仅首次加载时执行一次）
@@ -600,6 +643,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         setGenericConfirm(null);
         await softDelete(id);
         await loadStats();
+        loadSceneStats();
       }
     });
   };
@@ -607,6 +651,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const restoreItemWithStats = async (id: number) => {
     await restoreItem(id);
     await loadStats();
+    loadSceneStats();
   };
 
   const hardDeleteWithConfirm = (id: number) => {
@@ -620,6 +665,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           setGenericConfirm(null);
           await doDelete();
           await loadStats();
+          loadSceneStats();
         }
       });
     });
@@ -638,6 +684,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         setGenericConfirm(null);
         await batchSoftDelete();
         await loadStats();
+        loadSceneStats();
       }
     });
   };
@@ -645,11 +692,44 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const batchRestoreWithStats = async () => {
     await batchRestore();
     await loadStats();
+    loadSceneStats();
   };
 
   const batchUpdateStatusWithStats = async (status: 'pending' | 'done') => {
     await batchUpdateStatus(status);
     await loadStats();
+  };
+
+  const batchMoveToPendingWithConfirm = () => {
+    if (selectedIds.size === 0) return;
+    const count = selectedIds.size;
+    setGenericConfirm({
+      isOpen: true,
+      title: '移动到未拍摄',
+      message: `确定将所选 ${count} 个分镜标记为未拍摄？`,
+      confirmText: '确认移动',
+      onConfirm: async () => {
+        setGenericConfirm(null);
+        await batchUpdateStatusWithStats('pending');
+        loadSceneStats();
+      }
+    });
+  };
+
+  const batchMarkAsDoneWithConfirm = () => {
+    if (selectedIds.size === 0) return;
+    const count = selectedIds.size;
+    setGenericConfirm({
+      isOpen: true,
+      title: '标记为已拍摄',
+      message: `确定将所选 ${count} 个分镜标记为已拍摄？`,
+      confirmText: '确认标记',
+      onConfirm: async () => {
+        setGenericConfirm(null);
+        await batchUpdateStatusWithStats('done');
+        loadSceneStats();
+      }
+    });
   };
 
   const batchHardDeleteWithConfirm = () => {
@@ -665,14 +745,20 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           setGenericConfirm(null);
           await doDelete();
           await loadStats();
+          loadSceneStats();
         }
       });
     });
   };
 
   const batchMoveToSceneAndClose = async (sceneId: number | null) => {
+    if (sceneId === currentSceneId) {
+      setShowMoveModal(false);
+      return;
+    }
     await batchMoveToScene(sceneId);
     setShowMoveModal(false);
+    loadSceneStats();
   };
 
   const batchMergeShotsWithReload = () => {
@@ -686,6 +772,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const confirmMergeShots = async () => {
     setShowMergeConfirm(false);
     await batchMergeShots(loadShots);
+    loadSceneStats();
   };
 
   // ============ 设置项目封面（上传后自动调用） ============
@@ -715,6 +802,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       setShowSceneManager(false);
       userManualSelectedUnclassifiedRef.current = false;
       await loadStats();
+      loadSceneStats();
     } finally {
       setIsCreatingScene(false);
     }
@@ -741,6 +829,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const deleteScene = async (id: number) => {
     await deleteSceneApi(id);
     await loadStats();
+    loadSceneStats();
   };
 
   // ============ 拖拽排序（分镜卡片） ============
@@ -778,6 +867,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     }
     await moveShotToScene(dragShotId, sceneId);
     await loadStats();
+    loadSceneStats();
     setDragShotId(null);
     setDragOverSceneForShot(undefined);
   };
@@ -824,6 +914,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
       if (result.url) {
         setSelectedVideoForSplit(result.url);
+        setVideoSplitSource('global');
+        setVideoSplitShotId(null);
         setTimeout(() => {
           setShowUploadDialog(false);
           setUploadingFiles([]);
@@ -1008,11 +1100,21 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     };
 
     const handleSplitVideo = (s: Shot) => {
-      const videoUrl = s.media?.find(m => m.type === 'video')?.url || '';
-      if (videoUrl) {
-        setSelectedVideoForSplit(videoUrl);
-        setShowVideoSplitDialog(true);
-      }
+      const videoMedias = s.media?.filter(m => m.type === 'video') || [];
+      if (videoMedias.length === 0) return;
+      
+      const videos = videoMedias.map((m, idx) => ({
+        id: String(m.id),
+        url: m.url,
+        name: `视频 ${idx + 1}`,
+        isFromShot: true
+      }));
+      
+      setInitialVideosForSplit(videos);
+      setSelectedVideoForSplit(videos[0].url);
+      setVideoSplitSource('shot');
+      setVideoSplitShotId(s.id);
+      setShowVideoSplitDialog(true);
     };
 
     return (
@@ -1056,6 +1158,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           onFullscreen={handleFullscreen}
           isFirst={isFirst}
           isLast={isLast}
+          index={index}
           isMobile={isMobile}
           currentTab={currentTab}
           dragDisabled={searchQuery.trim() !== ''}
@@ -1069,6 +1172,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           onDeleteMedia={handleDeleteMedia}
           onOpenSettings={() => setShowSettingsDialog(true)}
           onShowToast={showToast}
+          signedMediaUrls={signedMediaUrls}
         />
       </div>
     );
@@ -1202,20 +1306,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
             {/* 视频分割 */}
             <button
-              onClick={() => { setPlayingItemId(null); setShowVideoSplitDialog(true); }}
+              onClick={() => { setPlayingItemId(null); setVideoSplitSource('global'); setSelectedVideoForSplit(null); setInitialVideosForSplit([]); setVideoSplitShotId(null); setShowVideoSplitDialog(true); }}
               className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
               title="视频分割为分镜"
             >
               <Scissors className="w-4 h-4 text-white/90" />
-            </button>
-
-            {/* 费用统计 */}
-            <button
-              onClick={() => { setPlayingItemId(null); setShowAIUsagePanel(true); }}
-              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
-              title="费用统计"
-            >
-              <BarChart3 className="w-4 h-4 text-white/90" />
             </button>
 
             {/* 数字资产管理 */}
@@ -1225,15 +1320,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               title="数字资产管理"
             >
               <Archive className="w-4 h-4 text-white/90" />
-            </button>
-
-            {/* 设置 */}
-            <button
-              onClick={() => { setPlayingItemId(null); setShowSettingsDialog(true); }}
-              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
-              title="设置"
-            >
-              <SettingsIcon className="w-4 h-4 text-white/90" />
             </button>
           </div>
 
@@ -1275,18 +1361,11 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                       AI 生成分镜
                     </button>
                     <button
-                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowVideoSplitDialog(true); }}
+                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setVideoSplitSource('global'); setSelectedVideoForSplit(null); setInitialVideosForSplit([]); setVideoSplitShotId(null); setShowVideoSplitDialog(true); }}
                       className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
                     >
                       <Scissors className="w-4 h-4 text-violet-300" />
                       视频分割
-                    </button>
-                    <button
-                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowAIUsagePanel(true); }}
-                      className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
-                    >
-                      <BarChart3 className="w-4 h-4 text-violet-300" />
-                      费用统计
                     </button>
                     <button
                       onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowDigitalAssetDialog(true); }}
@@ -1294,14 +1373,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                     >
                       <Archive className="w-4 h-4 text-violet-300" />
                       数字资产管理
-                    </button>
-                    <div className="my-1 border-t border-white/5" />
-                    <button
-                      onClick={() => { setShowMobileMoreMenu(false); setPlayingItemId(null); setShowSettingsDialog(true); }}
-                      className="w-full px-4 py-2.5 text-left text-sm hover:bg-white/5 flex items-center gap-2 transition"
-                    >
-                      <SettingsIcon className="w-4 h-4 text-violet-300" />
-                      设置
                     </button>
                   </div>
                 </>
@@ -1416,7 +1487,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 </button>
                 {currentTab === 'pending' && (
                   <button
-                    onClick={() => batchUpdateStatusWithStats('done')}
+                    onClick={batchMarkAsDoneWithConfirm}
                     className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
                   >
                     标记为已拍摄
@@ -1424,7 +1495,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 )}
                 {currentTab === 'done' && (
                   <button
-                    onClick={() => batchUpdateStatusWithStats('pending')}
+                    onClick={batchMoveToPendingWithConfirm}
                     className="px-3 py-1.5 rounded-full text-xs border border-white/20 bg-white/5 hover:bg-white/10 transition"
                   >
                     移动到未拍摄
@@ -1658,10 +1729,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               </button>
             </div>
             <div className="mb-5 p-3 rounded-xl bg-white/[0.03] border border-white/10">
-              <div className="text-xs text-slate-400 mb-1">分镜编号</div>
-              <div className="text-sm font-medium text-slate-200">{showConfirmDialog.shotNo || '未编号'}</div>
-              <div className="text-xs text-slate-400 mt-2 mb-1">画面内容</div>
-              <div className="text-sm text-slate-300 line-clamp-2">{showConfirmDialog.sceneContent || showConfirmDialog.title || '无描述'}</div>
+              <div className="text-sm font-medium text-slate-200">{showConfirmDialog.sceneContent || showConfirmDialog.title || '未命名分镜'}</div>
             </div>
             <p className="text-sm text-slate-300 mb-5">将此镜头标记为未拍摄</p>
             <div className="flex items-center justify-end gap-2">
@@ -1788,6 +1856,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onAdd={async (shot) => {
           await loadShots();
           await loadStats();
+          loadSceneStats();
           showToast('分镜已添加');
         }}
       />
@@ -1806,6 +1875,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           }
           await loadShots();
           await loadStats();
+          loadSceneStats();
           await loadFieldSuggestions();
           const sceneList = await loadScenes();
           if (currentSceneId === null && sceneList.length > 0) {
@@ -1853,17 +1923,57 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       <VideoSplitDialog
         isOpen={showVideoSplitDialog}
         videoUrl={selectedVideoForSplit || undefined}
+        initialVideos={initialVideosForSplit.length > 0 ? initialVideosForSplit : undefined}
+        source={videoSplitSource}
+        shotId={videoSplitShotId}
         onClose={() => {
           setShowVideoSplitDialog(false);
           setSelectedVideoForSplit(null);
+          setInitialVideosForSplit([]);
         }}
         projectId={projectId}
         sceneId={currentSceneId}
-        maxUploads={5}
+        maxUploads={10}
         onSplit={async (shots, videoUrl) => {
-          await loadShots();
-          await loadStats();
-          showToast('视频分割完成');
+          try {
+            for (const shot of shots) {
+              const duration = shot.endTime - shot.startTime;
+              const createRes = await fetch('/api/shots', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  projectId,
+                  sceneId: currentSceneId,
+                  sceneContent: '',
+                  status: 'pending'
+                })
+              });
+              const createData = await createRes.json();
+              if (!createData.success || !createData.data) {
+                console.error('创建分镜失败:', createData.message);
+                continue;
+              }
+              const newShot = createData.data;
+              await fetch(`/api/shots/${newShot.id}/media`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  url: videoUrl,
+                  type: 'video',
+                  source: 'video_split',
+                  startTime: shot.startTime,
+                  duration
+                })
+              });
+            }
+            await loadShots();
+            await loadStats();
+            loadSceneStats();
+            showToast(`成功创建 ${shots.length} 个分镜`, 'success');
+          } catch (e) {
+            console.error('视频分割创建分镜失败:', e);
+            showToast('创建分镜失败', 'error');
+          }
         }}
       />
 

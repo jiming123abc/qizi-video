@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, CheckCircle2, XCircle, Info, Video } from 'lucide-react';
+import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, CheckCircle2, XCircle, Info, Video, Settings as SettingsIcon, BarChart3 } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
-import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../lib/ossUtils';
-import { useSignedUrl } from '../hooks/useSignedUrl';
+import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate, getVideoPoster } from '../lib/ossUtils';
 import type { UploadDecision } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
 import { useToastContext } from '../components/ToastProvider';
 import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
+import SettingsDialog from '../components/settings/SettingsDialog';
+import AIUsagePanel from '../components/ai/AIUsagePanel';
 import { timeAgo, formatSize, getErrorMessage } from '../lib/utils';
 import type { ShotMedia, Shot } from '../lib/types';
 
@@ -48,14 +49,6 @@ const DEFAULT_COVER =
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 225"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#ec4899"/></linearGradient></defs><rect width="400" height="225" fill="url(#g)"/></svg>'
   );
-
-// 从视频 URL 得到 OSS 截图 URL（仅用于参考素材是视频时的预览缩略图）
-function getVideoPoster(url: string): string {
-  if (url && (url.includes('aliyuncs.com') || url.includes('qiziwenhua.top'))) {
-    return url + '?x-oss-process=video/snapshot,t_1000,f_jpg,w_800,m_fast';
-  }
-  return '';
-}
 
 interface ProjectListPageProps {
   onSelectProject?: (projectId: number) => void;
@@ -100,6 +93,10 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 阿里云配置状态
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
+  // 设置和费用统计对话框
+  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [showAIUsagePanel, setShowAIUsagePanel] = useState(false);
+
   useEffect(() => {
     fetch('/api/aliyun/status')
       .then(res => res.json())
@@ -117,8 +114,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   const [cardPlayingProjectId, setCardPlayingProjectId] = useState<number | null>(null);
   const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
   const cardVideoRef = useRef<HTMLVideoElement>(null);
-  const { url: signedFullscreenUrl } = useSignedUrl(fullscreenItem?.url);
-  const { url: signedFullscreenPoster } = useSignedUrl(fullscreenItem?.url ? getVideoPoster(fullscreenItem.url) : undefined);
 
   // 全屏弹窗打开时自动播放视频（通过 MediaFullscreen 组件的 autoPlay 处理）
   // fullscreenVideoRef 用于 MediaFullscreen 的 videoRefCallback
@@ -129,11 +124,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     for (const refs of Object.values(referencesCache)) {
       for (const ref of refs) {
         if (ref.url) urls.push(ref.url);
-        // 视频类型素材也需要对其海报 URL（带 x-oss-process）进行签名
-        if (ref.type === 'video' && ref.url) {
-          const poster = getVideoPoster(ref.url);
-          if (poster && poster !== ref.url) urls.push(poster);
-        }
+        // 视频封面走后端代理 /api/oss-snapshot，不需要签名
       }
     }
     // 同时签名项目的 coverUrl
@@ -792,13 +783,29 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             </h1>
             <p className="text-sm text-slate-400 mt-0.5 hidden sm:block">项目管理 · 多场景素材统筹</p>
           </div>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/20 hover:border-violet-400/70 text-sm font-medium transition-all"
-          >
-            <Plus className="w-4 h-4 text-violet-300" />
-            <span>新建项目</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAIUsagePanel(true)}
+              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="费用统计"
+            >
+              <BarChart3 className="w-4 h-4 text-white/90" />
+            </button>
+            <button
+              onClick={() => setShowSettingsDialog(true)}
+              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="设置"
+            >
+              <SettingsIcon className="w-4 h-4 text-white/90" />
+            </button>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/20 hover:border-violet-400/70 text-sm font-medium transition-all"
+            >
+              <Plus className="w-4 h-4 text-violet-300" />
+              <span>新建项目</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -892,15 +899,12 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                         />
                       );
                     }
-                    // 计算签名后的媒体 URL；未签名时返回空串以触发占位
+                    // 计算媒体 URL；视频封面走后端代理无需签名，图片需签名
                     let mediaSrc = '';
                     if (current && current.url) {
                       if (current.type === 'video') {
-                        const posterUrl = getVideoPoster(current.url);
-                        const candidate = posterUrl ? signedMediaUrls[posterUrl] : signedMediaUrls[current.url];
-                        if (candidate && candidate !== (posterUrl || current.url)) {
-                          mediaSrc = candidate;
-                        }
+                        // 视频封面直接走后端代理 /api/oss-snapshot（同源，无需签名）
+                        mediaSrc = getVideoPoster(current.url);
                       } else {
                         const candidate = signedMediaUrls[current.url];
                         if (candidate && candidate !== current.url) {
@@ -908,7 +912,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                         }
                       }
                     }
-                    // 未签名就绪：显示占位（不回退到未签名 URL，避免 ORB）
+                    // 未就绪：显示占位（不回退到未签名 URL，避免 ORB）
                     if (!mediaSrc) {
                       return (
                         <div className="w-full h-full flex items-center justify-center">
@@ -1339,12 +1343,10 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                   <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
                     {referencesCache[uploadDialogProject.id]!.filter(r => r.type === 'video').map(item => {
                       const posterUrl = getVideoPoster(item.url);
-                      const signedPoster = posterUrl ? signedMediaUrls[posterUrl] : undefined;
-                      const isPosterReady = signedPoster && signedPoster !== posterUrl;
                       return (
                       <div key={item.id} className="relative aspect-video rounded-lg overflow-hidden border border-white/10 bg-black/30 group">
-                        {isPosterReady ? (
-                          <img src={signedPoster} alt={item.title} className="w-full h-full object-cover" />
+                        {posterUrl ? (
+                          <img src={posterUrl} alt={item.title} className="w-full h-full object-cover" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center">
                             <ImageIcon className="w-5 h-5 text-slate-500 animate-pulse" />
@@ -1417,6 +1419,18 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         decision={pendingCompressionDecision}
         aliyunConfigured={aliyunConfigured}
         onSelect={handleCompressionSelect}
+      />
+
+      {/* 设置对话框 */}
+      <SettingsDialog
+        isOpen={showSettingsDialog}
+        onClose={() => setShowSettingsDialog(false)}
+      />
+
+      {/* 费用统计 */}
+      <AIUsagePanel
+        isOpen={showAIUsagePanel}
+        onClose={() => setShowAIUsagePanel(false)}
       />
     </div>
   );
