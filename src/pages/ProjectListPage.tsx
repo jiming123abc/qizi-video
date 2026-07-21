@@ -1175,8 +1175,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
       {/* 删除确认 */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => !deleteLoading && deleteStatus !== 'deleting' && setDeleteTarget(null)}>
-          <div className="w-full sm:max-w-sm sm:w-[calc(100%-2rem)] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[100dvh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !deleteLoading && deleteStatus !== 'deleting' && setDeleteTarget(null)}>
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="w-14 h-14 mx-auto rounded-full bg-red-500/15 border border-red-400/30 flex items-center justify-center mb-4">
               <Trash2 className="w-6 h-6 text-red-400" />
             </div>
