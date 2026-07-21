@@ -800,10 +800,10 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             </button>
             <button
               onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-full border border-violet-400/40 bg-white/5 hover:bg-violet-500/20 hover:border-violet-400/70 text-sm font-medium transition-all"
+              className="w-9 h-9 rounded-full border border-violet-400/40 bg-white/5 hover:bg-gradient-to-br hover:from-violet-500 hover:to-fuchsia-500 hover:border-transparent flex items-center justify-center transition"
+              title="新建项目"
             >
-              <Plus className="w-4 h-4 text-violet-300" />
-              <span>新建项目</span>
+              <Plus className="w-4 h-4 text-white/90" />
             </button>
           </div>
         </div>
@@ -816,7 +816,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           <div className="py-20 border border-dashed border-white/15 rounded-3xl bg-white/[0.02] text-center">
             <Film className="w-12 h-12 mx-auto mb-4 text-violet-300/60" />
             <p className="text-lg mb-2">还没有项目</p>
-            <p className="text-sm text-slate-400 mb-6">点击右上角「新建项目」创建第一个项目</p>
+            <p className="text-sm text-slate-400 mb-6">点击右上角或下方的「新建项目」按钮创建第一个项目</p>
             <button
               onClick={() => setShowCreateModal(true)}
               className="px-5 py-2.5 rounded-full border border-violet-400/40 bg-violet-500/20 hover:bg-violet-500/30 text-sm font-medium transition-all"
@@ -1110,6 +1110,15 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             );
           })}
         </div>
+
+        {/* 底部新建项目按钮 */}
+        <button
+          onClick={() => setShowCreateModal(true)}
+          className="mt-6 w-full py-3 rounded-2xl border-2 border-dashed border-violet-400/30 bg-violet-500/5 hover:bg-violet-500/10 text-violet-300 text-sm font-medium transition flex items-center justify-center gap-2"
+        >
+          <Plus className="w-4 h-4" />
+          新建项目
+        </button>
       </div>
 
       {/* 新建项目弹窗 */}

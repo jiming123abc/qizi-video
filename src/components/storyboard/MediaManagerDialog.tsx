@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Plus, Upload, GripVertical, Sparkles, Image as ImageIcon, FileVideo } from 'lucide-react';
+import { X, Plus, Upload, Sparkles, Image as ImageIcon, FileVideo, ChevronUp, ChevronDown, Trash2 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate, getVideoPoster, batchGetSignedUrls, getSignedUrlFromCache } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
@@ -77,8 +77,6 @@ export default function MediaManagerDialog({
   const [mediaLoading, setMediaLoading] = useState(false);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [uploadingFiles, setUploadingFiles] = useState<UploadingItem[]>([]);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const processedUrlsRef = useRef<Set<string>>(new Set());
@@ -238,50 +236,35 @@ export default function MediaManagerDialog({
     }
   };
 
+  // 移动端：上下移动按钮
+  const moveMedia = (index: number, direction: -1 | 1) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= mediaList.length) return;
+    const newList = [...mediaList];
+    [newList[index], newList[newIndex]] = [newList[newIndex], newList[index]];
+    updateMediaOrder(newList);
+  };
+
   const deleteMedia = async (mediaId: number) => {
     try {
-      await fetch(`/api/shots/${shot.id}/media/${mediaId}`, {
+      const res = await fetch(`/api/shots/${shot.id}/media/${mediaId}`, {
         method: 'DELETE'
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        showToast(data.message || '删除失败', 'error');
+        return;
+      }
       const newList = mediaList.filter(m => m.id !== mediaId);
       setMediaList(newList);
       if (onMediaChange) {
         onMediaChange({ ...shot, media: newList });
       }
+      showToast('参考画面已删除', 'success');
     } catch (e) {
       console.error('删除媒体失败:', e);
+      showToast('删除失败', 'error');
     }
-  };
-
-  const handleDragStart = (e: React.DragEvent, index: number) => {
-    setDragIndex(index);
-    try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
-  };
-
-  const handleDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    if (dragIndex === null || dragIndex === index) return;
-    setDragOverIndex(index);
-  };
-
-  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
-    e.preventDefault();
-    if (dragIndex === null || dragIndex === targetIndex) {
-      setDragIndex(null);
-      setDragOverIndex(null);
-      return;
-    }
-    const newList = [...mediaList];
-    const [moved] = newList.splice(dragIndex, 1);
-    newList.splice(targetIndex, 0, moved);
-    updateMediaOrder(newList);
-    setDragIndex(null);
-    setDragOverIndex(null);
-  };
-
-  const handleDragEnd = () => {
-    setDragIndex(null);
-    setDragOverIndex(null);
   };
 
   const handleFileSelect = async (files: FileList | null, isSceneRef = false) => {
@@ -493,11 +476,11 @@ export default function MediaManagerDialog({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4 transition-opacity duration-200 ${
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4 transition-opacity duration-200 ${
       childDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
     }`} onClick={handleClose}>
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -527,37 +510,26 @@ export default function MediaManagerDialog({
           {/* Media Grid */}
           {mediaList.length > 0 && (
             <div className="mb-6">
-              <div className="grid grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {mediaList.map((media, index) => {
-                  const isDragging = dragIndex === index;
-                  const isDragOver = dragOverIndex === index;
                   return (
                     <div
                       key={media.id}
-                      draggable
-                      onDragStart={e => handleDragStart(e, index)}
-                      onDragOver={e => handleDragOver(e, index)}
-                      onDrop={e => handleDrop(e, index)}
-                      onDragEnd={handleDragEnd}
-                      className={`relative rounded-xl border overflow-hidden transition-all ${
-                        isDragging
-                          ? 'opacity-40 border-violet-400/60 ring-2 ring-violet-400/40'
-                          : isDragOver
-                          ? 'ring-2 ring-violet-400/60 border-violet-400/50 -translate-y-0.5'
-                          : 'border-white/10 hover:border-violet-400/30'
-                      }`}
+                      className="relative rounded-xl border border-white/10 hover:border-violet-400/30 overflow-hidden transition-all"
                     >
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
                         <MediaThumb media={media} signedUrls={signedUrls} />
 
-                        {/* Delete button */}
+                        {/* Delete button - 始终可见（移动端也需要），尺寸增大以便于点击 */}
                         <button
-                          onClick={() => deleteMedia(media.id)}
-                          className="touch-target-36-lg absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 hover:bg-red-500 flex items-center justify-center text-white/80 hover:text-white transition text-xs"
+                          onClick={(e) => { e.stopPropagation(); deleteMedia(media.id); }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-red-500/80 hover:bg-red-500 active:bg-red-600 flex items-center justify-center text-white shadow-md transition"
                           title="删除"
                         >
-                          <X className="w-3 h-3" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
 
                         {/* Source badge */}
@@ -566,18 +538,41 @@ export default function MediaManagerDialog({
                             AI
                           </div>
                         )}
+
+                        {/* Index number on thumbnail */}
+                        <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px] font-medium">
+                          {index + 1}
+                        </div>
                       </div>
 
-                      {/* Index number and drag handle */}
-                      <div className="px-2 py-1.5 flex items-center gap-1.5 bg-white/[0.02]">
-                        <div
-                          draggable
-                          className="text-white/40 hover:text-white cursor-grab active:cursor-grabbing"
-                          title="拖拽排序"
+                      {/* 移动端：上下移动按钮（替代拖拽排序） */}
+                      <div className="flex items-center justify-between gap-1 px-1.5 py-1.5 bg-white/[0.02]">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); moveMedia(index, -1); }}
+                          disabled={index === 0}
+                          className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
+                            index === 0
+                              ? 'text-slate-600 cursor-not-allowed'
+                              : 'text-white/70 hover:bg-white/10 active:bg-white/15'
+                          }`}
+                          title="上移"
                         >
-                          <GripVertical className="w-3.5 h-3.5" />
-                        </div>
-                        <span className="text-xs text-white/60">{index + 1}</span>
+                          <ChevronUp className="w-3 h-3" />
+                          <span>上移</span>
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); moveMedia(index, 1); }}
+                          disabled={index === mediaList.length - 1}
+                          className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
+                            index === mediaList.length - 1
+                              ? 'text-slate-600 cursor-not-allowed'
+                              : 'text-white/70 hover:bg-white/10 active:bg-white/15'
+                          }`}
+                          title="下移"
+                        >
+                          <ChevronDown className="w-3 h-3" />
+                          <span>下移</span>
+                        </button>
                       </div>
                     </div>
                   );

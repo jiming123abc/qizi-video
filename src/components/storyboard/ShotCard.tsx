@@ -876,10 +876,12 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
-                  className="touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
-                  style={{ opacity: 0.7 }}
+                  className={`touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+                    isMobile ? 'w-10 h-10' : 'w-8 h-8'
+                  }`}
+                  style={{ opacity: 0.85 }}
                 >
-                  <ChevronLeft className="w-4 h-4 text-white" />
+                  <ChevronLeft className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
                 </button>
               )}
 
@@ -887,10 +889,12 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
-                  className="touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full border border-white/25 bg-black/40 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition"
-                  style={{ opacity: 0.7 }}
+                  className={`touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+                    isMobile ? 'w-10 h-10' : 'w-8 h-8'
+                  }`}
+                  style={{ opacity: 0.85 }}
                 >
-                  <ChevronRight className="w-4 h-4 text-white" />
+                  <ChevronRight className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
                 </button>
               )}
 
