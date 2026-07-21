@@ -151,7 +151,7 @@ export function MediaFullscreen({
 
   return (
     <div
-      className={`fixed inset-0 z-[80] bg-black/95 backdrop-blur-sm flex items-center justify-center p-4 transition-opacity ${
+      className={`fixed inset-0 z-[80] bg-black/95 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4 transition-opacity ${
         isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
       }`}
       onClick={onClose}

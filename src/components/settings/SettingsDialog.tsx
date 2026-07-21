@@ -315,8 +315,8 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-8 sm:p-4">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] flex flex-col bg-slate-900 rounded-3xl border border-white/10 shadow-2xl">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4">
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[90vh] flex flex-col bg-slate-900 sm:rounded-3xl rounded-none border border-white/10 shadow-2xl">
         {/* 标题栏 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 shrink-0">
           <h2 className="text-lg font-semibold text-white">系统设置</h2>

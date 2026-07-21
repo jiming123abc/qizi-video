@@ -81,11 +81,11 @@ export function SceneManager({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
       onClick={handleClose}
     >
       <div
-        className="w-full max-w-md rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-4 shadow-2xl max-h-[75vh] overflow-y-auto"
+        className="w-full sm:max-w-md sm:w-[calc(100%-2rem)] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-4 shadow-2xl max-h-[100dvh] sm:max-h-[75vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {mode === 'list' && (

@@ -179,8 +179,8 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
 
   if (isExpanded && multiline) {
     return (
-      <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={handleCancel}>
-        <div className="bg-slate-900/95 backdrop-blur-xl rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4" onClick={handleCancel}>
+        <div className="bg-slate-900/95 backdrop-blur-xl sm:rounded-2xl rounded-none border border-white/10 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 shrink-0">
             <h3 className="text-sm font-medium text-white">{label}</h3>
             <button
@@ -872,46 +872,6 @@ export function ShotCard({
                 </div>
               )}
 
-              {/* 左箭头 */}
-              {media.length > 1 && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
-                  className={`touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
-                    isMobile ? 'w-10 h-10' : 'w-8 h-8'
-                  }`}
-                  style={{ opacity: 0.85 }}
-                >
-                  <ChevronLeft className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
-                </button>
-              )}
-
-              {/* 右箭头 */}
-              {media.length > 1 && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
-                  className={`touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
-                    isMobile ? 'w-10 h-10' : 'w-8 h-8'
-                  }`}
-                  style={{ opacity: 0.85 }}
-                >
-                  <ChevronRight className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
-                </button>
-              )}
-
-              {/* 指示器 */}
-              {media.length > 1 && (
-                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5">
-                  {media.map((_, idx) => (
-                    <div
-                      key={idx}
-                      className={`w-1.5 h-1.5 rounded-full transition ${
-                        idx === currentIndex ? 'bg-white w-3' : 'bg-white/40'
-                      }`}
-                    />
-                  ))}
-                </div>
-              )}
-
               {/* 来源徽章 */}
               {currentMedia && (() => {
                 const src = currentMedia.source;
@@ -1076,6 +1036,46 @@ export function ShotCard({
               <Sparkles className="w-3.5 h-3.5" />
               AI分析
             </button>
+          </div>
+        )}
+
+        {/* 左箭头 - 移出 aspect-video，与状态按钮同级，避免堆叠上下文隔离 */}
+        {hasMedia && media.length > 1 && (
+          <button
+            onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
+            className={`touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+              isMobile ? 'w-10 h-10' : 'w-8 h-8'
+            }`}
+            style={{ opacity: 0.85 }}
+          >
+            <ChevronLeft className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+          </button>
+        )}
+
+        {/* 右箭头 */}
+        {hasMedia && media.length > 1 && (
+          <button
+            onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
+            className={`touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-20 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+              isMobile ? 'w-10 h-10' : 'w-8 h-8'
+            }`}
+            style={{ opacity: 0.85 }}
+          >
+            <ChevronRight className={`text-white ${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+          </button>
+        )}
+
+        {/* 指示器 */}
+        {hasMedia && media.length > 1 && (
+          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5">
+            {media.map((_, idx) => (
+              <div
+                key={idx}
+                className={`w-1.5 h-1.5 rounded-full transition ${
+                  idx === currentIndex ? 'bg-white w-3' : 'bg-white/40'
+                }`}
+              />
+            ))}
           </div>
         )}
       </div>

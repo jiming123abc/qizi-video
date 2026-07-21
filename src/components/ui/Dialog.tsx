@@ -16,11 +16,11 @@ export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', 
 
   return (
     <div
-      className="fixed inset-0 z-[60] p-8 sm:p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full ${maxWidth} ${maxHeight} rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden`}
+        className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:${maxWidth} sm:${maxHeight} sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
