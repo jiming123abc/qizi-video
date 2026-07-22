@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Plus, Upload, Sparkles, Image as ImageIcon, FileVideo, ChevronUp, ChevronDown, Trash2 } from 'lucide-react';
+import { X, Plus, Upload, Sparkles, Image as ImageIcon, FileVideo, ChevronUp, ChevronDown, Trash2, GripVertical } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate, getVideoPoster, batchGetSignedUrls, getSignedUrlFromCache } from '../../lib/ossUtils';
 import type { UploadDecision } from '../../lib/ossUtils';
@@ -32,9 +32,8 @@ function MediaThumb({ media, signedUrls }: { media: ShotMedia; signedUrls: Recor
   const [hasError, setHasError] = useState(false);
   const isVideo = media.type === 'video';
 
-  // 视频缩略图用 OSS 的视频截图功能生成 jpg，避免直接请求 video
   const thumbUrl = isVideo && media.url
-    ? signedUrls[getVideoPoster(media.url)]
+    ? getVideoPoster(media.url, media.startTime)
     : (media.url ? signedUrls[media.url] : undefined);
 
   return (
@@ -78,9 +77,20 @@ export default function MediaManagerDialog({
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [uploadingFiles, setUploadingFiles] = useState<UploadingItem[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const processedUrlsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToastContext();
+
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   // 用户主动关闭按钮
   const handleUserClose = () => {
@@ -127,14 +137,9 @@ export default function MediaManagerDialog({
   useEffect(() => {
     if (!isOpen || mediaList.length === 0) return;
 
-    // 收集所有需要签名的 URL（媒体 URL + 视频封面 URL）
     const allUrls: string[] = [];
     mediaList.forEach(m => {
       if (m.url && !allUrls.includes(m.url)) allUrls.push(m.url);
-      if (m.type === 'video' && m.url) {
-        const posterUrl = getVideoPoster(m.url);
-        if (posterUrl && !allUrls.includes(posterUrl)) allUrls.push(posterUrl);
-      }
     });
 
     const newUrls = allUrls.filter(u => !processedUrlsRef.current.has(u));
@@ -243,6 +248,40 @@ export default function MediaManagerDialog({
     const newList = [...mediaList];
     [newList[index], newList[newIndex]] = [newList[newIndex], newList[index]];
     updateMediaOrder(newList);
+  };
+
+  // 电脑端：拖拽排序
+  const handleMediaDragStart = (index: number, e: React.DragEvent) => {
+    if (isMobile) return;
+    setDraggingIndex(index);
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+    } catch (_) {}
+  };
+
+  const handleMediaDragOver = (index: number, e: React.DragEvent) => {
+    if (isMobile || draggingIndex === null || draggingIndex === index) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverIndex(index);
+  };
+
+  const handleMediaDragLeave = () => {
+    setDragOverIndex(null);
+  };
+
+  const handleMediaDrop = (targetIndex: number) => {
+    if (isMobile || draggingIndex === null || draggingIndex === targetIndex) {
+      setDraggingIndex(null);
+      setDragOverIndex(null);
+      return;
+    }
+    const newList = [...mediaList];
+    const [moved] = newList.splice(draggingIndex, 1);
+    newList.splice(targetIndex, 0, moved);
+    updateMediaOrder(newList);
+    setDraggingIndex(null);
+    setDragOverIndex(null);
   };
 
   const deleteMedia = async (mediaId: number) => {
@@ -480,7 +519,7 @@ export default function MediaManagerDialog({
       childDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
     }`} onClick={handleClose}>
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
+        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -512,10 +551,21 @@ export default function MediaManagerDialog({
             <div className="mb-6">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {mediaList.map((media, index) => {
+                  const isDragging = draggingIndex === index;
+                  const isDragOver = dragOverIndex === index;
                   return (
                     <div
                       key={media.id}
-                      className="relative rounded-xl border border-white/10 hover:border-violet-400/30 overflow-hidden transition-all"
+                      draggable={!isMobile}
+                      onDragStart={(e) => handleMediaDragStart(index, e)}
+                      onDragOver={(e) => handleMediaDragOver(index, e)}
+                      onDragLeave={handleMediaDragLeave}
+                      onDrop={() => handleMediaDrop(index)}
+                      className={`relative rounded-xl border transition-all overflow-hidden ${
+                        isDragging ? 'opacity-50 scale-95' : ''
+                      } ${
+                        isDragOver ? 'ring-2 ring-violet-400/70 scale-105' : 'border-white/10 hover:border-violet-400/30'
+                      }`}
                     >
                       {/* Thumbnail */}
                       <div className="aspect-video bg-black/40 relative flex items-center justify-center">
@@ -526,7 +576,7 @@ export default function MediaManagerDialog({
                           onClick={(e) => { e.stopPropagation(); deleteMedia(media.id); }}
                           onMouseDown={(e) => e.stopPropagation()}
                           onPointerDown={(e) => e.stopPropagation()}
-                          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-red-500/80 hover:bg-red-500 active:bg-red-600 flex items-center justify-center text-white shadow-md transition"
+                          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-red-500/80 hover:bg-red-500 active:bg-red-600 flex items-center justify-center text-white shadow-md transition z-10"
                           title="删除"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -543,50 +593,50 @@ export default function MediaManagerDialog({
                         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px] font-medium">
                           {index + 1}
                         </div>
+
+                        {/* 电脑端：拖拽手柄 */}
+                        {!isMobile && (
+                          <div className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition z-10">
+                            <GripVertical className="w-3.5 h-3.5 text-white/70" />
+                          </div>
+                        )}
                       </div>
 
                       {/* 移动端：上下移动按钮（替代拖拽排序） */}
-                      <div className="flex items-center justify-between gap-1 px-1.5 py-1.5 bg-white/[0.02]">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); moveMedia(index, -1); }}
-                          disabled={index === 0}
-                          className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
-                            index === 0
-                              ? 'text-slate-600 cursor-not-allowed'
-                              : 'text-white/70 hover:bg-white/10 active:bg-white/15'
-                          }`}
-                          title="上移"
-                        >
-                          <ChevronUp className="w-3 h-3" />
-                          <span>上移</span>
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); moveMedia(index, 1); }}
-                          disabled={index === mediaList.length - 1}
-                          className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
-                            index === mediaList.length - 1
-                              ? 'text-slate-600 cursor-not-allowed'
-                              : 'text-white/70 hover:bg-white/10 active:bg-white/15'
-                          }`}
-                          title="下移"
-                        >
-                          <ChevronDown className="w-3 h-3" />
-                          <span>下移</span>
-                        </button>
-                      </div>
+                      {isMobile && (
+                        <div className="flex items-center justify-between gap-1 px-1.5 py-1.5 bg-white/[0.02]">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); moveMedia(index, -1); }}
+                            disabled={index === 0}
+                            className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
+                              index === 0
+                                ? 'text-slate-600 cursor-not-allowed'
+                                : 'text-white/70 hover:bg-white/10 active:bg-white/15'
+                            }`}
+                            title="上移"
+                          >
+                            <ChevronUp className="w-3 h-3" />
+                            <span>上移</span>
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); moveMedia(index, 1); }}
+                            disabled={index === mediaList.length - 1}
+                            className={`flex-1 inline-flex items-center justify-center gap-1 py-1 rounded text-[10px] transition ${
+                              index === mediaList.length - 1
+                                ? 'text-slate-600 cursor-not-allowed'
+                                : 'text-white/70 hover:bg-white/10 active:bg-white/15'
+                            }`}
+                            title="下移"
+                          >
+                            <ChevronDown className="w-3 h-3" />
+                            <span>下移</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
 
-                {/* Add button placeholder when under limit */}
-                {mediaList.length < MAX_MEDIA_COUNT && (
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="aspect-video rounded-xl border-2 border-dashed border-white/15 hover:border-violet-400/40 flex flex-col items-center justify-center gap-1.5 transition bg-white/[0.02] hover:bg-violet-500/5"
-                  >
-                    <Plus className="w-5 h-5 text-white/40" />
-                  </button>
-                )}
               </div>
             </div>
           )}

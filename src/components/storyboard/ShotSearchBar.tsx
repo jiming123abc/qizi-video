@@ -74,7 +74,7 @@ export function ShotSearchBar({
     if (!isOpen) return null;
     return (
       <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-start justify-center p-0 sm:p-4 pt-16 sm:pt-20" onClick={() => setIsOpen(false)}>
-        <div className="w-full sm:max-w-lg sm:w-[calc(100%-2rem)]" onClick={e => e.stopPropagation()}>
+        <div className="absolute inset-x-0 top-0 sm:w-[calc(100%-2rem)] sm:max-w-lg" onClick={e => e.stopPropagation()}>
           <div className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
             <input

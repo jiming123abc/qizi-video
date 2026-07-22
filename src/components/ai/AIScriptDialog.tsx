@@ -627,7 +627,7 @@ export default function AIScriptDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] bg-slate-900 rounded-none sm:rounded-2xl sm:rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[100dvh] sm:max-h-[85vh] overflow-hidden flex flex-col">
+      <div className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] bg-slate-900 rounded-none sm:rounded-2xl sm:rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[100dvh] sm:max-h-[85vh] overflow-hidden flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-4 sm:mb-6 shrink-0">
           <h2 className="text-lg font-semibold text-white">AI 自动生成分镜</h2>

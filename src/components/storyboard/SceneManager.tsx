@@ -81,11 +81,17 @@ export function SceneManager({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm"
       onClick={handleClose}
     >
       <div
-        className="w-full sm:max-w-md sm:w-[calc(100%-2rem)] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-4 shadow-2xl max-h-[100dvh] sm:max-h-[75vh] overflow-y-auto"
+        className={`
+          ${mode === 'list' 
+            ? 'absolute inset-x-0 top-0 bottom-0 w-full sm:max-w-md sm:w-[calc(100%-2rem)] sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl rounded-none max-h-[100dvh] sm:max-h-[75vh]'
+            : 'absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-sm sm:w-[calc(100%-2rem)] rounded-3xl max-h-[85vh]'
+          }
+          border border-white/10 bg-slate-900/95 backdrop-blur-xl p-4 shadow-2xl overflow-y-auto
+        `}
         onClick={(e) => e.stopPropagation()}
       >
         {mode === 'list' && (
@@ -197,7 +203,7 @@ export function SceneManager({
             <div className="flex items-center justify-end gap-2 mt-5">
               <button
                 onClick={handleBackToList}
-                className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-3 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >
                 取消
               </button>
@@ -246,7 +252,7 @@ export function SceneManager({
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleBackToList}
-                  className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                  className="px-3 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
                 >
                   取消
                 </button>

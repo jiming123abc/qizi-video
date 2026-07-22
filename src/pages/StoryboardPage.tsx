@@ -256,6 +256,27 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     mainScenes: Array<{ name: string; imagePrompt: string }>;
   } | null>(null);
 
+  // 打开对话框时暂停所有分镜卡片中的视频播放
+  useEffect(() => {
+    const anyDialogOpen = showAddShotDialog || showAIScriptDialog || showAIImageGenDialog ||
+      showVideoSplitDialog || showSettingsDialog || showMediaManager || showDigitalAssetDialog ||
+      showShotNoDialog !== null || showConfirmDialog !== null || showMoveModal ||
+      showMergeConfirm || showUploadDialog || showSceneManager || showSearchDialog ||
+      (pendingSplitVideo !== null && pendingSplitDecision !== null);
+    if (anyDialogOpen && playingVideoKey) {
+      videoRefs.current.forEach((v) => {
+        try { v.pause(); } catch (_) {}
+      });
+      setPlayingVideoKey(null);
+    }
+  }, [
+    showAddShotDialog, showAIScriptDialog, showAIImageGenDialog,
+    showVideoSplitDialog, showSettingsDialog, showMediaManager, showDigitalAssetDialog,
+    showShotNoDialog, showConfirmDialog, showMoveModal,
+    showMergeConfirm, showUploadDialog, showSceneManager, showSearchDialog,
+    pendingSplitVideo, pendingSplitDecision, playingVideoKey
+  ]);
+
   // 展开的分镜ID
   const [expandedShotId, setExpandedShotId] = useState<number | null>(null);
 
@@ -336,13 +357,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
   const loadShots = useCallback(async () => {
     await loadShotsApi(currentSceneId, currentTab);
-    const key = `${currentSceneId === null ? 'null' : currentSceneId}-${currentTab}`;
-    const saved = scrollPositionsRef.current.get(key);
-    if (saved !== undefined) {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: saved, behavior: 'instant' });
-      });
-    }
   }, [loadShotsApi, currentSceneId, currentTab]);
 
   const loadSceneStats = useCallback(async () => {
@@ -548,15 +562,40 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   }, [currentTab, currentSceneId]);
 
   // ============ 滚动位置记录 ============
+  // 用 ref 记录最新的 key，避免 scroll 事件触发时闭包中 currentTab 是旧值
+  const scrollRecordKeyRef = useRef<string>('');
+  const prevKeyRef = useRef<string>('');
+  // 标记当前滚动是否由程序触发（如切 tab 时的 scrollTo(0)），用于过滤非用户滚动
+  const isProgrammaticScrollRef = useRef(false);
+  useEffect(() => {
+    const newKey = `${currentSceneId === null ? 'null' : currentSceneId}-${currentTab}`;
+    // tab/scene 切换时：先把当前 scrollTop 同步保存到旧 key
+    if (prevKeyRef.current && prevKeyRef.current !== newKey) {
+      scrollPositionsRef.current.set(prevKeyRef.current, window.pageYOffset);
+    }
+    prevKeyRef.current = newKey;
+    scrollRecordKeyRef.current = newKey;
+    // tab/scene 切换时立即重置滚动到顶部，避免新 tab 继承旧 tab 的位置
+    // 标记为程序触发，避免 onScroll 把这次 scrollTop=0 错误地记录到新 key（覆盖之前保存的位置）
+    if (typeof window !== 'undefined' && window.pageYOffset !== 0) {
+      isProgrammaticScrollRef.current = true;
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      // 同步 scroll 事件在下一微任务前清空标记
+      queueMicrotask(() => { isProgrammaticScrollRef.current = false; });
+    }
+  }, [currentSceneId, currentTab]);
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let rafId = 0;
     const onScroll = () => {
+      if (isProgrammaticScrollRef.current) return;
       if (rafId) return;
       rafId = window.requestAnimationFrame(() => {
         rafId = 0;
-        const key = `${currentSceneId === null ? 'null' : currentSceneId}-${currentTab}`;
-        scrollPositionsRef.current.set(key, window.pageYOffset);
+        const key = scrollRecordKeyRef.current;
+        if (key) {
+          scrollPositionsRef.current.set(key, window.pageYOffset);
+        }
       });
     };
     window.addEventListener('scroll', onScroll, { passive: true });
@@ -564,7 +603,26 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       window.removeEventListener('scroll', onScroll);
       if (rafId) window.cancelAnimationFrame(rafId);
     };
-  }, [currentSceneId, currentTab]);
+  }, []);
+
+  // ============ 滚动位置恢复 ============
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (shotsLoading) return;
+    const key = `${currentSceneId === null ? 'null' : currentSceneId}-${currentTab}`;
+    const saved = scrollPositionsRef.current.get(key);
+    if (saved !== undefined && saved > 0) {
+      // 双 rAF：等 shots 变化引起的 DOM 更新完成后再滚动，避免被覆盖
+      isProgrammaticScrollRef.current = true;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: saved, behavior: 'instant' });
+          queueMicrotask(() => { isProgrammaticScrollRef.current = false; });
+        });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shots, shotsLoading, currentTab, currentSceneId]);
 
   // ============ 状态切换（点击状态标签或圆圈复选框） ============
   const toggleStatus = async (shot: Shot, skipDialog?: boolean) => {
@@ -1242,7 +1300,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       ) : (
         <>
           {/* 顶部栏 */}
-      <div className="sticky top-0 z-30 backdrop-blur-xl bg-slate-900/80 border-b border-white/10">
+      <div className="sticky top-0 z-50 backdrop-blur-xl bg-slate-900/80 border-b border-white/10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2 sm:py-3 flex items-center gap-3">
           <button
             onClick={backToProjectList}
@@ -1652,7 +1710,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => setShowMergeConfirm(false)}
-                className="px-4 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-4 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >取消</button>
               <button
                 onClick={confirmMergeShots}
@@ -1699,7 +1757,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => { setShowShotNoDialog(null); setShotNoInputValue(''); }}
-                className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-3 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >取消</button>
               <button
                 onClick={() => {
@@ -1735,7 +1793,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => setShowConfirmDialog(null)}
-                className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-3 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >取消</button>
               <button
                 onClick={() => {
@@ -1763,7 +1821,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => { genericConfirm.onCancel?.(); setGenericConfirm(null); }}
-                className="px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-3 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >{genericConfirm.cancelText || '取消'}</button>
               <button
                 onClick={genericConfirm.onConfirm}

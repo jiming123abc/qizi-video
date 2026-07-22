@@ -180,7 +180,7 @@ function InlineEditField({ label, value, onSave, multiline = false, hideLabel = 
   if (isExpanded && multiline) {
     return (
       <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4" onClick={handleCancel}>
-        <div className="bg-slate-900/95 backdrop-blur-xl sm:rounded-2xl rounded-none border border-white/10 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="absolute inset-x-0 top-0 bottom-0 sm:w-[calc(100%-2rem)] sm:max-w-2xl bg-slate-900/95 backdrop-blur-xl sm:rounded-2xl rounded-none border border-white/10 flex flex-col shadow-2xl max-h-[100dvh] sm:max-h-[85vh]" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 shrink-0">
             <h3 className="text-sm font-medium text-white">{label}</h3>
             <button
@@ -721,6 +721,16 @@ export function ShotCard({
 
   const hasMedia = media.length > 0;
 
+  // 自动轮播：媒体数量 > 1 且视频未播放时，每 4 秒自动切换
+  const [isHovering, setIsHovering] = useState(false);
+  useEffect(() => {
+    if (media.length <= 1 || isHovering || isVideoPlaying || shouldLoadVideo) return;
+    const timer = setInterval(() => {
+      setCurrentIndex(prev => (prev < media.length - 1 ? prev + 1 : 0));
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [media.length, isHovering, isVideoPlaying, shouldLoadVideo]);
+
   useEffect(() => {
     if (playingVideoKey && playingVideoKey !== videoKey && isVideoPlaying) {
       handlePauseVideo();
@@ -751,7 +761,11 @@ export function ShotCard({
         {hasMedia ? (
           <>
             {/* 有媒体时使用轮播 */}
-            <div className="relative aspect-video bg-black/40">
+            <div
+              className="relative aspect-video bg-black/40"
+              onMouseEnter={() => setIsHovering(true)}
+              onMouseLeave={() => setIsHovering(false)}
+            >
               {/* 左上角：选择按钮 */}
               <button
                 onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
@@ -872,34 +886,11 @@ export function ShotCard({
                 </div>
               )}
 
-              {/* 来源徽章 */}
-              {currentMedia && (() => {
-                const src = currentMedia.source;
-                let badgeText = '';
-                let badgeClass = '';
-                if (src === 'ai_generated') {
-                  badgeText = 'AI';
-                  badgeClass = 'bg-purple-500/80 text-white';
-                } else if (src === 'upload') {
-                  badgeText = '上传';
-                  badgeClass = 'bg-slate-500/80 text-white';
-                } else if (src === 'video_split') {
-                  badgeText = '分割';
-                  badgeClass = 'bg-blue-500/80 text-white';
-                }
-                if (!badgeText) return null;
-                return (
-                  <div className={`absolute top-2 left-1/2 -translate-x-1/2 z-20 px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeClass}`}>
-                    {badgeText}
-                  </div>
-                );
-              })()}
-
               {/* 左箭头 */}
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handlePrevMedia(); }}
-                  className={`touch-target-36 absolute left-2 top-1/2 -translate-y-1/2 z-40 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+                  className={`absolute left-0 top-1/2 -translate-y-1/2 z-40 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
                     isMobile ? 'w-10 h-10' : 'w-8 h-8'
                   }`}
                   style={{ opacity: 0.85 }}
@@ -912,7 +903,7 @@ export function ShotCard({
               {media.length > 1 && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handleNextMedia(); }}
-                  className={`touch-target-36 absolute right-2 top-1/2 -translate-y-1/2 z-40 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
+                  className={`absolute right-0 top-1/2 -translate-y-1/2 z-40 rounded-full border border-white/30 bg-black/50 backdrop-blur hover:bg-violet-500/50 flex items-center justify-center transition ${
                     isMobile ? 'w-10 h-10' : 'w-8 h-8'
                   }`}
                   style={{ opacity: 0.85 }}
@@ -938,8 +929,8 @@ export function ShotCard({
             </div>
           </>
         ) : (
-          /* 无媒体时显示占位 - 桌面端与有媒体保持一致高度，移动端降低高度 */
-          <div className={`${isMobile ? 'aspect-[16/6]' : 'aspect-video'} bg-black/40 flex flex-col items-center justify-center gap-3 relative`}>
+          /* 无媒体时显示占位 - 使用更矮的高度节省空间 */
+          <div className={`${isMobile ? 'h-[110px]' : 'h-[130px]'} bg-black/40 flex flex-col items-center justify-center gap-2 relative`}>
             {/* 左上角：选择按钮 */}
             <button
               onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
@@ -1066,7 +1057,7 @@ export function ShotCard({
             </button>
           </div>
         )}
-        {currentTab === 'pending' && !isMobile && currentMedia && currentMedia.source !== 'ai_generated' && (
+        {currentTab === 'pending' && !isMobile && currentMedia && (
           <div className="absolute bottom-3 right-3 z-20">
             <button
               onClick={(e) => { e.stopPropagation(); handleAnalyzeShot(); }}

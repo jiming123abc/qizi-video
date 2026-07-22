@@ -78,7 +78,9 @@ export function UploadDialog({
   return (
     <>
       <div className={`fixed inset-0 z-[60] p-0 sm:p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={handleBackdropClick}>
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-xl sm:w-[calc(100%-2rem)] min-h-[420px] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden p-6" onClick={e => e.stopPropagation()}>
+        <div
+        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-xl sm:w-[calc(100%-2rem)] min-h-[420px] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden p-6"
+        onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-5 shrink-0">
             <div>
               <h2 className="text-base font-semibold">批量上传</h2>
@@ -163,7 +165,7 @@ export function UploadDialog({
               <div className="text-center pt-4 shrink-0">
                 <button
                   onClick={handleClearAndClose}
-                  className="px-4 py-2 rounded-full text-xs text-slate-400 hover:text-white hover:bg-white/5 transition"
+                  className="px-4 py-2 rounded-full border border-white/15 text-xs text-slate-300 hover:bg-white/10 transition"
                 >{uploadingFiles.every(f => f.status !== 'uploading') ? '关闭' : '完成后可点击关闭'}</button>
               </div>
             </div>

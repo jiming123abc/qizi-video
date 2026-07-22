@@ -392,7 +392,7 @@ export default function DigitalAssetDialog({
       aiImageDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
     }`} onClick={onClose}>
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-4xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[90vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-4xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[90vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -902,7 +902,7 @@ function AssetManageDialog({
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[65] p-0 sm:p-4" onClick={onClose}>
       <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

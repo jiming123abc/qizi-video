@@ -90,7 +90,7 @@ export default function AIUsagePanel({ isOpen, onClose }: AIUsagePanelProps) {
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:max-w-md sm:w-[calc(100%-2rem)] bg-slate-900 sm:rounded-3xl rounded-none border border-white/10 p-6 shadow-2xl max-h-[100dvh] overflow-y-auto">
+      <div className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-md sm:w-[calc(100%-2rem)] bg-slate-900 sm:rounded-3xl rounded-none border border-white/10 p-6 shadow-2xl max-h-[100dvh] overflow-y-auto">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-2">

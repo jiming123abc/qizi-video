@@ -20,9 +20,9 @@ export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', 
       onClick={onClose}
     >
       <div
-        className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:${maxWidth} sm:${maxHeight} sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden`}
-        onClick={(e) => e.stopPropagation()}
-      >
+          className={`absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:${maxWidth} sm:${maxHeight} sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl overflow-hidden flex flex-col`}
+          onClick={(e) => e.stopPropagation()}
+        >
         {title && (
           <div className="flex items-center justify-between mb-4 shrink-0">
             <h2 className="text-base font-semibold">{title}</h2>

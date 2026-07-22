@@ -61,6 +61,28 @@ export function SceneTabs({
   onShotDropOnScene,
   onShotDragLeaveScene,
 }: SceneTabsProps) {
+  const [isScrolling, setIsScrolling] = React.useState(false);
+  const touchStartXRef = React.useRef(0);
+  const touchStartYRef = React.useRef(0);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartXRef.current = e.touches[0].clientX;
+    touchStartYRef.current = e.touches[0].clientY;
+    setIsScrolling(false);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    const deltaX = Math.abs(e.touches[0].clientX - touchStartXRef.current);
+    const deltaY = Math.abs(e.touches[0].clientY - touchStartYRef.current);
+    if (deltaX > 5 && deltaX > deltaY) {
+      setIsScrolling(true);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    setTimeout(() => setIsScrolling(false), 100);
+  };
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-1">
       <div className="relative">
@@ -69,7 +91,7 @@ export function SceneTabs({
             <div className="absolute left-0 top-0 bottom-0 w-10 bg-gradient-to-r from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
             <button
               onClick={() => scrollSceneTabs('left')}
-              className="touch-target-36-lg absolute left-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
+              className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
               title="向左滚动"
             >
               <ChevronLeft className="w-4 h-4" />
@@ -81,7 +103,7 @@ export function SceneTabs({
             <div className="absolute right-0 top-0 bottom-0 w-10 bg-gradient-to-l from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
             <button
               onClick={() => scrollSceneTabs('right')}
-              className="touch-target-36-lg absolute right-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
+              className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur border border-white/15 text-slate-300 hover:text-white flex items-center justify-center transition"
               title="向右滚动"
             >
               <ChevronRight className="w-4 h-4" />
@@ -91,7 +113,10 @@ export function SceneTabs({
         <div
           ref={sceneTabRef}
           onScroll={updateSceneScrollState}
-          className="overflow-x-auto overflow-y-hidden scrollbar-hide"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className="overflow-x-auto overflow-y-hidden scrollbar-hide bg-slate-900/95 backdrop-blur touch-pan-x"
         >
           <div className="flex items-center gap-2 min-w-max px-1 h-8">
           {sortedScenes.map((scene) => {
@@ -102,7 +127,7 @@ export function SceneTabs({
             return (
               <button
                 key={scene.id}
-                onClick={() => onSelectScene(scene.id)}
+                onClick={() => { if (!isScrolling) onSelectScene(scene.id); }}
                 draggable={!isMobile}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -166,7 +191,7 @@ export function SceneTabs({
 
           {unclassifiedCount > 0 && (
             <button
-              onClick={onSelectUnclassified}
+              onClick={() => { if (!isScrolling) onSelectUnclassified(); }}
               onDragOver={(e) => {
                 e.preventDefault();
                 e.stopPropagation();

@@ -131,8 +131,7 @@ export default function VideoSplitDialog({
   const [zoom, setZoom] = useState(1);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const PIXELS_PER_SECOND = 50;
-  const EDGE_MARGIN = 0.2;
-  const MIN_SPLIT_INTERVAL = 0.2;
+  const MIN_SHOT_DURATION = 0.5;
   const initialZoomSetRef = useRef(false);
   // 分割结果预览
   const [previewShots, setPreviewShots] = useState<SplitShot[]>([]);
@@ -143,14 +142,14 @@ export default function VideoSplitDialog({
   const [confirmDialog, setConfirmDialog] = useState(false);
 
   const timelineWidth = useMemo(() => {
-    return videoDuration * PIXELS_PER_SECOND * zoom;
+    return videoDuration * PIXELS_PER_SECOND * zoom + 1;
   }, [videoDuration, zoom]);
 
   const ticks = useMemo(() => {
     if (!videoDuration || videoDuration === 0) return [];
 
     const pixelsPerSecond = PIXELS_PER_SECOND * zoom;
-    const minTickSpacing = 40;
+    const minTickSpacing = 50;
 
     let majorInterval = 1;
     const intervals = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -161,26 +160,31 @@ export default function VideoSplitDialog({
       }
     }
 
-    const result: { time: number; isMajor: boolean; label: string }[] = [];
     const minorCount = majorInterval >= 1 ? 5 : (majorInterval >= 0.5 ? 5 : 2);
     const minorInterval = majorInterval / minorCount;
 
-    const lastTime = videoDuration;
-    let t = 0;
-    const usedLabels = new Set<string>();
+    const result: { time: number; isMajor: boolean; label: string }[] = [];
 
-    while (t <= lastTime + 0.001) {
-      const clamped = Math.min(t, lastTime);
-      // 使用更鲁棒的比较，避免浮点累计误差
-      const isMajor = Math.abs(t / majorInterval - Math.round(t / majorInterval)) < 0.01;
-      
+    const totalMinorSteps = Math.ceil(videoDuration / minorInterval);
+
+    const formatTickLabel = (sec: number): string => {
+      const mins = Math.floor(sec / 60);
+      const secs = Math.floor(sec % 60);
+      if (majorInterval < 1) {
+        const frac = Math.round((sec - Math.floor(sec)) * 10);
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${frac}`;
+      }
+      return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    for (let i = 0; i <= totalMinorSteps; i++) {
+      const t = i * minorInterval;
+      const clamped = Math.min(t, videoDuration);
+      const isMajor = i % minorCount === 0;
+
       let label = '';
       if (isMajor) {
-        const formatted = formatTime(clamped);
-        if (!usedLabels.has(formatted)) {
-          label = formatted;
-          usedLabels.add(formatted);
-        }
+        label = formatTickLabel(clamped);
       }
 
       result.push({
@@ -189,23 +193,65 @@ export default function VideoSplitDialog({
         label
       });
 
-      if (clamped >= lastTime) break;
-      t += minorInterval;
+      if (clamped >= videoDuration) break;
     }
 
     return result;
   }, [videoDuration, zoom]);
 
+  const getMinZoom = useCallback(() => {
+    if (!timelineScrollRef.current || !videoDuration || videoDuration === 0) return 0.01;
+    const rect = timelineScrollRef.current.getBoundingClientRect();
+    const containerWidth = rect.width;
+    if (containerWidth <= 0) return 0.01;
+    const targetWidth = videoDuration * PIXELS_PER_SECOND;
+    if (targetWidth <= 0) return 0.01;
+    return containerWidth / targetWidth;
+  }, [videoDuration]);
+
+  const getMaxZoom = useCallback(() => {
+    const minMajorInterval = 0.5;
+    const intervals = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    const idx = intervals.indexOf(minMajorInterval);
+    const nextSmaller = idx > 0 ? intervals[idx - 1] : minMajorInterval;
+    const minTickSpacing = 50;
+    return (minTickSpacing / (nextSmaller * PIXELS_PER_SECOND)) * 0.99;
+  }, []);
+
+  const fitZoomToContainer = useCallback(() => {
+    if (!timelineScrollRef.current || !videoDuration || videoDuration === 0) return false;
+    const rect = timelineScrollRef.current.getBoundingClientRect();
+    const containerWidth = rect.width;
+    if (containerWidth <= 0) return false;
+    const targetWidth = videoDuration * PIXELS_PER_SECOND;
+    if (targetWidth <= 0) return false;
+    const newZoom = containerWidth / targetWidth;
+    setZoom(Math.min(getMaxZoom(), newZoom));
+    return true;
+  }, [videoDuration, getMaxZoom]);
+
+  const tryFitZoomWithRetries = useCallback((retries: number = 15) => {
+    if (initialZoomSetRef.current) return;
+    const done = fitZoomToContainer();
+    if (done) {
+      initialZoomSetRef.current = true;
+    } else if (retries > 0) {
+      setTimeout(() => tryFitZoomWithRetries(retries - 1), 80);
+    }
+  }, [fitZoomToContainer]);
+
   const handleZoomIn = () => {
-    setZoom(prev => Math.min(prev * 1.5, 10));
+    initialZoomSetRef.current = true;
+    setZoom(prev => Math.min(prev * 1.5, getMaxZoom()));
   };
 
   const handleZoomOut = () => {
-    setZoom(prev => Math.max(prev / 1.5, 0.2));
+    initialZoomSetRef.current = true;
+    setZoom(prev => Math.max(prev / 1.5, getMinZoom()));
   };
 
   const handleZoomReset = () => {
-    setZoom(1);
+    fitZoomToContainer();
     if (timelineScrollRef.current) {
       timelineScrollRef.current.scrollLeft = 0;
     }
@@ -216,8 +262,10 @@ export default function VideoSplitDialog({
     e.preventDefault();
 
     const delta = e.deltaY > 0 ? 0.85 : 1.15;
-    const newZoom = Math.max(0.2, Math.min(10, zoom * delta));
+    const newZoom = Math.max(getMinZoom(), Math.min(getMaxZoom(), zoom * delta));
     if (newZoom === zoom) return;
+
+    initialZoomSetRef.current = true;
 
     const rect = timelineScrollRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -232,7 +280,7 @@ export default function VideoSplitDialog({
         timelineScrollRef.current.scrollLeft = Math.max(0, newScrollLeft);
       }
     });
-  }, [zoom, videoDuration]);
+  }, [zoom, videoDuration, getMinZoom, getMaxZoom]);
 
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
@@ -245,6 +293,12 @@ export default function VideoSplitDialog({
     setVideoDuration(0);
     setCurrentTime(0);
   }, [selectedVideoId]);
+
+  useEffect(() => {
+    if (isOpen && videoDuration > 0 && !initialZoomSetRef.current) {
+      requestAnimationFrame(() => tryFitZoomWithRetries(15));
+    }
+  }, [isOpen, videoDuration, tryFitZoomWithRetries]);
 
   const [currentUploadIndex, setCurrentUploadIndex] = useState(0);
   const [totalUploadCount, setTotalUploadCount] = useState(0);
@@ -296,7 +350,10 @@ export default function VideoSplitDialog({
             setSelectedVideoId(data.selectedVideoId || (data.uploadedVideos[0]?.id ?? null));
             if (data.splitPoints && Array.isArray(data.splitPoints)) setSplitPoints(data.splitPoints);
             if (data.mode) setMode(data.mode);
-            if (data.zoom !== undefined) setZoom(data.zoom);
+            if (data.zoom !== undefined) {
+              setZoom(data.zoom);
+              initialZoomSetRef.current = true;
+            }
             // 恢复 preview 状态相关
             if (data.previewShots && Array.isArray(data.previewShots)) setPreviewShots(data.previewShots);
             if (typeof data.showAIMode === 'boolean') setShowAIMode(data.showAIMode);
@@ -349,8 +406,13 @@ export default function VideoSplitDialog({
             else setSplitPoints([]);
             if (data.mode) setMode(data.mode);
             else setMode('manual');
-            if (data.zoom !== undefined) setZoom(data.zoom);
-            else setZoom(1);
+            if (data.zoom !== undefined) {
+              setZoom(data.zoom);
+              initialZoomSetRef.current = true;
+            } else {
+              setZoom(1);
+              initialZoomSetRef.current = false;
+            }
             if (data.previewShots && Array.isArray(data.previewShots)) setPreviewShots(data.previewShots);
             else setPreviewShots([]);
             if (typeof data.showAIMode === 'boolean') setShowAIMode(data.showAIMode);
@@ -429,14 +491,21 @@ export default function VideoSplitDialog({
   // 改进：仅在用户主动关闭（取消/应用）时清理；意外关闭（X/ESC/点遮罩）保留视频和缓存
   // shot 模式不涉及 OSS 清理（视频属于分镜）
   const userClosedRef = useRef(false);
+  // 记录"应用"模式已引用的视频 URL，清理时排除以避免误删
+  const appliedVideoUrlRef = useRef<string | null>(null);
   const prevIsOpenRef = useRef(false);
   useEffect(() => {
+    // 对话框打开时重置已应用标记
+    if (!prevIsOpenRef.current && isOpen) {
+      appliedVideoUrlRef.current = null;
+    }
     // 检测 isOpen 从 true → false 的变化
     if (prevIsOpenRef.current && !isOpen && uploadedVideos.length > 0 && userClosedRef.current && !isShotMode) {
       const urlsToClean = uploadedVideos
         .filter(v => !v.isFromShot)
         .map(v => v.url)
-        .filter(u => u && u.startsWith('http'));
+        .filter(u => u && u.startsWith('http'))
+        .filter(u => u !== appliedVideoUrlRef.current);
       // 使用 keepalive 确保页面卸载/导航时也能发请求
       urlsToClean.forEach(url => {
         try {
@@ -472,6 +541,8 @@ export default function VideoSplitDialog({
   const confirmCreate = () => {
     userClosedRef.current = true;
     if (onSplit && currentVideoRawUrl) {
+      // 标记已应用的视频 URL，关闭清理时排除以避免误删（onSplit 异步创建 shot_media，清理可能先于引用完成）
+      appliedVideoUrlRef.current = currentVideoRawUrl;
       // 重新计算索引，防止用户删除后索引不连续
       const shotsToCreate = previewShots.map((s, i) => ({
         startTime: s.startTime,
@@ -806,23 +877,7 @@ export default function VideoSplitDialog({
     if (videoRef.current) {
       const duration = videoRef.current.duration;
       setVideoDuration(duration);
-      // 视频时长就绪时计算初始缩放，确保时间轴初始就显示整个时间轴
-      if (!initialZoomSetRef.current) {
-        // 使用 setTimeout 确保 DOM 完全渲染后再计算
-        setTimeout(() => {
-          if (initialZoomSetRef.current || !timelineScrollRef.current) return;
-          const rect = timelineScrollRef.current.getBoundingClientRect();
-          const containerWidth = rect.width;
-          if (containerWidth <= 0) return;
-          const targetWidth = duration * PIXELS_PER_SECOND;
-          // 计算缩放比例，让时间轴完全填充容器
-          if (targetWidth > 0) {
-            const newZoom = Math.min(1, containerWidth / targetWidth);
-            setZoom(Math.max(0.2, newZoom));
-          }
-          initialZoomSetRef.current = true;
-        }, 50);
-      }
+      requestAnimationFrame(() => tryFitZoomWithRetries(15));
     }
   };
 
@@ -857,18 +912,9 @@ export default function VideoSplitDialog({
   const addSplitPoint = () => {
     if (videoDuration === 0) return;
 
-    if (currentTime < EDGE_MARGIN) {
-      setError('分割点距离视频开头不能小于 5 帧');
-      return;
-    }
-    if (currentTime > videoDuration - EDGE_MARGIN) {
-      setError('分割点距离视频结尾不能小于 5 帧');
-      return;
-    }
-
-    const tooClose = splitPoints.some(p => Math.abs(p.time - currentTime) < MIN_SPLIT_INTERVAL);
+    const tooClose = splitPoints.some(p => Math.abs(p.time - currentTime) < 0.1);
     if (tooClose) {
-      setError('两个分割点之间的间隔不能小于 5 帧');
+      setError('分割点距离太近');
       return;
     }
 
@@ -911,7 +957,9 @@ export default function VideoSplitDialog({
 
     const rect = timelineRef.current.getBoundingClientRect();
     const percentage = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const newTime = percentage * videoDuration;
+    let newTime = percentage * videoDuration;
+
+    newTime = Math.max(0, Math.min(videoDuration, newTime));
 
     setSplitPoints(prev =>
       prev.map(p => (p.id === draggingPoint ? { ...p, time: newTime } : p))
@@ -921,7 +969,7 @@ export default function VideoSplitDialog({
       videoRef.current.currentTime = newTime;
       setCurrentTime(newTime);
     }
-  }, [draggingPoint, videoDuration]);
+  }, [draggingPoint, videoDuration, splitPoints]);
 
   const handleTimelineTouchMove = useCallback((e: TouchEvent) => {
     if (!draggingPoint || !timelineRef.current || !videoDuration) return;
@@ -930,7 +978,9 @@ export default function VideoSplitDialog({
     const touch = e.touches[0];
     const rect = timelineRef.current.getBoundingClientRect();
     const percentage = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
-    const newTime = percentage * videoDuration;
+    let newTime = percentage * videoDuration;
+
+    newTime = Math.max(0, Math.min(videoDuration, newTime));
 
     setSplitPoints(prev =>
       prev.map(p => (p.id === draggingPoint ? { ...p, time: newTime } : p))
@@ -940,59 +990,21 @@ export default function VideoSplitDialog({
       videoRef.current.currentTime = newTime;
       setCurrentTime(newTime);
     }
-  }, [draggingPoint, videoDuration]);
+  }, [draggingPoint, videoDuration, splitPoints]);
 
   const handleTimelineMouseUp = useCallback(() => {
     if (draggingPoint && videoDuration > 0) {
-      const point = splitPoints.find(p => p.id === draggingPoint);
-      if (point) {
-        let valid = true;
-        if (point.time < EDGE_MARGIN || point.time > videoDuration - EDGE_MARGIN) {
-          valid = false;
-          setError('分割点距离视频开头或结尾不能小于 5 帧');
-        }
-        const tooClose = splitPoints.some(p => p.id !== draggingPoint && Math.abs(p.time - point.time) < MIN_SPLIT_INTERVAL);
-        if (tooClose) {
-          valid = false;
-          setError('两个分割点之间的间隔不能小于 5 帧');
-        }
-        if (!valid) {
-          setSplitPoints(prev =>
-            prev.map(p => (p.id === draggingPoint ? { ...p, time: dragStartPointRef.current } : p))
-          );
-        } else {
-          setError(null);
-        }
-      }
+      setError(null);
     }
     setDraggingPoint(null);
-  }, [draggingPoint, splitPoints, videoDuration, EDGE_MARGIN, MIN_SPLIT_INTERVAL]);
+  }, [draggingPoint, splitPoints, videoDuration]);
 
   const handleTimelineTouchEnd = useCallback(() => {
     if (draggingPoint && videoDuration > 0) {
-      const point = splitPoints.find(p => p.id === draggingPoint);
-      if (point) {
-        let valid = true;
-        if (point.time < EDGE_MARGIN || point.time > videoDuration - EDGE_MARGIN) {
-          valid = false;
-          setError('分割点距离视频开头或结尾不能小于 5 帧');
-        }
-        const tooClose = splitPoints.some(p => p.id !== draggingPoint && Math.abs(p.time - point.time) < MIN_SPLIT_INTERVAL);
-        if (tooClose) {
-          valid = false;
-          setError('两个分割点之间的间隔不能小于 5 帧');
-        }
-        if (!valid) {
-          setSplitPoints(prev =>
-            prev.map(p => (p.id === draggingPoint ? { ...p, time: dragStartPointRef.current } : p))
-          );
-        } else {
-          setError(null);
-        }
-      }
+      setError(null);
     }
     setDraggingPoint(null);
-  }, [draggingPoint, splitPoints, videoDuration, EDGE_MARGIN, MIN_SPLIT_INTERVAL]);
+  }, [draggingPoint, splitPoints, videoDuration]);
 
   const pinchRef = useRef<{
     active: boolean;
@@ -1027,9 +1039,11 @@ export default function VideoSplitDialog({
     const t2 = e.touches[1];
     const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
     const scale = dist / pinchRef.current.startDist;
-    const newZoom = Math.max(0.2, Math.min(10, pinchRef.current.startZoom * scale));
+    const newZoom = Math.max(getMinZoom(), Math.min(getMaxZoom(), pinchRef.current.startZoom * scale));
 
     if (newZoom === zoom) return;
+
+    initialZoomSetRef.current = true;
 
     const scrollRect = timelineScrollRef.current.getBoundingClientRect();
     const mouseX = pinchRef.current.startCenterX - scrollRect.left;
@@ -1044,7 +1058,7 @@ export default function VideoSplitDialog({
         timelineScrollRef.current.scrollLeft = Math.max(0, newScrollLeft);
       }
     });
-  }, [zoom, videoDuration]);
+  }, [zoom, videoDuration, getMinZoom, getMaxZoom]);
 
   const handlePinchEnd = useCallback(() => {
     pinchRef.current.active = false;
@@ -1065,6 +1079,10 @@ export default function VideoSplitDialog({
     }
   }, [draggingPoint, handleTimelineMouseMove, handleTimelineMouseUp, handleTimelineTouchMove, handleTimelineTouchEnd]);
 
+  const [isPanDragging, setIsPanDragging] = useState(false);
+  const panStartXRef = useRef(0);
+  const panStartScrollLeftRef = useRef(0);
+
   useEffect(() => {
     const scrollEl = timelineScrollRef.current;
     if (!scrollEl) return;
@@ -1072,16 +1090,32 @@ export default function VideoSplitDialog({
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length === 2) {
         handlePinchStart(e);
+        setIsPanDragging(false);
+      } else if (e.touches.length === 1 && !draggingPoint) {
+        const touch = e.touches[0];
+        const target = e.target as HTMLElement;
+        if (target.closest('[data-split-point]')) return;
+        panStartXRef.current = touch.clientX;
+        panStartScrollLeftRef.current = scrollEl.scrollLeft;
+        setIsPanDragging(true);
       }
     };
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches.length === 2) {
         handlePinchMove(e);
+      } else if (e.touches.length === 1 && isPanDragging) {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const deltaX = touch.clientX - panStartXRef.current;
+        scrollEl.scrollLeft = panStartScrollLeftRef.current - deltaX;
       }
     };
     const onTouchEnd = (e: TouchEvent) => {
       if (e.touches.length < 2) {
         handlePinchEnd();
+      }
+      if (isPanDragging) {
+        setIsPanDragging(false);
       }
     };
 
@@ -1096,10 +1130,10 @@ export default function VideoSplitDialog({
       scrollEl.removeEventListener('touchend', onTouchEnd);
       scrollEl.removeEventListener('touchcancel', onTouchEnd);
     };
-  }, [handlePinchStart, handlePinchMove, handlePinchEnd]);
+  }, [handlePinchStart, handlePinchMove, handlePinchEnd, isPanDragging, draggingPoint]);
 
   const handleTimelineClick = (e: React.MouseEvent) => {
-    if (draggingPoint || !timelineRef.current || !videoDuration) return;
+    if (draggingPoint || isPanDragging || !timelineRef.current || !videoDuration) return;
 
     const rect = timelineRef.current.getBoundingClientRect();
     const percentage = (e.clientX - rect.left) / rect.width;
@@ -1149,15 +1183,32 @@ export default function VideoSplitDialog({
 
           if (data.output?.shots) {
             const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
-            // 生成预览镜头列表
-            const newPreviewShots: SplitShot[] = splitShots.map((shot, i) => ({
-              startTime: shot.startTime,
-              endTime: shot.endTime,
-              index: i
-            }));
-            setPreviewShots(newPreviewShots);
+            // 过滤时长小于 0.5 秒的片段，合并到相邻片段
+            const filteredShots: SplitShot[] = [];
+            for (let i = 0; i < splitShots.length; i++) {
+              const shot = splitShots[i];
+              const duration = shot.endTime - shot.startTime;
+              if (duration >= MIN_SHOT_DURATION) {
+                filteredShots.push({
+                  startTime: shot.startTime,
+                  endTime: shot.endTime,
+                  index: filteredShots.length
+                });
+              } else if (filteredShots.length > 0) {
+                // 短片段合并到前一个片段
+                filteredShots[filteredShots.length - 1].endTime = shot.endTime;
+              }
+            }
+            if (filteredShots.length === 0 && splitShots.length > 0) {
+              filteredShots.push({
+                startTime: splitShots[0].startTime,
+                endTime: splitShots[splitShots.length - 1].endTime,
+                index: 0
+              });
+            }
+            setPreviewShots(filteredShots);
             // 同步更新 splitPoints，便于用户返回手动调整
-            const newSplitPoints: SplitPoint[] = splitShots.slice(1).map((shot, idx: number) => ({
+            const newSplitPoints: SplitPoint[] = filteredShots.slice(1).map((shot, idx: number) => ({
               id: generateId(),
               time: shot.startTime
             }));
@@ -1308,13 +1359,20 @@ export default function VideoSplitDialog({
       const shots: SplitShot[] = splitPoints.length > 0
         ? (() => {
             const result: SplitShot[] = [];
-            const times = [0, ...splitPoints.map(p => p.time), videoDuration];
+            const times = [0, ...splitPoints.map(p => p.time), videoDuration].sort((a, b) => a - b);
             for (let i = 0; i < times.length - 1; i++) {
-              result.push({
-                startTime: times[i],
-                endTime: times[i + 1],
-                index: i
-              });
+              const startTime = times[i];
+              const endTime = times[i + 1];
+              if (endTime - startTime >= MIN_SHOT_DURATION) {
+                result.push({
+                  startTime,
+                  endTime,
+                  index: result.length
+                });
+              }
+            }
+            if (result.length === 0) {
+              result.push({ startTime: 0, endTime: videoDuration, index: 0 });
             }
             return result;
           })()
@@ -1475,15 +1533,15 @@ export default function VideoSplitDialog({
           </button>
         </div>
 
-        <div className={`flex-1 overflow-hidden flex ${isMobile ? 'flex-col' : 'flex-row'}`}>
-          <div className={`${isMobile ? 'w-full border-b border-r-0 h-24 px-3 py-2 flex items-center gap-2 overflow-x-auto custom-scrollbar' : 'w-36 border-r border-white/10 p-3 space-y-2 overflow-y-auto custom-scrollbar'} flex-shrink-0`}>
+        <div className={`flex-1 ${isMobile ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'} flex ${isMobile ? 'flex-col' : 'flex-row'}`}>
+          <div className={`${isMobile ? 'w-full border-b border-r-0 px-3 py-2 grid grid-cols-2 gap-3' : 'w-36 border-r border-white/10 p-3 space-y-2 overflow-y-auto custom-scrollbar flex-shrink-0'}`}>
             {isMobile ? (
               <>
                 {uploadedVideos.map(video => (
                   <div
                     key={video.id}
                     onClick={() => handleSelectVideo(video.id)}
-                    className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all flex-shrink-0 w-20 relative ${
+                    className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-all relative ${
                       selectedVideoId === video.id
                         ? 'border-violet-500 ring-1 ring-violet-500/30'
                         : 'border-white/10'
@@ -1519,7 +1577,7 @@ export default function VideoSplitDialog({
                   <button
                     onClick={handleUploadClick}
                     disabled={isUploading}
-                    className="w-20 h-auto aspect-video flex-shrink-0 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50 flex flex-col items-center justify-center"
+                    className="aspect-video rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50 flex flex-col items-center justify-center"
                   >
                     <Upload className="w-4 h-4 text-slate-400 mb-1" />
                     <div className="text-[10px] text-slate-400">上传</div>
@@ -1599,7 +1657,7 @@ export default function VideoSplitDialog({
             />
           </div>
 
-          <div className={`flex-1 overflow-y-auto custom-scrollbar ${isMobile ? 'p-3 space-y-3' : 'p-6 space-y-5'}`}>
+          <div className={`${isMobile ? '' : 'flex-1 overflow-y-auto custom-scrollbar'} ${isMobile ? 'p-3 space-y-3' : 'p-6 space-y-5'}`}>
             {error && (
               <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -1647,17 +1705,20 @@ export default function VideoSplitDialog({
                       onPlay={handlePlay}
                       onPause={handlePause}
                     />
-                    {state !== 'processing' && (
+                    {state !== 'processing' && !isPlaying && (
                       <button
                         onClick={togglePlay}
                         className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition"
                       >
-                        {isPlaying ? (
-                          <Pause className="w-12 h-12 text-white/80" />
-                        ) : (
-                          <Play className="w-12 h-12 text-white/80" />
-                        )}
+                        <Play className="w-12 h-12 text-white/80" />
                       </button>
+                    )}
+                    {state !== 'processing' && isPlaying && (
+                      <button
+                        onClick={togglePlay}
+                        className="absolute inset-0"
+                        aria-label="暂停"
+                      />
                     )}
                     {state === 'processing' && (
                       <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
@@ -1679,7 +1740,7 @@ export default function VideoSplitDialog({
                         <div className="flex items-center gap-1 ml-2">
                           <button
                             onClick={handleZoomOut}
-                            disabled={zoom <= 0.2 || !videoDuration}
+                            disabled={zoom <= getMinZoom() + 0.001 || !videoDuration}
                             className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
                             title="缩小"
                           >
@@ -1690,7 +1751,7 @@ export default function VideoSplitDialog({
                           </span>
                           <button
                             onClick={handleZoomIn}
-                            disabled={zoom >= 10 || !videoDuration}
+                            disabled={zoom >= getMaxZoom() - 0.001 || !videoDuration}
                             className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
                             title="放大"
                           >
@@ -1698,7 +1759,7 @@ export default function VideoSplitDialog({
                           </button>
                           <button
                             onClick={handleZoomReset}
-                            disabled={zoom === 1 || !videoDuration}
+                            disabled={Math.abs(zoom - getMinZoom()) < 0.001 || !videoDuration}
                             className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-300 transition disabled:opacity-30 disabled:cursor-not-allowed"
                             title="重置缩放"
                           >
@@ -1710,13 +1771,38 @@ export default function VideoSplitDialog({
 
                     <div
                       ref={timelineScrollRef}
-                      className={`relative overflow-x-auto overflow-y-hidden rounded-none bg-white/5 ${zoom >= 1 ? '' : 'custom-scrollbar'} ${state === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
-                      style={{ height: 80 }}
+                      className={`relative overflow-x-scroll overflow-y-hidden rounded-none bg-white/5 custom-scrollbar ${state === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
+                      style={{ height: 96 }}
                       onWheel={state === 'processing' ? undefined : handleTimelineWheel}
                     >
+                      {/* 刻度：在时间轴上方 */}
+                      <div
+                        className="absolute top-0 left-0 pointer-events-none"
+                        style={{ width: timelineWidth, height: 36 }}
+                      >
+                        {ticks.map((tick, idx) => (
+                          <div
+                            key={idx}
+                            className="absolute bottom-0"
+                            style={{ left: (tick.time / videoDuration) * 100 + '%' }}
+                          >
+                            {tick.label && (
+                              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[10px] text-slate-500 whitespace-nowrap">
+                                {tick.label}
+                              </div>
+                            )}
+                            <div
+                              className={`border-l ${tick.isMajor ? 'border-slate-500 h-2.5' : 'border-slate-600/60 h-1.5'}`}
+                              style={{ marginLeft: -0.5 }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* 时间轴：在刻度下方，顶部对齐 */}
                       <div
                         ref={timelineRef}
-                        className={`relative h-12 ${state === 'processing' ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        className={`absolute top-9 left-0 h-12 ${state === 'processing' ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         style={{ width: timelineWidth }}
                         onClick={state === 'processing' ? undefined : handleTimelineClick}
                       >
@@ -1730,6 +1816,7 @@ export default function VideoSplitDialog({
                         {splitPoints.map(point => (
                           <div
                             key={point.id}
+                            data-split-point="true"
                             className={`absolute top-0 ${isMobile ? 'w-8 -ml-4' : 'w-1'} h-full cursor-ew-resize z-10 ${state === 'processing' ? 'pointer-events-none' : ''}`}
                             style={{ left: `${(point.time / videoDuration) * 100}%` }}
                             onMouseDown={state === 'processing' ? undefined : (e => handleTimelineMouseDown(e, point.id))}
@@ -1745,30 +1832,6 @@ export default function VideoSplitDialog({
                           className="absolute top-0 w-0.5 h-full bg-white z-20 pointer-events-none"
                           style={{ left: `${(currentTime / videoDuration) * 100}%` }}
                         />
-                      </div>
-
-                      {/* 刻度：在时间轴下方，刻度线顶端对齐时间轴底部 */}
-                      <div
-                        className="absolute top-12 left-0 pointer-events-none"
-                        style={{ width: timelineWidth }}
-                      >
-                        {ticks.map((tick, idx) => (
-                          <div
-                            key={idx}
-                            className="absolute top-0"
-                            style={{ left: (tick.time / videoDuration) * 100 + '%' }}
-                          >
-                            <div
-                              className={`border-l ${tick.isMajor ? 'border-slate-500 h-3' : 'border-slate-600/60 h-1.5'}`}
-                              style={{ marginLeft: -0.5 }}
-                            />
-                            {tick.label && (
-                              <div className="absolute top-3 left-1 text-[10px] text-slate-500 whitespace-nowrap -translate-x-1/2">
-                                {tick.label}
-                              </div>
-                            )}
-                          </div>
-                        ))}
                       </div>
                     </div>
                   </div>
@@ -1804,9 +1867,14 @@ export default function VideoSplitDialog({
                         )}
                       </div>
 
-                      <div className="text-sm text-slate-400">
-                        已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
-                        <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
+                      <div className="space-y-1">
+                        <div className="text-sm text-slate-400">
+                          已标记 <span className="text-violet-400 font-medium">{splitPoints.length}</span> 个分割点，将生成{' '}
+                          <span className="text-violet-400 font-medium">{sceneCount}</span> 个分镜
+                        </div>
+                        <div className="text-xs text-slate-500">
+                          时长小于 0.5 秒的片段将被自动过滤
+                        </div>
                       </div>
 
                       {splitPoints.length > 0 && (
@@ -1877,6 +1945,10 @@ export default function VideoSplitDialog({
                                     autoPlay
                                     muted
                                     playsInline
+                                    onLoadedMetadata={(e) => {
+                                      const v = e.currentTarget;
+                                      v.currentTime = shot.startTime;
+                                    }}
                                     onTimeUpdate={(e) => {
                                       const v = e.currentTarget;
                                       if (v.currentTime >= shot.endTime) {

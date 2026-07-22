@@ -1157,7 +1157,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             <div className="flex items-center justify-end gap-3 mt-6">
               <button
                 onClick={() => setShowCreateModal(false)}
-                className="px-4 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                className="px-4 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
               >
                 取消
               </button>
@@ -1223,7 +1223,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 <button
                   onClick={() => setDeleteTarget(null)}
                   disabled={deleteLoading}
-                  className="px-5 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-white/5 transition"
+                  className="px-5 py-2 rounded-xl border border-white/15 text-sm text-slate-300 hover:bg-white/10 transition"
                 >
                   取消
                 </button>
@@ -1243,7 +1243,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       {/* 上传参考文件对话框 */}
       {uploadDialogProject && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => !uploadDialogLoading && setUploadDialogProject(null)}>
-          <div className="w-full sm:max-w-xl sm:w-[calc(100%-2rem)] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[100dvh] sm:max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="absolute inset-x-0 top-0 bottom-0 sm:w-[calc(100%-2rem)] sm:max-w-xl bg-slate-900/95 backdrop-blur-xl sm:rounded-3xl rounded-none border border-white/10 flex flex-col shadow-2xl max-h-[100dvh] sm:max-h-[90vh] p-6 overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-5">
               <div>
                 <h2 className="text-lg font-semibold">项目封面与参考视频</h2>
