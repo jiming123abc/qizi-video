@@ -16,15 +16,13 @@ import {
   GripVertical,
   X,
   Info,
-  Loader2,
   RotateCcw
 } from 'lucide-react';
 import type { Shot, ShotMedia } from '../../lib/types';
 import AnalyzeShotDialog from '../ai/AnalyzeShotDialog';
-import { VideoCompressionDialog } from './VideoCompressionDialog';
-import { getVideoPoster, uploadImage, uploadVideo, detectFileType, checkVideoBitrate } from '../../lib/ossUtils';
-import type { UploadDecision } from '../../lib/ossUtils';
+import { getVideoPoster } from '../../lib/ossUtils';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useUnifiedUpload } from '../../hooks/useUnifiedUpload';
 
 interface FieldSuggestions {
   location: string[];
@@ -340,25 +338,9 @@ export function ShotCard({
   const [showMergedFrom, setShowMergedFrom] = useState(false);
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  // 上传状态
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadMessage, setUploadMessage] = useState('');
   const [showAnalyzeDialog, setShowAnalyzeDialog] = useState(false);
 
-  // 视频压缩方式选择对话框
-  const [pendingVideo, setPendingVideo] = useState<File | null>(null);
-  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const [aliyunConfigured, setAliyunConfigured] = useState(false);
-
-  useEffect(() => {
-    fetch('/api/aliyun/status')
-      .then(res => res.json())
-      .then(data => setAliyunConfigured(data.configured || false))
-      .catch(() => {});
-  }, []);
+  const { startUpload } = useUnifiedUpload();
   
   const media = shot.media || [];
   const currentMedia = media[currentIndex];
@@ -424,45 +406,39 @@ export function ShotCard({
     }
   }, [currentMedia]);
 
-  // 执行视频上传并保存到分镜
-  const doUploadVideo = useCallback(async (file: File, compressionMethod: 'server' | 'browser' | 'aliyun' | 'none') => {
+  // 通过统一上传模块上传文件并关联到分镜
+  const handleUploadClick = useCallback(async () => {
     if (!projectId) return;
 
-    setIsUploading(true);
-    setUploadProgress(5);
-    setUploadMessage('准备上传...');
+    const results = await startUpload({
+      projectId,
+      sceneId: shot.sceneId,
+      usage: 'shot-reference',
+      accept: 'image/*,video/*',
+      multiple: true,
+      maxFiles: 10,
+      currentCount: media.length,
+      createShot: false,
+    });
 
-    try {
-      setUploadMessage('上传视频中...');
-      const result = await uploadVideo(file, {
-        projectId,
-        usage: 'shot-reference',
-        compressionMethod,
-        skipBitrateCheck: true,
-        onProgress: p => {
-          setUploadProgress(p.progress);
-          setUploadMessage(p.message || '上传中...');
-        }
-      });
+    if (results.length === 0) return;
 
-      setUploadProgress(100);
-      setUploadMessage('保存到分镜...');
-
-      // 保存到分镜
+    for (const result of results) {
       const fileSize = result.compressedSizeKB
         ? Math.round(result.compressedSizeKB * 1024)
-        : file.size;
+        : result.size;
 
+      // 调用后端API关联媒体到分镜
       const res = await fetch(`/api/shots/${shot.id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: result.url,
-          type: 'video',
-          filename: file.name,
+          type: result.type,
+          filename: result.filename,
           source: 'upload',
           ossKey: result.ossKey,
-          size: fileSize
+          size: fileSize,
         })
       });
 
@@ -472,159 +448,29 @@ export function ShotCard({
           id: data.data?.id || data.id || Date.now(),
           shotId: shot.id,
           url: result.url,
-          type: 'video',
-          filename: file.name,
+          type: result.type,
+          filename: result.filename,
           size: fileSize,
-          sortOrder: media.length,
+          sortOrder: media.length + results.indexOf(result),
           source: 'upload',
           ossKey: result.ossKey,
           createdAt: new Date().toISOString()
         };
 
         onUpdate?.(shot.id, { media: [...media, newMedia] });
-        setUploadMessage('完成');
       } else {
+        // 关联失败，清理已上传的 OSS 文件避免残留
+        if (result.url) {
+          fetch('/api/oss/cleanup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: [result.url] })
+          }).catch(() => {});
+        }
         throw new Error(data.message || '保存失败');
       }
-    } catch (err) {
-      console.error('上传失败:', err);
-      setUploadMessage('上传失败');
-      onShowToast?.(`上传失败: ${(err as Error).message}`, 'error');
-    } finally {
-      setTimeout(() => {
-        setIsUploading(false);
-        setUploadProgress(0);
-        setUploadMessage('');
-      }, 500);
     }
-  }, [shot.id, projectId, media, onUpdate, onShowToast]);
-
-  // 处理压缩方式选择
-  const handleCompressionSelect = useCallback(async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
-    const video = pendingVideo;
-    setPendingVideo(null);
-    setPendingCompressionDecision(null);
-
-    if (method === 'cancel' || !video) return;
-
-    await doUploadVideo(video, method);
-  }, [pendingVideo, doUploadVideo]);
-
-  // 处理文件上传（直接上传并添加到分镜）
-  const handleFileUpload = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0 || !projectId) return;
-
-    const MAX_MEDIA_COUNT = 10;
-    const remaining = MAX_MEDIA_COUNT - media.length;
-    if (remaining <= 0) {
-      onShowToast?.(`最多只能添加 ${MAX_MEDIA_COUNT} 个参考画面`, 'error');
-      return;
-    }
-
-    const file = files[0];
-    const detected = detectFileType(file);
-    if (!detected.supported) {
-      onShowToast?.('不支持的文件格式', 'error');
-      return;
-    }
-
-    const fileType = detected.type as 'image' | 'video';
-
-    if (fileType === 'image') {
-      // 图片直接上传
-      setIsUploading(true);
-      setUploadProgress(5);
-      setUploadMessage('准备上传...');
-
-      try {
-        const result = await uploadImage(file, {
-          projectId,
-          usage: 'shot-reference',
-          onProgress: p => {
-            setUploadProgress(p.progress);
-            setUploadMessage(p.message || '上传中...');
-          }
-        });
-
-        setUploadProgress(100);
-        setUploadMessage('保存到分镜...');
-
-        const fileSize = result.compressedSizeKB
-          ? Math.round(result.compressedSizeKB * 1024)
-          : file.size;
-
-        const res = await fetch(`/api/shots/${shot.id}/media`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: result.url,
-            type: 'image',
-            filename: file.name,
-            source: 'upload',
-            ossKey: result.ossKey,
-            size: fileSize
-          })
-        });
-
-        const data = await res.json();
-        if (data.success || data.id) {
-          const newMedia: ShotMedia = {
-            id: data.data?.id || data.id || Date.now(),
-            shotId: shot.id,
-            url: result.url,
-            type: 'image',
-            filename: file.name,
-            size: fileSize,
-            sortOrder: media.length,
-            source: 'upload',
-            ossKey: result.ossKey,
-            createdAt: new Date().toISOString()
-          };
-
-          onUpdate?.(shot.id, { media: [...media, newMedia] });
-          setUploadMessage('完成');
-        } else {
-          throw new Error(data.message || '保存失败');
-        }
-      } catch (err) {
-        console.error('上传失败:', err);
-        setUploadMessage('上传失败');
-        onShowToast?.(`上传失败: ${(err as Error).message}`, 'error');
-      } finally {
-        setTimeout(() => {
-          setIsUploading(false);
-          setUploadProgress(0);
-          setUploadMessage('');
-        }, 500);
-      }
-    } else {
-      // 视频：先检测码率，再决定是否弹出压缩方式选择对话框
-      setIsUploading(true);
-      setUploadProgress(2);
-      setUploadMessage('正在检测视频信息...');
-
-      try {
-        const decision = await checkVideoBitrate(file);
-        if (decision.decision === 'must_compress') {
-          // 需要压缩：弹出对话框让用户选择压缩方式
-          setIsUploading(false);
-          setUploadProgress(0);
-          setUploadMessage('');
-          setPendingVideo(file);
-          setPendingCompressionDecision(decision);
-        } else {
-          // 无需压缩：直接上传
-          await doUploadVideo(file, 'none');
-        }
-      } catch (err) {
-        console.error('视频检测失败:', err);
-        setIsUploading(false);
-        setUploadProgress(0);
-        setUploadMessage('');
-        onShowToast?.(`视频检测失败: ${(err as Error).message}`, 'error');
-      }
-    }
-  }, [shot.id, projectId, media, onUpdate, onShowToast, doUploadVideo]);
+  }, [shot.id, shot.sceneId, projectId, media, onUpdate, onShowToast, startUpload]);
 
   const handlePlayVideo = useCallback(() => {
     if (!shouldLoadVideo) {
@@ -721,15 +567,7 @@ export function ShotCard({
 
   const hasMedia = media.length > 0;
 
-  // 自动轮播：媒体数量 > 1 且视频未播放时，每 4 秒自动切换
-  const [isHovering, setIsHovering] = useState(false);
-  useEffect(() => {
-    if (media.length <= 1 || isHovering || isVideoPlaying || shouldLoadVideo) return;
-    const timer = setInterval(() => {
-      setCurrentIndex(prev => (prev < media.length - 1 ? prev + 1 : 0));
-    }, 4000);
-    return () => clearInterval(timer);
-  }, [media.length, isHovering, isVideoPlaying, shouldLoadVideo]);
+
 
   useEffect(() => {
     if (playingVideoKey && playingVideoKey !== videoKey && isVideoPlaying) {
@@ -763,8 +601,6 @@ export function ShotCard({
             {/* 有媒体时使用轮播 */}
             <div
               className="relative aspect-video bg-black/40"
-              onMouseEnter={() => setIsHovering(true)}
-              onMouseLeave={() => setIsHovering(false)}
             >
               {/* 左上角：选择按钮 */}
               <button
@@ -792,7 +628,7 @@ export function ShotCard({
                     muted={false}
                     playsInline
                     loop
-                    controls={isMobile}
+                    controls={false}
                     className="w-full h-full object-cover"
                     onPlay={handleVideoPlay}
                     onPause={handleVideoPause}
@@ -929,8 +765,8 @@ export function ShotCard({
             </div>
           </>
         ) : (
-          /* 无媒体时显示占位 - 使用更矮的高度节省空间 */
-          <div className={`${isMobile ? 'h-[110px]' : 'h-[130px]'} bg-black/40 flex flex-col items-center justify-center gap-2 relative`}>
+          /* 无媒体时显示占位 - 桌面端保持与有媒体时一致的高度，手机端使用较矮高度 */
+          <div className={`${isMobile ? 'h-[110px]' : 'aspect-video'} bg-black/40 flex flex-col items-center justify-center gap-2 relative`}>
             {/* 左上角：选择按钮 */}
             <button
               onClick={(e) => { e.stopPropagation(); onSelect?.(shot); }}
@@ -943,53 +779,31 @@ export function ShotCard({
             >
               {isSelected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border border-white/40" />}
             </button>
-            {isUploading ? (
-              /* 上传进度显示 */
-              <div className="flex flex-col items-center gap-2">
-                <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
-                <div className="w-48 h-2 rounded-full bg-white/10 overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-                <p className="text-xs text-slate-400">{uploadMessage || `${uploadProgress}%`}</p>
+            <>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleUploadClick();
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-violet-400/40 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition"
+                >
+                  <Upload className="w-4 h-4" />
+                  上传
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAiGenerate?.(shot);
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-pink-400/40 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  AI生成
+                </button>
               </div>
-            ) : (
-              <>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      fileInputRef.current?.click();
-                    }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-violet-400/40 bg-violet-500/10 hover:bg-violet-500/20 text-xs font-medium text-violet-200 transition"
-                  >
-                    <Upload className="w-4 h-4" />
-                    上传
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onAiGenerate?.(shot);
-                    }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-dashed border-pink-400/40 bg-pink-500/10 hover:bg-pink-500/20 text-xs font-medium text-pink-200 transition"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    AI生成
-                  </button>
-                </div>
-                <p className="text-xs text-slate-500">上传或AI生成参考画面</p>
-                {/* 隐藏的文件输入 */}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*,video/*"
-                  className="hidden"
-                  onChange={(e) => handleFileUpload(e.target.files)}
-                />
-              </>
-            )}
+              <p className="text-xs text-slate-500">上传或AI生成参考画面</p>
+            </>
           </div>
         )}
 
@@ -1346,15 +1160,6 @@ export function ShotCard({
       currentMedia={currentMedia!}
       onApply={(shotId, updates) => onUpdate?.(shotId, updates)}
       onOpenSettings={onOpenSettings}
-    />
-
-    <VideoCompressionDialog
-      isOpen={!!pendingVideo && !!pendingCompressionDecision}
-      onClose={() => { setPendingVideo(null); setPendingCompressionDecision(null); }}
-      file={pendingVideo}
-      decision={pendingCompressionDecision}
-      aliyunConfigured={aliyunConfigured}
-      onSelect={handleCompressionSelect}
     />
     </>
   );

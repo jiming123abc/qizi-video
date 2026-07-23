@@ -42,7 +42,7 @@ export function UploadDialog({
   aliyunConfigured,
   currentSceneName,
   onRetryFailed,
-  maxFiles = 200,
+  maxFiles = 100,
 }: UploadDialogProps) {
   if (!isOpen) return null;
 

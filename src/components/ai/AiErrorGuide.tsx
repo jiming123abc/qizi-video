@@ -11,14 +11,28 @@ export interface ErrorGuide {
 export function analyzeAiError(errorMsg: string): ErrorGuide {
   const msg = errorMsg.toLowerCase();
 
-  if (msg.includes('api key') || msg.includes('apikey') || msg.includes('401') || msg.includes('unauthorized') || msg.includes('未配置') || msg.includes('无效')) {
+  if (msg.includes('api key') || msg.includes('apikey') || msg.includes('401') || msg.includes('unauthorized') || msg.includes('未配置') || msg.includes('无效') || msg.includes('accesskey') || msg.includes('access key')) {
     return {
       type: 'api_key',
       title: 'API Key 问题',
       suggestions: [
-        '请检查 API Key 是否已正确配置',
-        '确认 API Key 没有拼写错误或多余空格',
-        '确认 API Key 仍在有效期内',
+        '请检查 API Key / AccessKey 是否已正确配置',
+        '确认 AccessKey ID 和 AccessKey Secret 没有拼写错误或多余空格',
+        '确认 AccessKey 仍在有效期内，并拥有视频智能（videorecog）服务权限',
+        '确认阿里云账号已开通视觉智能开放平台服务',
+      ],
+      showSettingsButton: true,
+    };
+  }
+
+  if (msg.includes('videorecog') || msg.includes('regionid') || msg.includes('authorizefileupload') || msg.includes('未开通') || msg.includes('not activated') || msg.includes('ram')) {
+    return {
+      type: 'api_key',
+      title: '阿里云配置问题',
+      suggestions: [
+        '请确认阿里云账号已开通「视觉智能开放平台」服务',
+        '确认 AccessKey 拥有 videorecog 服务的调用权限',
+        '检查阿里云账号是否欠费或额度不足',
       ],
       showSettingsButton: true,
     };
@@ -37,14 +51,15 @@ export function analyzeAiError(errorMsg: string): ErrorGuide {
     };
   }
 
-  if (msg.includes('网络') || msg.includes('network') || msg.includes('timeout') || msg.includes('超时') || msg.includes('连接') || msg.includes('failed to fetch')) {
+  if (msg.includes('网络') || msg.includes('network') || msg.includes('readtimeout') || msg.includes('timeout') || msg.includes('超时') || msg.includes('etimedout') || msg.includes('连接') || msg.includes('failed to fetch') || msg.includes('viapi-customer')) {
     return {
       type: 'network',
-      title: '网络问题',
+      title: '网络或上传超时',
       suggestions: [
         '请检查网络连接是否正常',
-        '稍后重试',
-        '确认当前网络可以访问 AI 服务',
+        '视频较大时上传需要更多时间，请稍后重试',
+        '确认当前网络可以访问阿里云服务',
+        '如视频文件过大，建议先压缩后再进行拆条',
       ],
     };
   }

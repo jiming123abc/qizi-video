@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ProjectListPage } from './pages/ProjectListPage';
 import { StoryboardPage } from './pages/StoryboardPage';
 import { ToastProvider } from './components/ToastProvider';
+import { UploadProvider } from './components/common/UploadProvider';
 
 type Route = { page: 'list' } | { page: 'project'; projectId: number };
 
@@ -42,11 +43,13 @@ export default function App() {
 
   return (
     <ToastProvider>
-      {route.page === 'project' ? (
-        <StoryboardPage projectId={route.projectId} onBack={navigateToList} />
-      ) : (
-        <ProjectListPage onSelectProject={navigateToProject} />
-      )}
+      <UploadProvider>
+        {route.page === 'project' ? (
+          <StoryboardPage projectId={route.projectId} onBack={navigateToList} />
+        ) : (
+          <ProjectListPage onSelectProject={navigateToProject} />
+        )}
+      </UploadProvider>
     </ToastProvider>
   );
 }

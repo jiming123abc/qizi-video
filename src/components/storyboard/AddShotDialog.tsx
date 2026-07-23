@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Upload, Sparkles } from 'lucide-react';
 import type { Shot } from '../../lib/types';
+import { useUnifiedUpload } from '../../hooks/useUnifiedUpload';
 
 interface FieldSuggestions {
   actors?: string[];
@@ -17,7 +18,6 @@ interface AddShotDialogProps {
   projectId?: number;
   sceneId?: number | null;
   onAdd?: (shot: Shot) => void;
-  onUploadMedia?: () => void;
   onAiGenerate?: () => void;
   fieldSuggestions?: FieldSuggestions;
 }
@@ -32,7 +32,6 @@ export default function AddShotDialog({
   projectId,
   sceneId,
   onAdd,
-  onUploadMedia,
   onAiGenerate,
   fieldSuggestions = {}
 }: AddShotDialogProps) {
@@ -53,8 +52,10 @@ export default function AddShotDialog({
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const { startUpload } = useUnifiedUpload();
 
   useEffect(() => {
     if (isOpen) {
@@ -88,6 +89,7 @@ export default function AddShotDialog({
       }
       setError(null);
       setIsSubmitting(false);
+      setReferenceImageUrl(null);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [isOpen, projectId, sceneId]);
@@ -183,11 +185,22 @@ export default function AddShotDialog({
     }
   };
 
-  const handleUploadClick = () => {
-    if (onUploadMedia) {
-      onUploadMedia();
-    } else {
-      fileInputRef.current?.click();
+  const handleUploadClick = async () => {
+    if (!projectId) return;
+    try {
+      const results = await startUpload({
+        projectId,
+        sceneId: sceneId ?? undefined,
+        usage: 'shot-reference',
+        accept: 'image/*',
+        multiple: false,
+        createShot: false,
+      });
+      if (results.length > 0) {
+        setReferenceImageUrl(results[0].url);
+      }
+    } catch (err) {
+      console.error('上传失败:', err);
     }
   };
 
@@ -451,16 +464,14 @@ export default function AddShotDialog({
 
           {/* 上传和AI生成参考画面 */}
           <div className="flex gap-3">
-            {onUploadMedia && (
-              <button
-                type="button"
-                onClick={handleUploadClick}
-                className="flex-1 py-3 rounded-2xl border border-white/15 bg-white/5 hover:bg-white/10 transition flex items-center justify-center gap-2 text-slate-200"
-              >
-                <Upload className="w-5 h-5" />
-                <span className="font-medium">上传参考画面</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleUploadClick}
+              className="flex-1 py-3 rounded-2xl border border-white/15 bg-white/5 hover:bg-white/10 transition flex items-center justify-center gap-2 text-slate-200"
+            >
+              <Upload className="w-5 h-5" />
+              <span className="font-medium">上传参考画面</span>
+            </button>
             <button
               type="button"
               onClick={onAiGenerate}
@@ -469,16 +480,21 @@ export default function AddShotDialog({
               <Sparkles className="w-5 h-5" />
               <span className="font-medium">AI 生成</span>
             </button>
-            {onUploadMedia && (
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={() => {}}
-              />
-            )}
           </div>
+
+          {/* 参考画面预览 */}
+          {referenceImageUrl && (
+            <div className="relative rounded-xl overflow-hidden border border-white/10">
+              <img src={referenceImageUrl} alt="参考画面" className="w-full h-40 object-cover" />
+              <button
+                type="button"
+                onClick={() => setReferenceImageUrl(null)}
+                className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60 backdrop-blur hover:bg-black/80 flex items-center justify-center text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

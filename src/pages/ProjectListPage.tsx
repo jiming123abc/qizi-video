@@ -1,15 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Plus, Trash2, Share2, Film, HardDrive, ChevronRight, ChevronLeft, X, Play, Maximize2, Upload, Image as ImageIcon, CheckCircle2, XCircle, Info, Video, Settings as SettingsIcon, BarChart3 } from 'lucide-react';
 import { setupShareMetadata, copyToClipboard, isWeChat } from '../lib/shareUtils';
-import { uploadImage, uploadVideo, detectFileType, checkVideoBitrate, getVideoPoster } from '../lib/ossUtils';
-import type { UploadDecision } from '../lib/ossUtils';
+import { getVideoPoster } from '../lib/ossUtils';
 import { ShareHint } from '../components/WeChatShareHint';
 import { useToastContext } from '../components/ToastProvider';
-import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { MediaFullscreen } from '../components/storyboard/MediaFullscreen';
 import SettingsDialog from '../components/settings/SettingsDialog';
 import AIUsagePanel from '../components/ai/AIUsagePanel';
-import { timeAgo, formatSize, getErrorMessage } from '../lib/utils';
+import { useUnifiedUpload } from '../hooks/useUnifiedUpload';
+import { timeAgo, formatSize } from '../lib/utils';
 import type { ShotMedia, Shot } from '../lib/types';
 
 interface Project {
@@ -30,17 +29,6 @@ interface ReferenceItem {
   type: 'image' | 'video';
   url: string;
   title: string;
-}
-
-// any-audit：挂起上传任务（pendingUploadRef 的类型）
-// 修复 513/693/720 行的 as any 问题：原 ref 类型未声明 usage 字段
-interface PendingUpload {
-  file: File;
-  index: number;
-  total: number;
-  successCount: number;
-  project: Project;
-  usage?: 'project-reference' | 'project-cover' | 'project-video' | string;
 }
 
 // 蓝紫渐变默认封面（与服务端一致）
@@ -82,27 +70,12 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   // 上传参考文件弹窗
   const [uploadDialogProject, setUploadDialogProject] = useState<Project | null>(null);
-  const [uploadDialogLoading, setUploadDialogLoading] = useState(false);
-  const [uploadDialogMessage, setUploadDialogMessage] = useState('');
-
-  // 视频压缩选择对话框
-  const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
-  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const pendingUploadRef = useRef<PendingUpload | null>(null);
-
-  // 阿里云配置状态
-  const [aliyunConfigured, setAliyunConfigured] = useState(false);
 
   // 设置和费用统计对话框
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [showAIUsagePanel, setShowAIUsagePanel] = useState(false);
 
-  useEffect(() => {
-    fetch('/api/aliyun/status')
-      .then(res => res.json())
-      .then(data => setAliyunConfigured(data.configured || false))
-      .catch(() => {});
-  }, []);
+  const { startUpload } = useUnifiedUpload();
 
   // 每个项目的参考文件缓存（含封面作为第一个元素）
   const [referencesCache, setReferencesCache] = useState<Record<number, ReferenceItem[]>>({});
@@ -471,7 +444,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
   const openUploadDialog = (project: Project) => {
     setUploadDialogProject(project);
-    setUploadDialogMessage('');
     if (!referencesCache[project.id]) {
       loadReferences(project.id);
     }
@@ -509,196 +481,54 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     }
   };
 
-  const handleCoverImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0 || !uploadDialogProject) return;
-    
-    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
-    if (imageFiles.length === 0) {
-      showToast('请选择图片文件', 'error');
-      e.target.value = '';
-      return;
-    }
-    
-    const file = imageFiles[0];
+  const handleCoverImageUpload = async () => {
+    if (!uploadDialogProject) return;
     const project = uploadDialogProject;
-    setUploadDialogLoading(true);
-    setUploadDialogMessage('正在上传封面...');
 
-    try {
-      const result = await uploadImage(file, {
-        projectId: project.id,
-        title: file.name,
-        usage: 'project-cover',
-        onProgress: p => {
-          setUploadDialogMessage(`${p.message} (${p.progress}%)`);
-        }
-      });
-      if (result.url) {
-        await setProjectCover(project.id, result.url);
-        loadProjects();
-        if (result.compressionFailed) {
-          showToast(`图片压缩失败，已使用原图（${result.compressionError}）`, 'info');
-        } else if (result.compressed && result.originalSizeKB && result.compressedSizeKB) {
-          showToast(`封面已压缩: ${result.originalSizeKB}KB → ${result.compressedSizeKB}KB`, 'success');
-        }
-        setUploadDialogMessage('封面设置成功');
+    const results = await startUpload({
+      projectId: project.id,
+      usage: 'project-cover',
+      accept: 'image/*',
+      multiple: false,
+      maxFiles: 1,
+      currentCount: project.coverUrl ? 1 : 0,
+    });
+
+    if (results.length > 0) {
+      await setProjectCover(project.id, results[0].url);
+      loadProjects();
+      if (results[0].compressed && results[0].originalSizeKB && results[0].compressedSizeKB) {
+        showToast(`封面已压缩: ${results[0].originalSizeKB}KB → ${results[0].compressedSizeKB}KB`, 'success');
       }
-    } catch (err: unknown) {
-      console.error('封面上传失败:', err);
-      showToast(getErrorMessage(err, '封面上传失败，请重试'), 'error');
-      setUploadDialogMessage('上传失败');
     }
-
-    setUploadDialogLoading(false);
-    setTimeout(() => setUploadDialogMessage(''), 3000);
-    e.target.value = '';
   };
 
-  const handleReferenceVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0 || !uploadDialogProject) return;
-    
-    const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
-    if (videoFiles.length === 0) {
-      showToast('请选择视频文件', 'error');
-      e.target.value = '';
-      return;
-    }
-    
-    setUploadDialogLoading(true);
-    setUploadDialogMessage(`正在上传 0 / ${videoFiles.length}`);
-
-    let successCount = 0;
+  const handleReferenceVideoUpload = async () => {
+    if (!uploadDialogProject) return;
     const project = uploadDialogProject;
-    let stopped = false;
 
-    for (let i = 0; i < videoFiles.length; i++) {
-      const file = videoFiles[i];
-      try {
-        setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 检测视频信息...`);
-        const decision = await checkVideoBitrate(file);
-        if (decision.decision === 'must_compress') {
-          pendingUploadRef.current = { file, index: i, total: videoFiles.length, successCount, project, usage: 'project-reference' };
-          setPendingCompressionVideo(file);
-          setPendingCompressionDecision(decision);
-          setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: 需选择压缩方式`);
-          stopped = true;
-          break;
-        }
-        await uploadVideo(file, {
-          projectId: project.id,
-          title: file.name,
-          usage: 'project-reference',
-          skipBitrateCheck: true,
-          onProgress: p => {
-            setUploadDialogMessage(`视频 ${i + 1}/${videoFiles.length}: ${p.message} (${p.progress}%)`);
-          }
-        });
-        successCount++;
-        setUploadDialogMessage(`已上传 ${successCount} / ${videoFiles.length}`);
-      } catch (err: unknown) {
-        console.error('上传失败:', err);
-        showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
-      }
-    }
+    const currentReferences = referencesCache[project.id] || [];
+    const currentVideoCount = currentReferences.filter(r => r.type === 'video').length;
 
-    if (!stopped) {
+    const results = await startUpload({
+      projectId: project.id,
+      usage: 'project-reference',
+      accept: 'video/*',
+      multiple: true,
+      maxFiles: 10,
+      currentCount: currentVideoCount,
+      createShot: false,
+    });
+
+    if (results.length > 0) {
       await loadReferences(project.id);
       // 刷新项目卡片的 totalSize/videoCount 统计
       loadProjects();
-      setUploadDialogMessage(`完成：成功 ${successCount}`);
-      setUploadDialogLoading(false);
-      setTimeout(() => setUploadDialogMessage(''), 3000);
-      e.target.value = '';
     }
   };
 
   const isDefaultCover = (coverUrl: string) => {
     return !coverUrl || coverUrl.startsWith('data:image/svg+xml');
-  };
-
-  const handleCompressionSelect = async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
-    const pending = pendingUploadRef.current;
-    const videoFile = pendingCompressionVideo;
-    const decision = pendingCompressionDecision;
-
-    setPendingCompressionVideo(null);
-    setPendingCompressionDecision(null);
-    pendingUploadRef.current = null;
-
-    if (method === 'cancel' || !pending || !videoFile || !decision) {
-      setUploadDialogLoading(false);
-      setUploadDialogMessage('已取消');
-      setTimeout(() => setUploadDialogMessage(''), 3000);
-      return;
-    }
-
-    const { file, index, total, successCount, project } = pending;
-    let currentSuccess = successCount;
-    const usage = pending.usage || 'project-reference';
-
-    try {
-      await uploadVideo(file, {
-        projectId: project.id,
-        title: file.name,
-        compressionMethod: method,
-        usage,
-        skipBitrateCheck: true,
-        onProgress: p => {
-          setUploadDialogMessage(`视频 ${index + 1}/${total}: ${p.message} (${p.progress}%)`);
-        }
-      });
-      currentSuccess++;
-      setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
-
-      for (let i = index + 1; i < total; i++) {
-        const nextFile = (document.querySelector('input[type="file"][accept*="video"]') as HTMLInputElement)?.files?.[i];
-        if (!nextFile) continue;
-        const detected = detectFileType(nextFile);
-        if (!detected.supported || detected.type !== 'video') continue;
-
-        try {
-          setUploadDialogMessage(`视频 ${i + 1}/${total}: 检测视频信息...`);
-          const nextDecision = await checkVideoBitrate(nextFile);
-          if (nextDecision.decision === 'must_compress') {
-            pendingUploadRef.current = { file: nextFile, index: i, total, successCount: currentSuccess, project, usage };
-            setPendingCompressionVideo(nextFile);
-            setPendingCompressionDecision(nextDecision);
-            setUploadDialogMessage(`视频 ${i + 1}/${total}: 需选择压缩方式`);
-            return;
-          }
-          await uploadVideo(nextFile, {
-            projectId: project.id,
-            title: nextFile.name,
-            usage,
-            skipBitrateCheck: true,
-            onProgress: p => {
-              setUploadDialogMessage(`视频 ${i + 1}/${total}: ${p.message} (${p.progress}%)`);
-            }
-          });
-          currentSuccess++;
-          setUploadDialogMessage(`已上传 ${currentSuccess} / ${total}`);
-        } catch (err: unknown) {
-          console.error('上传失败:', err);
-          showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
-        }
-      }
-
-      await loadReferences(project.id);
-      // 刷新项目卡片的 totalSize/videoCount 统计
-      loadProjects();
-      setUploadDialogMessage(`完成：成功 ${currentSuccess}`);
-      setUploadDialogLoading(false);
-      setTimeout(() => setUploadDialogMessage(''), 3000);
-      const fileInput = document.querySelector('input[type="file"][accept*="video"]') as HTMLInputElement;
-      if (fileInput) fileInput.value = '';
-    } catch (err: unknown) {
-      console.error('压缩上传失败:', err);
-      setUploadDialogMessage('失败：' + getErrorMessage(err, '压缩上传失败'));
-      setUploadDialogLoading(false);
-      showToast(getErrorMessage(err, '上传失败，请重试'), 'error');
-    }
   };
 
   const goToProject = (id: number) => {
@@ -1242,14 +1072,14 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
       {/* 上传参考文件对话框 */}
       {uploadDialogProject && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => !uploadDialogLoading && setUploadDialogProject(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => setUploadDialogProject(null)}>
           <div className="absolute inset-x-0 top-0 bottom-0 sm:w-[calc(100%-2rem)] sm:max-w-xl bg-slate-900/95 backdrop-blur-xl sm:rounded-3xl rounded-none border border-white/10 flex flex-col shadow-2xl max-h-[100dvh] sm:max-h-[90vh] p-6 overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-5">
               <div>
                 <h2 className="text-lg font-semibold">项目封面与参考视频</h2>
                 <p className="text-xs text-slate-400 mt-0.5">「{uploadDialogProject.name}」</p>
               </div>
-              <button onClick={() => !uploadDialogLoading && setUploadDialogProject(null)} className="w-9 h-9 rounded-full hover:bg-white/10 flex items-center justify-center">
+              <button onClick={() => setUploadDialogProject(null)} className="w-9 h-9 rounded-full hover:bg-white/10 flex items-center justify-center">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1288,24 +1118,17 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 
                 {/* 操作按钮 */}
                 <div className="flex-1 space-y-2">
-                  <label className="block w-full">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={handleCoverImageUpload}
-                      disabled={uploadDialogLoading}
-                    />
-                    <div className={`w-full py-2 text-center text-sm rounded-xl cursor-pointer transition ${uploadDialogLoading ? 'bg-white/5 text-slate-500 cursor-not-allowed' : 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white hover:opacity-90'}`}>
-                      <Upload className="w-4 h-4 inline mr-1.5" />
-                      {!isDefaultCover(uploadDialogProject.coverUrl) ? '更换封面' : '上传封面'}
-                    </div>
-                  </label>
+                  <button
+                    onClick={handleCoverImageUpload}
+                    className="w-full py-2 text-center text-sm rounded-xl cursor-pointer transition bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white hover:opacity-90"
+                  >
+                    <Upload className="w-4 h-4 inline mr-1.5" />
+                    {!isDefaultCover(uploadDialogProject.coverUrl) ? '更换封面' : '上传封面'}
+                  </button>
                   {!isDefaultCover(uploadDialogProject.coverUrl) && (
                     <button
                       onClick={() => deleteProjectCover(uploadDialogProject.id)}
-                      disabled={uploadDialogLoading}
-                      className="w-full py-2 text-sm rounded-xl bg-white/5 text-slate-300 hover:bg-white/10 hover:text-red-400 transition disabled:opacity-50"
+                      className="w-full py-2 text-sm rounded-xl bg-white/5 text-slate-300 hover:bg-white/10 hover:text-red-400 transition"
                     >
                       <Trash2 className="w-4 h-4 inline mr-1.5" />
                       删除封面
@@ -1327,19 +1150,14 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
               {/* 文件上传区 */}
               <div>
-                <label className="block border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-xl p-5 text-center cursor-pointer transition bg-white/[0.02]">
-                  <input
-                    type="file"
-                    multiple
-                    accept="video/*"
-                    className="hidden"
-                    onChange={handleReferenceVideoUpload}
-                    disabled={uploadDialogLoading}
-                  />
+                <button
+                  onClick={handleReferenceVideoUpload}
+                  className="block w-full border-2 border-dashed border-white/15 hover:border-violet-400/40 rounded-xl p-5 text-center cursor-pointer transition bg-white/[0.02]"
+                >
                   <Video className="w-8 h-8 mx-auto mb-2 text-violet-300/60" />
                   <p className="text-sm font-medium mb-1">点击选择视频文件</p>
                   <p className="text-xs text-slate-500">支持 mp4, webm 等视频格式</p>
-                </label>
+                </button>
                 <p className="text-xs text-slate-500 mt-2">
                   提示：高码率视频需选择压缩方式
                 </p>
@@ -1378,12 +1196,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
                 </div>
               )}
             </div>
-
-            {uploadDialogMessage && (
-              <div className="mt-4 text-sm text-center text-violet-200 bg-violet-500/10 border border-violet-400/20 rounded-xl py-2.5">
-                {uploadDialogMessage}
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -1418,16 +1230,6 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
         isVisible={shareHintVisible}
         onClose={() => setShareHintVisible(false)}
         mode={shareHintMode}
-      />
-
-      {/* 视频压缩选择对话框 */}
-      <VideoCompressionDialog
-        isOpen={pendingCompressionVideo !== null}
-        onClose={() => { setPendingCompressionVideo(null); setPendingCompressionDecision(null); pendingUploadRef.current = null; }}
-        file={pendingCompressionVideo}
-        decision={pendingCompressionDecision}
-        aliyunConfigured={aliyunConfigured}
-        onSelect={handleCompressionSelect}
       />
 
       {/* 设置对话框 */}

@@ -947,9 +947,10 @@ app.get('/api/shots/:id/media', async (req, res) => {
 
 // 新增参考画面到分镜
 app.post('/api/shots/:id/media', async (req, res) => {
+  const { url } = req.body || {};
   try {
     const { id } = req.params;
-    const { url, type, filename, size, source, startTime, duration } = req.body;
+    const { type, filename, size, source, startTime, duration } = req.body;
     
     const shot = await db.items.getById(parseInt(id));
     if (!shot) {
@@ -969,6 +970,13 @@ app.post('/api/shots/:id/media', async (req, res) => {
       }
     }
     
+    // 去重检查：如果同一 shot 已有相同 url 的媒体记录，直接返回已有记录
+    const existingMedia = await db.shotMedia.getByUrlAndShotId(url, parseInt(id));
+    if (existingMedia) {
+      console.log(`[shot-media] 去重：shot ${id} 已存在相同 url 的媒体记录 (id=${existingMedia.id})`);
+      return res.json({ success: true, data: existingMedia });
+    }
+
     const media = await db.shotMedia.create({
       shotId: parseInt(id),
       url,
@@ -983,12 +991,44 @@ app.post('/api/shots/:id/media', async (req, res) => {
     res.json({ success: true, data: media });
   } catch (error) {
     console.error('[app] 新增参考画面失败:', error.message);
+    // DB 写入失败时清理已上传的 OSS 文件避免残留
+    if (url) {
+      try {
+        await deleteOssFileIfNotReferenced(url);
+      } catch (e) {
+        console.warn('[app] 新增参考画面失败后清理 OSS 失败:', e.message);
+      }
+    }
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // 上传参考画面到分镜（复用现有上传逻辑，但存储到 shot_media 表）
 // 注意：此端点由 upload/video 和 upload/image 调用后自动处理
+
+// OSS 残留文件清理接口（前端上传成功但关联分镜失败时调用）
+app.post('/api/oss/cleanup', async (req, res) => {
+  try {
+    const { urls } = req.body;
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return res.json({ success: true, cleaned: 0 });
+    }
+    let cleaned = 0;
+    for (const url of urls) {
+      try {
+        await deleteOssFileIfNotReferenced(url);
+        cleaned++;
+      } catch (e) {
+        console.warn('[oss/cleanup] 清理单个文件失败:', url, e.message);
+      }
+    }
+    console.log(`[oss/cleanup] 请求清理 ${urls.length} 个文件，实际处理 ${cleaned} 个`);
+    res.json({ success: true, cleaned });
+  } catch (error) {
+    console.error('[oss/cleanup] 清理失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 // 删除参考画面
 app.delete('/api/shots/:id/media/:mediaId', async (req, res) => {
@@ -1628,7 +1668,9 @@ async function deleteAiGeneratedByOwner(ownerType, ownerId) {
 // AI 视频分割
 app.post('/api/ai/split-video', async (req, res) => {
   try {
-    const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration } = req.body;
+    const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration, provider, model } = req.body;
+
+    console.log(`[AI] 收到视频分割请求: mode=${mode}, videoUrl=${videoUrl.substring(0, 100)}...`);
 
     if (!videoUrl) {
       return res.status(400).json({ success: false, message: '缺少 videoUrl' });
@@ -1649,12 +1691,152 @@ app.post('/api/ai/split-video', async (req, res) => {
       sceneId: sceneId !== undefined && sceneId !== null ? parseInt(sceneId) : null,
       mode,
       splitPoints: splitPoints || [],
-      videoDuration: videoDuration || 0
+      videoDuration: videoDuration || 0,
+      provider: provider || null,
+      model: model || null
     });
     
     res.json({ success: true, taskId: task.id });
   } catch (error) {
     console.error('[app] AI 视频分割失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// AI 场次分析：分析未分类分镜的第一帧，给出场次划分建议
+app.post('/api/ai/analyze-shot-scenes', async (req, res) => {
+  try {
+    const { shotIds, provider, model } = req.body;
+
+    if (!shotIds || !Array.isArray(shotIds) || shotIds.length === 0) {
+      return res.status(400).json({ success: false, message: '缺少 shotIds' });
+    }
+    if (!provider || !model) {
+      return res.status(400).json({ success: false, message: '缺少 provider 或 model' });
+    }
+
+    const settings = await db.settings.getAll();
+
+    // 1. 查询所有 shot 及其 media
+    const shotDataList = [];
+    for (const shotId of shotIds) {
+      const shot = await db.items.getById(shotId);
+      if (!shot) continue;
+      const media = await db.shotMedia.getByShotId(shotId);
+      const firstMedia = media && media.length > 0 ? media[0] : null;
+      if (firstMedia) {
+        shotDataList.push({ shotId, mediaUrl: firstMedia.url, mediaType: firstMedia.type, startTime: firstMedia.startTime || 0 });
+      }
+    }
+
+    if (shotDataList.length === 0) {
+      return res.status(400).json({ success: false, message: '未找到有效的分镜媒体' });
+    }
+
+    // 2. 提取每个分镜的第一帧并压缩为 base64
+    const framesData = [];
+    for (let i = 0; i < shotDataList.length; i++) {
+      const item = shotDataList[i];
+      try {
+        let base64 = null;
+        if (item.mediaType === 'image') {
+          // 图片直接使用
+          const resp = await fetch(item.mediaUrl);
+          if (resp.ok) {
+            const buf = Buffer.from(await resp.arrayBuffer());
+            const compressed = await compressImage(buf, 50);
+            base64 = compressed.toString('base64');
+          }
+        } else {
+          // 视频：用 ffmpeg 提取 startTime 处的帧
+          const tempFrame = path.join(os.tmpdir(), `qizi_scene_frame_${Date.now()}_${i}.jpg`);
+          const ffmpegBin = systemFfmpeg || require('ffmpeg-static');
+          const { execSync } = require('child_process');
+          try {
+            execSync(`"${ffmpegBin}" -y -ss ${item.startTime} -i "${item.mediaUrl}" -frames:v 1 -q:v 5 -vf scale=480:-1 "${tempFrame}"`, { timeout: 15000, stdio: 'ignore' });
+            if (fs.existsSync(tempFrame)) {
+              const buf = fs.readFileSync(tempFrame);
+              const compressed = await compressImage(buf, 50);
+              base64 = compressed.toString('base64');
+              fs.unlinkSync(tempFrame);
+            }
+          } catch (e) {
+            console.warn(`[AI] 提取分镜 ${item.shotId} 帧失败:`, e.message);
+          }
+        }
+        if (base64) {
+          framesData.push({ shotId: item.shotId, index: i, base64 });
+        }
+      } catch (e) {
+        console.warn(`[AI] 处理分镜 ${item.shotId} 失败:`, e.message);
+      }
+    }
+
+    if (framesData.length === 0) {
+      return res.status(500).json({ success: false, message: '无法提取任何分镜帧' });
+    }
+
+    // 3. 分批发给视觉模型（每批 8 张）
+    const batchSize = 8;
+    const allResults = [];
+
+    for (let batchStart = 0; batchStart < framesData.length; batchStart += batchSize) {
+      const batch = framesData.slice(batchStart, batchStart + batchSize);
+      const content = [];
+
+      content.push({
+        type: 'text',
+        text: `以下是视频中各镜头的截图，请分析每个镜头的场景环境并分类。
+对每个镜头返回：
+- scene: 场景描述（如“室内-办公室”、“室外-街道”、“室内-卧室”）
+- type: "shot"(实拍，有人物/场景/动作) 或 "non_shot"(标题卡/字幕/黑屏/纯文字等非实拍)
+
+返回 JSON 格式：{"results": [{"index": 0, "scene": "室内-办公室", "type": "shot"}, ...]}
+只返回 JSON，不要任何额外说明。
+
+截图列表：`
+      });
+
+      for (let j = 0; j < batch.length; j++) {
+        content.push({ type: 'text', text: `--- 镜头 ${batchStart + j + 1} ---` });
+        content.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${batch[j].base64}`, detail: 'low' } });
+      }
+
+      const messages = [{ role: 'user', content }];
+      const chain = [{ model, provider, cost: 0 }];
+
+      try {
+        const result = await aiClient.callChatWithFallback(messages, chain, settings, {
+          temperature: 0.2,
+          max_tokens: 2000,
+          json: true,
+          timeoutMs: 60000
+        });
+
+        const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.results && Array.isArray(parsed.results)) {
+            for (const r of parsed.results) {
+              const idx = batchStart + (r.index || 0);
+              if (idx < framesData.length) {
+                allResults.push({
+                  shotId: framesData[idx].shotId,
+                  scene: (r.scene || '未分类').trim(),
+                  type: r.type === 'non_shot' ? 'non_shot' : 'shot'
+                });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[AI] 场次分析批次失败:`, e.message);
+      }
+    }
+
+    res.json({ success: true, results: allResults });
+  } catch (error) {
+    console.error('[app] AI 场次分析失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -2447,61 +2629,93 @@ async function processVideoSplitManual(taskId, videoUrl, params) {
 }
 
 async function processVideoSplitAliyun(taskId, videoUrl, params, settings) {
-  
+
   if (!aliyunVideo.isAliyunConfigured()) {
     throw new Error('阿里云 AccessKey 未配置，请在设置中配置');
   }
-  
+
   await db.aiTasks.update(taskId, {
     progress: 10,
     output: { stage: 'submitting_to_aliyun', provider: 'aliyun' }
   });
-  
-  // 提交任务
-  const { jobId } = await aliyunVideo.submitSplitVideoTask(videoUrl, {
+
+  // 使用 SDK 的 Stream 方式提交（参考阿里云文档 155645 方式一）
+  // OSS 在 cn-beijing，视觉智能平台在 cn-shanghai，跨区不支持 URL 方式，
+  // 必须通过 videoUrlObject 以流形式上传到 viapi 官方 OSS Bucket
+  const ossKey = extractOssKeyFromUrl(videoUrl);
+  if (!ossKey || !ossClient) {
+    throw new Error('无法获取视频 OSS 流：ossKey 或 ossClient 不可用');
+  }
+
+  let stream;
+  try {
+    ({ stream } = await ossClient.getStream(ossKey));
+    console.log(`[Aliyun] 开始读取 OSS 流: ${ossKey}`);
+  } catch (e) {
+    console.error('[Aliyun] 读取 OSS 视频流失败:', e.message);
+    throw new Error(`读取 OSS 视频流失败: ${e.message}`);
+  }
+
+  // 提交任务（stream 上传由 SDK 内部完成，超时已在客户端配置为 10 分钟）
+  const { jobId } = await aliyunVideo.submitSplitVideoTaskByStream(stream, {
     MinTime: params.minTime || 2,
     MaxTime: params.maxTime || 30
   });
-  
+
   await db.aiTasks.update(taskId, {
     progress: 20,
     output: { stage: 'processing_aliyun', aliyunJobId: jobId }
   });
-  
+
   // 轮询结果
   const maxWait = 10 * 60 * 1000;
   const pollInterval = 3000;
   const startTime = Date.now();
   let lastStatus = '';
-  
+
   while (Date.now() - startTime < maxWait) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
-    
+
     const result = await aliyunVideo.getSplitVideoResult(jobId);
-    
+
     if (result.status !== lastStatus) {
       lastStatus = result.status;
       let progress = 20;
       if (result.status === 'PROCESSING') progress = 50;
       if (result.status === 'PROCESS_SUCCESS') progress = 90;
-      
+
       await db.aiTasks.update(taskId, {
         progress: progress,
         output: { stage: `aliyun_${result.status.toLowerCase()}` }
       });
     }
-    
+
     if (result.status === 'PROCESS_SUCCESS') {
+      console.log('[Aliyun] 拆条结果原始数据:', JSON.stringify(result.result, null, 2));
       const parsed = aliyunVideo.parseSplitResult(result.result);
-      await createShotsFromSplitPoints(taskId, videoUrl, parsed.shots, params, parsed.themeSegments);
+      console.log(`[Aliyun] 解析结果: ${parsed.shots.length} 个镜头, shotCount=${parsed.shotCount}, themeCount=${parsed.themeCount}`);
+      // 直接返回时间范围，不创建 DB 分镜记录
+      const shotRanges = parsed.shots.map((s, i) => ({
+        startTime: s.beginTime || s.startTime || 0,
+        endTime: s.endTime || 0,
+        index: i,
+        scene: s.theme || '',
+        type: s.type || 'shot'
+      }));
+      await db.aiTasks.update(taskId, {
+        status: 'done',
+        progress: 100,
+        output: { shots: shotRanges, total: shotRanges.length, provider: 'aliyun' }
+      });
+      console.log(`[AI] 阿里云视频拆条分析完成: 检测到 ${shotRanges.length} 个镜头`);
       return;
     }
-    
+
     if (result.status === 'PROCESS_FAILED') {
       throw new Error(`阿里云视频拆条失败: ${result.error}`);
     }
   }
-  
+
   throw new Error('视频拆条超时');
 }
 
@@ -2514,119 +2728,71 @@ async function processVideoSplitAIFrame(taskId, videoUrl, params, settings) {
     });
     
     // 1. 下载视频到本地临时文件
-    // P3-6：临时文件改用 os.tmpdir()
     const tempVideoPath = path.join(os.tmpdir(), `qizi_temp_split_${taskId}.mp4`);
-    let videoBuffer;
     try {
       const response = await fetch(videoUrl);
       if (!response.ok) throw new Error(`下载视频失败: HTTP ${response.status}`);
       const arrayBuffer = await response.arrayBuffer();
-      videoBuffer = Buffer.from(arrayBuffer);
-      fs.writeFileSync(tempVideoPath, videoBuffer);
+      fs.writeFileSync(tempVideoPath, Buffer.from(arrayBuffer));
     } catch (e) {
       throw new Error(`视频下载失败: ${e.message}`);
     }
     
     await db.aiTasks.update(taskId, {
       progress: 15,
-      output: { stage: 'extracting_frames' }
+      output: { stage: 'detecting_scenes' }
     });
     
-    // 2. 获取视频时长和分辨率
+    // 2. 获取视频时长
     const metadata = await getVideoMetadata(tempVideoPath);
     const duration = metadata?.format?.duration || 0;
-    const videoStream = metadata?.streams?.find(s => s.codec_type === 'video');
-    const width = videoStream?.width || 1280;
-    const height = videoStream?.height || 720;
     
     if (!duration || duration < 1) {
       throw new Error('无法获取视频时长');
     }
     
-    // 3. 计算抽帧间隔（每 3 秒一帧，最多 60 帧）
-    let frameInterval = 3;
-    const maxFrames = 60;
-    if (duration / frameInterval > maxFrames) {
-      frameInterval = Math.ceil(duration / maxFrames);
-    }
-    
-    // 4. 使用 ffmpeg 抽取关键帧
-    // P3-6：临时文件改用 os.tmpdir()
-    const framesDir = path.join(os.tmpdir(), `qizi_temp_frames_${taskId}`);
-    if (!fs.existsSync(framesDir)) {
-      fs.mkdirSync(framesDir, { recursive: true });
-    }
-    
-    try {
-      await extractFrames(tempVideoPath, framesDir, frameInterval);
-    } catch (e) {
-      throw new Error(`抽帧失败: ${e.message}`);
-    }
-    
-    // 5. 读取抽帧文件列表
-    const frameFiles = fs.readdirSync(framesDir)
-      .filter(f => f.endsWith('.jpg') || f.endsWith('.png'))
-      .sort()
-      .slice(0, maxFrames);
-    
-    if (frameFiles.length === 0) {
-      throw new Error('未提取到任何帧');
-    }
-    
+    // 3. 使用 ffmpeg scene 滤镜检测镜头切换点
     await db.aiTasks.update(taskId, {
-      progress: 40,
-      output: { stage: 'analyzing_with_ai', framesCount: frameFiles.length }
+      progress: 30,
+      output: { stage: 'detecting_scenes', duration: Math.round(duration) }
     });
     
-    // 6. 将帧转成 base64，分批发给多模态模型分析
-    const framesWithTime = [];
-    for (let i = 0; i < frameFiles.length; i++) {
-      const framePath = path.join(framesDir, frameFiles[i]);
-      const frameBuffer = fs.readFileSync(framePath);
-      const compressedBuffer = await compressImage(frameBuffer, 100);
-      const base64 = compressedBuffer.toString('base64');
-      const timeSeconds = i * frameInterval;
-      framesWithTime.push({ index: i, time: timeSeconds, base64, fileName: frameFiles[i] });
-    }
+    const splitPoints = await detectSceneChanges(tempVideoPath, 0.3);
     
-    // 7. 调用多模态模型分析
-    const analyzeResult = await analyzeVideoShots(framesWithTime, duration, settings, taskId);
-    const splitPoints = analyzeResult.splitPoints;
-
     await db.aiTasks.update(taskId, {
       progress: 80,
-      output: { stage: 'creating_shots', splitPointsCount: splitPoints.length }
+      output: { stage: 'generating_result', splitPointsCount: splitPoints.length }
     });
-
-    // 8. 按分割点创建分镜
-    const sortedPoints = [...splitPoints].sort((a, b) => a - b);
-    const allPoints = [0, ...sortedPoints];
-
-    // 如果 LLM 返回了 segments 信息，使用它；否则按分割点构建
-    let shots;
-    if (analyzeResult.segments && analyzeResult.segments.length > 0) {
-      shots = analyzeResult.segments;
-    } else {
-      shots = allPoints.map((startTime, i) => ({
-        startTime,
-        endTime: allPoints[i + 1] || duration,
-        type: 'shot',
-        scene: ''
-      }));
+    
+    // 4. 过滤过短片段（合并间距 < 0.5秒的切换点）
+    const filteredPoints = [];
+    for (const pt of splitPoints) {
+      if (filteredPoints.length === 0 || pt - filteredPoints[filteredPoints.length - 1] >= 0.5) {
+        filteredPoints.push(pt);
+      }
     }
-
-    await createShotsFromSplitData(taskId, videoUrl, shots, params, params.videoSize || (videoBuffer ? videoBuffer.length : 0));
+    
+    // 5. 构建时间范围结果
+    const allPoints = [0, ...filteredPoints];
+    const shotRanges = allPoints.map((startTime, i) => ({
+      startTime: Math.round(startTime * 100) / 100,
+      endTime: Math.round((allPoints[i + 1] || duration) * 100) / 100,
+      index: i
+    })).filter(s => s.endTime - s.startTime >= 0.5);  // 过滤过短片段
+    
+    await db.aiTasks.update(taskId, {
+      status: 'done',
+      progress: 100,
+      output: { shots: shotRanges, total: shotRanges.length, provider: 'scene_detect' }
+    });
     
     // 清理临时文件
-    cleanupTempFiles(tempVideoPath, framesDir);
+    cleanupTempFiles(tempVideoPath);
     
-    console.log(`[AI] 视频分割完成: 生成了 ${shots.length} 个分镜`);
+    console.log(`[AI] 视频场景检测完成: 检测到 ${shotRanges.length} 个镜头 (时长 ${Math.round(duration)}秒)`);
   } catch (error) {
-    // P3-6：临时文件改用 os.tmpdir()
     const tempVideoPath = path.join(os.tmpdir(), `qizi_temp_split_${taskId}.mp4`);
-    // P3-6：临时文件改用 os.tmpdir()
-    const framesDir = path.join(os.tmpdir(), `qizi_temp_frames_${taskId}`);
-    cleanupTempFiles(tempVideoPath, framesDir);
+    cleanupTempFiles(tempVideoPath);
     throw error;
   }
 }
@@ -2750,6 +2916,70 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
 
 // ========== 视频分割辅助函数 ==========
 
+/**
+ * 使用 ffmpeg scene 滤镜检测镜头切换点
+ * 原理：逐帧计算画面变化分数，超过阈值即标记为切换点
+ * @param {string} videoPath 本地视频文件路径
+ * @param {number} threshold 场景变化阈值 (0-1)，默认 0.2（越低越敏感）
+ * @returns {Promise<number[]>} 切换时间戳数组（秒）
+ */
+function detectSceneChanges(videoPath, threshold = 0.2) {
+  const { spawn } = require('child_process');
+  const ffmpegBin = systemFfmpeg || require('ffmpeg-static');
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-i', videoPath,
+      '-vf', `select='gt(scene\\,${threshold})',showinfo`,
+      '-fps_mode', 'vfr',
+      '-f', 'null',
+      '-'
+    ];
+
+    console.log(`[AI] 开始场景检测: threshold=${threshold}, video=${videoPath}`);
+    const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    const timestamps = [];
+
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      // 实时解析 showinfo 行: [Parsed_showinfo_1 @ ...] n:  0 pts: 123456 pts_time:5.123 ...
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const match = line.match(/pts_time:(\d+\.?\d*)/);
+        if (match) {
+          const t = parseFloat(match[1]);
+          timestamps.push(t);
+          console.log(`[AI] 检测到切换点: ${t.toFixed(2)}s`);
+        }
+      }
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0 || timestamps.length > 0) {
+        // 排序并去重
+        const sorted = [...new Set(timestamps.map(t => Math.round(t * 100) / 100))].sort((a, b) => a - b);
+        console.log(`[AI] 场景检测完成: 检测到 ${sorted.length} 个切换点 (threshold=${threshold})`);
+        resolve(sorted);
+      } else {
+        // 检查是否有错误信息
+        const errMatch = stderr.match(/Error|error|Invalid/);
+        if (errMatch) {
+          reject(new Error(`ffmpeg 场景检测失败: ${stderr.slice(-500)}`));
+        } else {
+          // 没有检测到切换点也是正常结果
+          resolve([]);
+        }
+      }
+    });
+
+    proc.on('error', (err) => {
+      reject(new Error(`ffmpeg 启动失败: ${err.message}`));
+    });
+  });
+}
+
 function getVideoMetadata(filePath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
@@ -2776,7 +3006,7 @@ function extractFrames(videoPath, outputDir, intervalSeconds) {
   });
 }
 
-async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId) {
+async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId, options = {}) {
   // 构建多模态消息
   // 限制图片数量，避免超出 token 限制
   const maxImagesPerRequest = 30;
@@ -2849,9 +3079,15 @@ async function analyzeVideoShots(framesWithTime, totalDuration, settings, taskId
   ];
 
   // 使用支持视觉的多模态模型降级链（从用户配置读取）
-  const multimodalChain = (settings.llm_fallback_chain || [])
-    .filter(m => m.supportsVision)
-    .map(m => ({ model: m.model, provider: m.provider, cost: m.cost }));
+  let multimodalChain;
+  if (options.provider && options.model) {
+    // 使用用户指定的模型
+    multimodalChain = [{ model: options.model, provider: options.provider, cost: 0 }];
+  } else {
+    multimodalChain = (settings.llm_fallback_chain || [])
+      .filter(m => m.supportsVision)
+      .map(m => ({ model: m.model, provider: m.provider, cost: m.cost }));
+  }
 
   try {
     const result = await aiClient.callChatWithFallback(messages, multimodalChain, settings, {
@@ -2933,7 +3169,8 @@ function cleanupTempFiles(videoPath, framesDir) {
 app.get('/api/aliyun/status', (req, res) => {
   res.json({
     success: true,
-    configured: aliyunVideo.isAliyunConfigured()
+    configured: aliyunVideo.isAliyunConfigured(),
+    service: 'videorecog'
   });
 });
 

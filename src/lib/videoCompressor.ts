@@ -91,10 +91,11 @@ async function fetchBitrateConfig(): Promise<Record<string, number>> {
       }
 
       const data = await res.json();
+      const settings = data?.data || {};
       const config = {
-        '1080p': data.video_target_bitrate_1080p || DEFAULT_BITRATE_CONFIG['1080p'],
-        '720p': data.video_target_bitrate_720p || DEFAULT_BITRATE_CONFIG['720p'],
-        '480p': data.video_target_bitrate_480p || DEFAULT_BITRATE_CONFIG['480p']
+        '1080p': settings.video_target_bitrate_1080p || DEFAULT_BITRATE_CONFIG['1080p'],
+        '720p': settings.video_target_bitrate_720p || DEFAULT_BITRATE_CONFIG['720p'],
+        '480p': settings.video_target_bitrate_480p || DEFAULT_BITRATE_CONFIG['480p']
       };
 
       cachedBitrateConfig = config;

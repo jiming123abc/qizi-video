@@ -6,6 +6,7 @@ import { useSignedUrl } from '../../hooks/useSignedUrl';
 import ConfirmDialog from '../ConfirmDialog';
 import { useToastContext } from '../ToastProvider';
 import { useRefImages } from '../../hooks/useRefImages';
+import { useUnifiedUpload } from '../../hooks/useUnifiedUpload';
 import { AiErrorGuide } from './AiErrorGuide';
 
 interface AIImageGenerateDialogProps {
@@ -96,6 +97,7 @@ export default function AIImageGenerateDialog({
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const { showToast } = useToastContext();
+  const { startUpload } = useUnifiedUpload();
 
   // Q1：多图暂存 - 第一张自动上传 OSS，后续（最多5张）需用户确认后上传
   const MAX_STAGED_IMAGES = 5;
@@ -144,8 +146,7 @@ export default function AIImageGenerateDialog({
     enabled: !!effectiveOwnerId,
   });
 
-  // P3-24：参考图上传 input（缩略图条的 + 按钮）
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+  // P3-24：轮询任务状态
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   // 加载设置
@@ -284,17 +285,22 @@ export default function AIImageGenerateDialog({
     }
   };
 
-  // P3-24：文件选择上传
-  const handleUploadInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) {
-      try {
-        await addUploadRef(f);
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
+  // P3-24：触发统一上传模块上传参考图
+  const handleUploadClick = async () => {
+    if (!effectiveProjectId) return;
+    try {
+      const results = await startUpload({
+        projectId: effectiveProjectId,
+        usage: 'shot-reference',
+        accept: 'image/*',
+        multiple: false,
+      });
+      if (results.length > 0) {
+        addUrlRef(results[0].url);
       }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
     }
-    e.target.value = '';
   };
 
   const startGeneration = async () => {
@@ -526,7 +532,7 @@ export default function AIImageGenerateDialog({
                   <div className="flex gap-2 mb-2">
                     {effectiveProjectId && (
                       <button
-                        onClick={() => uploadInputRef.current?.click()}
+                        onClick={handleUploadClick}
                         className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border border-white/15 hover:border-violet-400 hover:bg-violet-500/10 transition text-sm text-slate-300"
                       >
                         <Upload className="w-4 h-4" />
@@ -577,7 +583,7 @@ export default function AIImageGenerateDialog({
                       ))}
                       {!isFull && effectiveProjectId && !refUploading && (
                         <button
-                          onClick={() => uploadInputRef.current?.click()}
+                          onClick={handleUploadClick}
                           className="shrink-0 w-16 h-16 rounded-lg border-2 border-dashed border-white/20 hover:border-violet-400 flex items-center justify-center transition"
                           title="上传参考图"
                         >
@@ -604,13 +610,6 @@ export default function AIImageGenerateDialog({
                     )}
                     </>
                   )}
-                  <input
-                    ref={uploadInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={handleUploadInputChange}
-                  />
                 </div>
 
                 {/* 从数字资产选择面板 */}

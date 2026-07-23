@@ -1,4 +1,7 @@
 const crypto = require('crypto');
+const Videorecog = require('@alicloud/videorecog20200320');
+const OpenapiClient = require('@alicloud/openapi-client');
+const TeaUtil = require('@alicloud/tea-util');
 
 const VIDEORECOG_ENDPOINT = 'https://videorecog.cn-shanghai.aliyuncs.com/';
 const VIDEORECOG_VERSION = '2020-03-20';
@@ -7,6 +10,44 @@ const VIDEORECOG_REGION = 'cn-shanghai';
 const MPS_ENDPOINT = 'https://mts.cn-beijing.aliyuncs.com/';
 const MPS_REGION = 'cn-beijing';
 const MPS_VERSION = '2014-06-18';
+
+// videorecog SDK 客户端单例（用于视频拆条，支持 stream 上传，无需临时公开 OSS 对象）
+let _videorecogClient = null;
+function getVideorecogClient() {
+  if (_videorecogClient) return _videorecogClient;
+  const creds = getAliyunCredentials();
+  if (!creds.accessKeyId || !creds.accessKeySecret) {
+    throw new Error('阿里云 AccessKey 未配置');
+  }
+  const config = new OpenapiClient.Config({
+    accessKeyId: creds.accessKeyId,
+    accessKeySecret: creds.accessKeySecret
+  });
+  config.endpoint = 'videorecog.cn-shanghai.aliyuncs.com';
+  // 关键：splitVideoPartsAdvance 内部会调用 OpenPlatform AuthorizeFileUpload，
+  // 该接口需要 RegionId 参数，必须设置为 cn-shanghai
+  config.regionId = 'cn-shanghai';
+  // 视频拆条需上传整个视频流，默认 3 秒 readTimeout 远远不够
+  config.readTimeout = 10 * 60 * 1000;  // 10 分钟
+  config.connectTimeout = 10 * 1000;       // 10 秒
+  _videorecogClient = new Videorecog.default(config);
+  return _videorecogClient;
+}
+
+/**
+ * 提取阿里云 SDK（TeaException）错误信息
+ * TeaException 结构通常为 { code, message, data }
+ */
+function extractSdkError(err) {
+  if (!err) return new Error('未知错误');
+  const code = err.code || err.Code || (err.data && (err.data.Code || err.data.code));
+  const message = err.message || err.Message || (err.data && (err.data.Message || err.data.message)) || err.toString();
+  const full = code ? `[${code}] ${message}` : message;
+  const error = new Error(full);
+  error.code = code;
+  error.original = err;
+  return error;
+}
 
 function getAliyunCredentials() {
   return {
@@ -50,13 +91,13 @@ function generateSignature(accessKeySecret, method, params) {
   return signature;
 }
 
-async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT) {
+async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT, httpMethod = 'GET') {
   const creds = getAliyunCredentials();
   if (!creds.accessKeyId || !creds.accessKeySecret) {
     throw new Error('阿里云 AccessKey 未配置');
   }
 
-  const method = 'GET';
+  const method = httpMethod.toUpperCase();
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
   const commonParams = {
@@ -84,7 +125,27 @@ async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT
     return `${percentEncode(key)}=${percentEncode(finalParams[key])}`;
   }).join('&');
 
-  const url = `${endpoint}?${queryString}`;
+  let url;
+  let fetchOptions;
+
+  if (method === 'POST') {
+    url = endpoint;
+    fetchOptions = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: queryString
+    };
+  } else {
+    url = `${endpoint}?${queryString}`;
+    fetchOptions = {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    };
+  }
 
   // 打印调试日志（敏感信息脱敏）
   if (endpoint === MPS_ENDPOINT) {
@@ -101,12 +162,7 @@ async function callAliyunApi(action, params = {}, endpoint = VIDEORECOG_ENDPOINT
   }
 
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    const response = await fetch(url, fetchOptions);
 
     const result = await response.json();
 
@@ -139,46 +195,100 @@ async function submitSplitVideoTask(videoUrl, options = {}) {
   if (options.MaxTime) params.MaxTime = options.MaxTime;
   if (options.Template) params.Template = options.Template;
 
-  const result = await callAliyunApi('SplitVideoParts', params, VIDEORECOG_ENDPOINT);
+  const result = await callAliyunApi('SplitVideoParts', params, VIDEORECOG_ENDPOINT, 'POST');
+  console.log('[Aliyun] SplitVideoParts 响应:', JSON.stringify(result, null, 2));
   const data = result.Data || {};
-  if (!data.JobId) {
-    throw new Error('阿里云拆条任务提交失败：未返回 JobId');
+  // 阿里云异步调用：如果没有 Data.JobId，则使用 RequestId 作为 jobId
+  const jobId = data.JobId || result.RequestId;
+  if (!jobId) {
+    throw new Error('阿里云拆条任务提交失败：未返回 JobId 或 RequestId');
   }
   return {
     requestId: result.RequestId,
-    jobId: data.JobId,
+    jobId: jobId,
     message: result.Message
   };
 }
 
-async function getSplitVideoResult(jobId) {
-  const params = {
-    JobId: jobId,
-    Async: 'true'
-  };
+/**
+ * 通过 stream 方式提交视频拆条任务（参考阿里云文档 155645 方式一）
+ * 使用 SDK 的 SplitVideoPartsAdvance，内部自动上传到 viapi 官方 OSS Bucket，
+ * 无需将视频临时设为公共读，适配非上海地域 OSS。
+ * @param {import('stream').Readable} readableStream 视频可读流
+ * @param {object} options { MinTime, MaxTime, Template }
+ * @returns {Promise<{requestId, jobId, message}>}
+ */
+async function submitSplitVideoTaskByStream(readableStream, options = {}) {
+  const client = getVideorecogClient();
 
-  const result = await callAliyunApi('GetAsyncJobResult', params, VIDEORECOG_ENDPOINT);
+  const request = new Videorecog.SplitVideoPartsAdvanceRequest({
+    videoUrlObject: readableStream
+  });
+  if (options.MinTime) request.minTime = options.MinTime;
+  if (options.MaxTime) request.maxTime = options.MaxTime;
+  if (options.Template) request.template = options.Template;
 
-  const data = result.Data || {};
-  const status = data.Status;
+  try {
+    const response = await client.splitVideoPartsAdvance(request, new TeaUtil.RuntimeOptions());
 
-  let parsedResult = null;
-  if (data.Result) {
-    try {
-      parsedResult = typeof data.Result === 'string'
-        ? JSON.parse(data.Result)
-        : data.Result;
-    } catch (e) {
-      parsedResult = data.Result;
+    const body = response.body || {};
+    console.log('[Aliyun] SplitVideoPartsAdvance 响应:', JSON.stringify(body, null, 2));
+    // 异步接口：使用 RequestId 作为 jobId 轮询 GetAsyncJobResult
+    const jobId = body.requestId;
+    if (!jobId) {
+      throw new Error('阿里云拆条任务提交失败：未返回 RequestId');
     }
+    return {
+      requestId: body.requestId,
+      jobId: jobId,
+      message: body.message
+    };
+  } catch (err) {
+    console.error('[Aliyun] SplitVideoPartsAdvance 失败:', err);
+    throw extractSdkError(err);
   }
+}
 
-  return {
-    status: status,
-    jobId: data.JobId,
-    result: parsedResult,
-    error: data.ErrorCode ? `${data.ErrorCode}: ${data.ErrorMessage}` : null
-  };
+async function getSplitVideoResult(jobId) {
+  const client = getVideorecogClient();
+
+  const request = new Videorecog.GetAsyncJobResultRequest({
+    jobId: jobId
+  });
+
+  try {
+    const response = await client.getAsyncJobResultWithOptions(request, new TeaUtil.RuntimeOptions());
+
+    const data = (response.body && response.body.data) || {};
+    const status = data.status;
+
+    console.log('[Aliyun] GetAsyncJobResult data keys:', Object.keys(data));
+    if (data.result) {
+      const resultPreview = typeof data.result === 'string' ? data.result.substring(0, 500) : JSON.stringify(data.result).substring(0, 500);
+      console.log('[Aliyun] result 类型:', typeof data.result, '预览:', resultPreview);
+    }
+
+    let parsedResult = null;
+    if (data.result) {
+      try {
+        parsedResult = typeof data.result === 'string'
+          ? JSON.parse(data.result)
+          : data.result;
+      } catch (e) {
+        parsedResult = data.result;
+      }
+    }
+
+    return {
+      status: status,
+      jobId: data.jobId,
+      result: parsedResult,
+      error: data.errorCode ? `${data.errorCode}: ${data.errorMessage}` : null
+    };
+  } catch (err) {
+    console.error('[Aliyun] GetAsyncJobResult 失败:', err);
+    throw extractSdkError(err);
+  }
 }
 
 async function splitVideo(videoUrl, options = {}) {
@@ -209,39 +319,129 @@ function parseSplitResult(result) {
   const shots = [];
   const themeSegments = [];
 
-  if (result.Elements && Array.isArray(result.Elements)) {
-    result.Elements.forEach((elem, index) => {
-      shots.push({
-        index: index + 1,
-        beginTime: parseFloat(elem.BeginTime) || 0,
-        endTime: parseFloat(elem.EndTime) || 0,
-        type: 'shot',
-        theme: ''
+  // 提取元素的时间字段（兼容大小写）
+  const getBegin = (elem) => parseFloat(elem?.BeginTime ?? elem?.beginTime ?? elem?.startTime ?? elem?.StartTime) || 0;
+  const getEnd = (elem) => parseFloat(elem?.EndTime ?? elem?.endTime ?? elem?.end ?? elem?.End) || 0;
+  const getTheme = (elem) => elem?.Theme ?? elem?.theme ?? elem?.Label ?? elem?.label ?? '';
+  const getBy = (elem) => elem?.By ?? elem?.by ?? '';
+  const getType = (elem) => (elem?.Type ?? elem?.type ?? '').toString().toLowerCase();
+
+  // 判断一个对象是否为时间段落元素
+  const isTimeSegment = (elem) => {
+    if (!elem || typeof elem !== 'object' || Array.isArray(elem)) return false;
+    const begin = getBegin(elem);
+    const end = getEnd(elem);
+    return begin >= 0 && end > begin;
+  };
+
+  // 递归查找对象中所有"包含时间段落元素的数组"
+  // 返回 [{ array, path, key }] 列表，按找到顺序
+  const findAllSegmentArrays = (obj, path = 'root') => {
+    const found = [];
+    if (!obj || typeof obj !== 'object') return found;
+
+    if (Array.isArray(obj)) {
+      // 检查数组本身是否就是段落数组
+      const validCount = obj.filter(isTimeSegment).length;
+      if (validCount > 0 && validCount >= obj.length / 2) {
+        found.push({ array: obj, path, key: path.split('.').pop() });
+      }
+      // 同时递归每个元素
+      obj.forEach((item, i) => {
+        found.push(...findAllSegmentArrays(item, `${path}[${i}]`));
       });
+      return found;
+    }
+
+    // 普通对象：递归每个字段
+    for (const key of Object.keys(obj)) {
+      found.push(...findAllSegmentArrays(obj[key], path === 'root' ? key : `${path}.${key}`));
+    }
+    return found;
+  };
+
+  console.log('[Aliyun] parseSplitResult 输入类型:', typeof result,
+    Array.isArray(result) ? '(array)' : '',
+    result && typeof result === 'object' ? '顶层keys:' + Object.keys(result).join(',') : '');
+
+  const allArrays = findAllSegmentArrays(result);
+  console.log('[Aliyun] 找到段落数组数量:', allArrays.length,
+    allArrays.map(a => `path=${a.path}, len=${a.array.length}`).join(' | '));
+
+  // 去重：同一个数组对象只处理一次
+  const processedArrays = new Set();
+  for (const { array, path, key } of allArrays) {
+    if (processedArrays.has(array)) continue;
+    processedArrays.add(array);
+
+    // 根据路径/key 和元素字段判断类型
+    // type=common/by=multimodal 通常代表主题段落；其余视为镜头
+    array.forEach((elem, index) => {
+      if (!isTimeSegment(elem)) return;
+      const begin = getBegin(elem);
+      const end = getEnd(elem);
+      const typeStr = getType(elem);
+      const byStr = getBy(elem);
+      const isTheme = key.toLowerCase().includes('theme') ||
+                      key.toLowerCase().includes('scene') ||
+                      key.toLowerCase().includes('segment') ||
+                      key.toLowerCase().includes('part') ||
+                      typeStr === 'common' ||
+                      byStr === 'multimodal';
+
+      const seg = {
+        index: index + 1,
+        beginTime: begin,
+        endTime: end,
+        type: isTheme ? 'theme' : 'shot',
+        theme: getTheme(elem),
+        by: byStr
+      };
+      shots.push(seg);
+      if (isTheme) themeSegments.push(seg);
     });
   }
 
-  if (result.SplitVideoPartResults && Array.isArray(result.SplitVideoPartResults)) {
-    result.SplitVideoPartResults.forEach((part, index) => {
-      const segment = {
-        index: index + 1,
-        beginTime: parseFloat(part.BeginTime) || 0,
-        endTime: parseFloat(part.EndTime) || 0,
-        type: 'theme',
-        theme: part.Theme || '',
-        by: part.By || ''
-      };
-      themeSegments.push(segment);
-      shots.push(segment);
-    });
+  // 兜底：如果递归没找到，尝试常见 key（保持向后兼容）
+  if (shots.length === 0) {
+    const findArray = (obj, candidates) => {
+      for (const k of candidates) {
+        if (obj && Array.isArray(obj[k]) && obj[k].length > 0) return obj[k];
+      }
+      return null;
+    };
+    const elementKeys = ['Elements', 'ShotElements', 'shotElements', 'shots', 'Shots', 'AIGCShots', 'aigcShots'];
+    const partKeys = ['SplitVideoPartResults', 'SceneSegments', 'ThemeSegments', 'Segments'];
+    const partArray = findArray(result, partKeys) || findArray(result, elementKeys);
+    if (partArray) {
+      partArray.forEach((elem, index) => {
+        const begin = getBegin(elem);
+        const end = getEnd(elem);
+        if (begin >= 0 && end > begin) {
+          shots.push({
+            index: index + 1,
+            beginTime: begin,
+            endTime: end,
+            type: 'shot',
+            theme: getTheme(elem)
+          });
+        }
+      });
+    }
   }
 
   shots.sort((a, b) => a.beginTime - b.beginTime);
+  // 重新编号
+  shots.forEach((s, i) => { s.index = i + 1; });
+
+  console.log('[Aliyun] parseSplitResult 输出: shots=', shots.length,
+    'theme=', themeSegments.length,
+    shots.slice(0, 3).map(s => `[${s.beginTime}-${s.endTime}]`).join(' '));
 
   return {
     shots: shots,
-    shotCount: result.Elements ? result.Elements.length : 0,
-    themeCount: result.SplitVideoPartResults ? result.SplitVideoPartResults.length : 0,
+    shotCount: shots.filter(s => s.type === 'shot').length,
+    themeCount: themeSegments.length,
     themeSegments: themeSegments
   };
 }
@@ -547,7 +747,9 @@ async function getTranscodeResult(jobId) {
 module.exports = {
   getAliyunCredentials,
   isAliyunConfigured,
+  getVideorecogClient,
   submitSplitVideoTask,
+  submitSplitVideoTaskByStream,
   getSplitVideoResult,
   splitVideo,
   parseSplitResult,

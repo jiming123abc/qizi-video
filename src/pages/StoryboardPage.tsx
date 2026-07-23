@@ -20,6 +20,7 @@ import { BottomTabBar } from '../components/storyboard/BottomTabBar';
 import MediaManagerDialog from '../components/storyboard/MediaManagerDialog';
 import AddShotDialog from '../components/storyboard/AddShotDialog';
 import VideoSplitDialog from '../components/storyboard/VideoSplitDialog';
+import SceneAnalysisDialog, { type SceneAction } from '../components/storyboard/SceneAnalysisDialog';
 import { VideoCompressionDialog } from '../components/storyboard/VideoCompressionDialog';
 import { SceneTabs } from '../components/storyboard/SceneTabs';
 import { SceneManager } from '../components/storyboard/SceneManager';
@@ -236,6 +237,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   const [showAIScriptDialog, setShowAIScriptDialog] = useState(false);
   const [showAIImageGenDialog, setShowAIImageGenDialog] = useState(false);
   const [showVideoSplitDialog, setShowVideoSplitDialog] = useState(false);
+  const [showSceneAnalysisDialog, setShowSceneAnalysisDialog] = useState(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [showAIUsagePanel, setShowAIUsagePanel] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
@@ -1627,6 +1629,16 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 增加分镜
               </button>
             )}
+            {/* 未分类视图：AI 场次分析按钮 */}
+            {currentSceneId === null && currentTab === 'pending' && filteredShots.length > 0 && (
+              <button
+                onClick={() => setShowSceneAnalysisDialog(true)}
+                className="mt-3 w-full py-3 rounded-2xl border border-fuchsia-400/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 hover:from-violet-500/20 hover:to-fuchsia-500/20 text-fuchsia-200 text-sm font-medium transition flex items-center justify-center gap-2"
+              >
+                <Sparkles className="w-4 h-4" />
+                AI 场次分析（自动归类 {filteredShots.length} 个分镜）
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1992,16 +2004,23 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         projectId={projectId}
         sceneId={currentSceneId}
         maxUploads={10}
-        onSplit={async (shots, videoUrl) => {
+        onSplit={async (splitShots, videoUrl) => {
           try {
-            for (const shot of shots) {
+            // 确定目标场次：从分镜卡片打开→该分镜的场次；从全局按钮打开→未分类
+            let targetSceneId: number | null = null;
+            if (videoSplitSource === 'shot' && videoSplitShotId) {
+              const sourceShot = shots.find(s => s.id === videoSplitShotId);
+              targetSceneId = sourceShot?.sceneId ?? null;
+            }
+
+            for (const shot of splitShots) {
               const duration = shot.endTime - shot.startTime;
               const createRes = await fetch('/api/shots', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   projectId,
-                  sceneId: currentSceneId,
+                  sceneId: targetSceneId,
                   sceneContent: '',
                   status: 'pending'
                 })
@@ -2027,7 +2046,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
             await loadShots();
             await loadStats();
             loadSceneStats();
-            showToast(`成功创建 ${shots.length} 个分镜`, 'success');
+            showToast(`成功创建 ${splitShots.length} 个分镜`, 'success');
           } catch (e) {
             console.error('视频分割创建分镜失败:', e);
             showToast('创建分镜失败', 'error');
@@ -2042,6 +2061,68 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         decision={pendingSplitDecision}
         aliyunConfigured={aliyunConfigured}
         onSelect={handleSplitVideoCompressionSelect}
+      />
+
+      {/* AI 场次分析 */}
+      <SceneAnalysisDialog
+        isOpen={showSceneAnalysisDialog}
+        onClose={() => setShowSceneAnalysisDialog(false)}
+        shots={filteredShots}
+        projectId={projectId}
+        onApply={async (actions: SceneAction[]) => {
+          try {
+            // 按场景名分组
+            const sceneGroups: Record<string, number[]> = {};
+            const deleteIds: number[] = [];
+            for (const action of actions) {
+              if (action.type === 'move_to_scene' && action.shotId && action.sceneName) {
+                if (!sceneGroups[action.sceneName]) sceneGroups[action.sceneName] = [];
+                sceneGroups[action.sceneName].push(action.shotId);
+              } else if (action.type === 'delete_shot' && action.shotId) {
+                deleteIds.push(action.shotId);
+              }
+            }
+
+            // 为每个场景创建场次并移动分镜
+            for (const [sceneName, shotIds] of Object.entries(sceneGroups)) {
+              // 创建场次
+              const createRes = await fetch(`/api/projects/${projectId}/scenes`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: sceneName })
+              });
+              const createData = await createRes.json();
+              if (createData.success && createData.data?.id) {
+                const newSceneId = createData.data.id;
+                // 移动分镜到该场次
+                await fetch('/api/shots/batch-update', {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ ids: shotIds, action: 'changeScene', sceneId: newSceneId })
+                });
+              }
+            }
+
+            // 删除非实拍分镜
+            if (deleteIds.length > 0) {
+              await fetch('/api/shots/batch-update', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: deleteIds, action: 'softDelete' })
+              });
+            }
+
+            // 刷新数据
+            await loadScenes();
+            await loadShots();
+            await loadStats();
+            loadSceneStats();
+            showToast(`已创建 ${Object.keys(sceneGroups).length} 个场次${deleteIds.length > 0 ? `，删除 ${deleteIds.length} 个非实拍分镜` : ''}`, 'success');
+          } catch (e) {
+            console.error('AI 场次分析应用失败:', e);
+            showToast('应用失败', 'error');
+          }
+        }}
       />
 
 

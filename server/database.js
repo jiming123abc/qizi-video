@@ -1607,6 +1607,13 @@ const shotMedia = {
     );
   },
 
+  getByUrlAndShotId: async (url, shotId) => {
+    return await storyboardAsync.get(
+      'SELECT * FROM shot_media WHERE url = ? AND shotId = ? LIMIT 1',
+      [url, shotId]
+    );
+  },
+
   create: async (item) => {
     const maxRow = await storyboardAsync.get(
       'SELECT COALESCE(MAX(sortOrder), -1) as maxSort FROM shot_media WHERE shotId = ?',

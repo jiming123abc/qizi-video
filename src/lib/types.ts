@@ -55,6 +55,7 @@ export interface ShotMedia {
   startTime?: number;
   sortOrder: number;
   source: 'upload' | 'ai_generated' | 'video_split';
+  ossKey?: string;
   createdAt: string;
 }
 

@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { X, Play, Pause, Plus, Trash2, Loader2, CheckCircle2, AlertTriangle, Info, Upload, Video, ZoomIn, ZoomOut, Maximize2, Scissors, Sparkles, ChevronDown, ArrowLeft } from 'lucide-react';
-import { checkVideoBitrate, uploadVideo, getVideoPoster } from '../../lib/ossUtils';
-import type { UploadDecision } from '../../lib/ossUtils';
-import { VideoCompressionDialog } from './VideoCompressionDialog';
+import { X, Play, Pause, Plus, Trash2, Loader2, Upload, Video, ZoomIn, ZoomOut, Maximize2, Scissors, Sparkles, ChevronDown, ArrowLeft } from 'lucide-react';
+import { getVideoPoster } from '../../lib/ossUtils';
 import type { SplitShot } from '../../lib/types';
 import type { AiTaskUpdate } from '../../lib/taskStream';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
+import { useUnifiedUpload } from '../../hooks/useUnifiedUpload';
+import { AiErrorGuide } from '../ai/AiErrorGuide';
 
 interface UploadedVideo {
   id: string;
@@ -94,6 +94,7 @@ export default function VideoSplitDialog({
   shotId = null
 }: VideoSplitDialogProps) {
   const isShotMode = source === 'shot';
+  const { startUpload } = useUnifiedUpload();
   const [mode, setMode] = useState<SplitMode>('manual');
   const [state, setState] = useState<DialogState>('initial');
   const [progress, setProgress] = useState(0);
@@ -106,6 +107,21 @@ export default function VideoSplitDialog({
   const [shotThumbnails, setShotThumbnails] = useState<Record<string, string>>({});
   const [generatingThumbs, setGeneratingThumbs] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+
+  // 根据后端 stage 映射前端提示文字
+  const getPhaseText = (output?: { stage?: string; shots?: unknown[] }): string => {
+    const stage = output?.stage || '';
+    if (output?.shots) return '正在整理识别结果...';
+    switch (stage) {
+      case 'downloading_video': return '正在下载视频到本地...';
+      case 'detecting_scenes': return '正在检测镜头切换点...';
+      case 'submitting_to_aliyun': return '正在上传视频到阿里云分析服务...';
+      case 'processing_aliyun': return '阿里云正在识别镜头切换点...';
+      case 'aliyun_processing': return '阿里云处理中，请稍候...';
+      case 'aliyun_process_success': return '分析完成，正在整理结果...';
+      default: return '正在检测镜头切换点...';
+    }
+  };
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
@@ -128,6 +144,8 @@ export default function VideoSplitDialog({
   const [selectedSplitPoint, setSelectedSplitPoint] = useState<string | null>(null);
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
   const [aiMode, setAiMode] = useState<'ai_frame' | 'aliyun'>('ai_frame');
+  // AI 模型选择
+
   const [zoom, setZoom] = useState(1);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const PIXELS_PER_SECOND = 50;
@@ -284,9 +302,6 @@ export default function VideoSplitDialog({
 
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadMessage, setUploadMessage] = useState('');
 
   useEffect(() => {
     initialZoomSetRef.current = false;
@@ -299,15 +314,6 @@ export default function VideoSplitDialog({
       requestAnimationFrame(() => tryFitZoomWithRetries(15));
     }
   }, [isOpen, videoDuration, tryFitZoomWithRetries]);
-
-  const [currentUploadIndex, setCurrentUploadIndex] = useState(0);
-  const [totalUploadCount, setTotalUploadCount] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [pendingCompressionVideo, setPendingCompressionVideo] = useState<File | null>(null);
-  const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
-  const pendingUploadRef = useRef<{ file: File; queue?: File[] } | null>(null);
-  const pendingCompressionVideoRef = useRef<File | null>(null);
 
   const currentVideo = uploadedVideos.find(v => v.id === selectedVideoId);
   const currentVideoRawUrl = currentVideo?.url || '';
@@ -324,6 +330,8 @@ export default function VideoSplitDialog({
       })
       .catch(() => {});
   }, []);
+
+
 
   useEffect(() => {
     if (!isOpen) return;
@@ -579,21 +587,48 @@ export default function VideoSplitDialog({
       video.preload = 'metadata';
       video.muted = true;
       video.playsInline = true;
+      video.crossOrigin = 'anonymous';
       const blobUrl = URL.createObjectURL(file);
       let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
         // 延迟清理，避免浏览器报 ERR_ABORTED
         setTimeout(() => {
-          video.removeAttribute('src');
-          video.load();
+          try {
+            video.removeAttribute('src');
+            video.load();
+          } catch { /* ignore */ }
           URL.revokeObjectURL(blobUrl);
-        }, 0);
+        }, 100);
       };
 
-      video.onloadeddata = () => {
-        video.currentTime = 0.1;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve('');
       };
+
+      // 超时处理：5秒内没有生成缩略图则返回空
+      timeoutId = setTimeout(() => {
+        console.warn('[generateVideoThumbnail] 超时，无法生成缩略图');
+        fail();
+      }, 5000);
+
+      video.onloadedmetadata = () => {
+        // 确保有有效时长后再 seek
+        if (video.duration > 0) {
+          video.currentTime = Math.min(0.5, video.duration * 0.1);
+        } else {
+          fail();
+        }
+      };
+
       video.onseeked = () => {
         if (settled) return;
         settled = true;
@@ -608,190 +643,138 @@ export default function VideoSplitDialog({
           } else {
             resolve('');
           }
-        } catch {
+        } catch (e) {
+          console.warn('[generateVideoThumbnail] canvas 绘制失败:', e);
           resolve('');
         } finally {
           cleanup();
         }
       };
-      video.onerror = () => {
+
+      video.onerror = (e) => {
+        console.warn('[generateVideoThumbnail] 视频加载失败:', e);
+        fail();
+      };
+
+      video.src = blobUrl;
+    });
+  };
+
+  const generateVideoThumbnailFromUrl = (videoUrl: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.muted = true;
+      video.playsInline = true;
+      video.crossOrigin = 'anonymous';
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        try {
+          video.removeAttribute('src');
+          video.load();
+        } catch { /* ignore */ }
+      };
+
+      const fail = () => {
         if (settled) return;
         settled = true;
         cleanup();
         resolve('');
       };
-      video.src = blobUrl;
+
+      timeoutId = setTimeout(() => {
+        console.warn('[generateVideoThumbnailFromUrl] 超时，无法生成缩略图');
+        fail();
+      }, 8000);
+
+      video.onloadedmetadata = () => {
+        if (video.duration > 0) {
+          video.currentTime = Math.min(0.5, video.duration * 0.1);
+        } else {
+          fail();
+        }
+      };
+
+      video.onseeked = () => {
+        if (settled) return;
+        settled = true;
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 160;
+          canvas.height = 90;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, 160, 90);
+            resolve(canvas.toDataURL('image/jpeg', 0.6));
+          } else {
+            resolve('');
+          }
+        } catch (e) {
+          console.warn('[generateVideoThumbnailFromUrl] canvas 绘制失败:', e);
+          resolve('');
+        } finally {
+          cleanup();
+        }
+      };
+
+      video.onerror = (e) => {
+        console.warn('[generateVideoThumbnailFromUrl] 视频加载失败:', e);
+        fail();
+      };
+
+      video.src = videoUrl;
     });
   };
 
-  const uploadSingleVideo = async (file: File): Promise<UploadedVideo | null> => {
-    setError(null);
-
-    try {
-      const decision = await checkVideoBitrate(file);
-
-      if (decision.decision === 'must_compress') {
-        return new Promise((resolve) => {
-          pendingUploadRef.current = { file };
-          pendingCompressionVideoRef.current = file;
-          setPendingCompressionVideo(file);
-          setPendingCompressionDecision(decision);
-          setIsUploading(false);
-          const checkInterval = setInterval(() => {
-            if (!pendingCompressionVideoRef.current && !pendingUploadRef.current) {
-              clearInterval(checkInterval);
-              resolve(null);
-            }
-          }, 200);
-          setTimeout(() => {
-            clearInterval(checkInterval);
-            resolve(null);
-          }, 60000);
-        });
-      }
-
-      setUploadMessage(`正在上传：${file.name}`);
-      const videoUrlResult = await uploadVideo(file, {
-        projectId,
-        sceneId,
-        usage: 'shot-reference',
-        compressionMethod: 'none',
-        skipBitrateCheck: true,
-        onProgress: (p) => {
-          setUploadProgress(p.progress);
-          setUploadMessage(p.message);
-        }
-      });
-
-      const thumbnail = await generateVideoThumbnail(file);
-
-      return {
-        id: generateId(),
-        url: videoUrlResult.url,
-        name: file.name,
-        thumbnail
-      };
-    } catch (err) {
-      console.error('上传视频失败:', err);
-      setError(err instanceof Error ? err.message : '上传失败');
-      return null;
-    }
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const fileList = Array.from(files) as File[];
+  const handleUploadClick = async () => {
     const remainingSlots = maxUploads - uploadedVideos.length;
     if (remainingSlots <= 0) {
       setError(`最多只能上传 ${maxUploads} 个视频`);
-      e.target.value = '';
       return;
     }
 
-    const filesToUpload = fileList.slice(0, remainingSlots);
-    if (files.length > remainingSlots) {
-      setError(`最多只能上传 ${maxUploads} 个视频，已自动截取前 ${remainingSlots} 个`);
-    }
-
-    e.target.value = '';
-    uploadMultipleVideos(filesToUpload);
-  };
-
-  const uploadMultipleVideos = async (files: File[]) => {
-    setIsUploading(true);
-    setUploadProgress(0);
-    setTotalUploadCount(files.length);
-    setCurrentUploadIndex(0);
     setError(null);
 
-    const newVideos: UploadedVideo[] = [];
+    const results = await startUpload({
+      projectId,
+      sceneId,
+      usage: 'shot-reference',
+      accept: 'video/*',
+      multiple: true,
+      maxFiles: Math.min(10, remainingSlots),
+      createShot: false,
+    });
 
-    for (let i = 0; i < files.length; i++) {
-      setCurrentUploadIndex(i + 1);
-      const result = await uploadSingleVideo(files[i]);
-      if (result) {
-        newVideos.push(result);
+    if (results.length > 0) {
+      const newVideos: UploadedVideo[] = [];
+      for (const r of results) {
+        let thumbnail = '';
+        try {
+          thumbnail = getVideoThumbnail(r.url);
+          if (!thumbnail) {
+            thumbnail = await generateVideoThumbnailFromUrl(r.url);
+          }
+        } catch (e) {
+          console.warn('[handleUploadClick] 缩略图生成失败:', e);
+        }
+        newVideos.push({
+          id: generateId(),
+          url: r.url,
+          name: r.filename,
+          thumbnail,
+        });
       }
-    }
-
-    if (newVideos.length > 0) {
-      setUploadedVideos(prev => {
-        const updated = [...prev, ...newVideos];
-        return updated;
-      });
+      setUploadedVideos(prev => [...prev, ...newVideos]);
       if (!selectedVideoId && newVideos.length > 0) {
         setSelectedVideoId(newVideos[0].id);
       }
     }
-
-    setIsUploading(false);
-    setUploadProgress(0);
-    setUploadMessage('');
-    setCurrentUploadIndex(0);
-    setTotalUploadCount(0);
-  };
-
-  const handleCompressionSelect = async (method: 'server' | 'browser' | 'aliyun' | 'cancel') => {
-    const pending = pendingUploadRef.current;
-    const file = pendingCompressionVideo;
-
-    pendingCompressionVideoRef.current = null;
-    setPendingCompressionVideo(null);
-    setPendingCompressionDecision(null);
-    pendingUploadRef.current = null;
-
-    if (method === 'cancel' || !pending || !file) {
-      return;
-    }
-
-    setIsUploading(true);
-    setUploadProgress(0);
-    setUploadMessage('正在压缩并上传视频...');
-
-    try {
-      const videoUrlResult = await uploadVideo(file, {
-        projectId,
-        sceneId,
-        usage: 'shot-reference',
-        compressionMethod: method,
-        skipBitrateCheck: true,
-        onProgress: (p) => {
-          setUploadProgress(p.progress);
-          setUploadMessage(p.message);
-        }
-      });
-
-      const thumbnail = await generateVideoThumbnail(file);
-      const newVideo: UploadedVideo = {
-        id: generateId(),
-        url: videoUrlResult.url,
-        name: file.name,
-        thumbnail
-      };
-
-      setUploadedVideos(prev => [...prev, newVideo]);
-      if (!selectedVideoId) {
-        setSelectedVideoId(newVideo.id);
-      }
-    } catch (err) {
-      console.error('上传视频失败:', err);
-      setError(err instanceof Error ? err.message : '上传失败');
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(0);
-      setUploadMessage('');
-    }
-  };
-
-  const handleUploadClick = () => {
-    const remainingSlots = maxUploads - uploadedVideos.length;
-    if (remainingSlots <= 0) {
-      setError(`最多只能上传 ${maxUploads} 个视频`);
-      return;
-    }
-    fileInputRef.current?.click();
   };
 
   const handleSelectVideo = (videoId: string) => {
@@ -1170,7 +1153,7 @@ export default function VideoSplitDialog({
 
         if (data.status === 'processing' || data.status === 'pending') {
           setProgress(data.progress || 0);
-          setCurrentPhase(data.output?.shots ? '正在识别镜头边界' : '正在分析视频关键帧');
+          setCurrentPhase(getPhaseText(data.output));
           if (data.output?.shots) {
             setDetectedShots(data.output.shots.length);
           }
@@ -1181,43 +1164,30 @@ export default function VideoSplitDialog({
           setDetectedShots(data.output?.shots?.length || 0);
           setEstimatedCost(data.output?.estimatedCost || 0);
 
-          if (data.output?.shots) {
-            const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
-            // 过滤时长小于 0.5 秒的片段，合并到相邻片段
-            const filteredShots: SplitShot[] = [];
-            for (let i = 0; i < splitShots.length; i++) {
-              const shot = splitShots[i];
-              const duration = shot.endTime - shot.startTime;
-              if (duration >= MIN_SHOT_DURATION) {
-                filteredShots.push({
-                  startTime: shot.startTime,
-                  endTime: shot.endTime,
-                  index: filteredShots.length
-                });
-              } else if (filteredShots.length > 0) {
-                // 短片段合并到前一个片段
-                filteredShots[filteredShots.length - 1].endTime = shot.endTime;
-              }
-            }
-            if (filteredShots.length === 0 && splitShots.length > 0) {
-              filteredShots.push({
-                startTime: splitShots[0].startTime,
-                endTime: splitShots[splitShots.length - 1].endTime,
-                index: 0
-              });
-            }
-            setPreviewShots(filteredShots);
-            // 同步更新 splitPoints，便于用户返回手动调整
-            const newSplitPoints: SplitPoint[] = filteredShots.slice(1).map((shot, idx: number) => ({
-              id: generateId(),
-              time: shot.startTime
-            }));
-            setSplitPoints(newSplitPoints);
+          // 阿里云拆条返回空结果时，给出明确提示
+          if (!data.output?.shots || data.output.shots.length === 0) {
+            setError('阿里云分析完成，但未检测到镜头切换点。请尝试手动添加分割点，或调整视频后重试。');
+            setState('initial');
+            setMode('manual');
+            setShowAIMode(false);
+            return;
           }
+
+          // AI 完成: 提取分割点时间，设置为 splitPoints，回到手动模式
+          const shots = data.output.shots as Array<{ startTime?: number; endTime?: number; media?: Array<{ startTime?: number; duration?: number }> }>;
+          // 不再假设第一个 shot 从 0 开始；将所有 startTime > 0.5 的作为分割点
+          // （阿里云拆条返回的可能是主题段落，第一个 beginTime 不一定是 0）
+          const newSplitPoints: SplitPoint[] = shots
+            .map(shot => ({
+              id: generateId(),
+              time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
+            }))
+            .filter(p => p.time > 0.5);
+          setSplitPoints(newSplitPoints);
 
           setMode('manual');
           setShowAIMode(false);
-          setState('preview');  // 进入预览状态
+          setState('initial');  // 回到手动模式，用户可调整后点击“开始分割”
         } else if (data.status === 'error' || data.status === 'failed') {
           sseClosed = true;
           eventSource.close();
@@ -1259,7 +1229,7 @@ export default function VideoSplitDialog({
 
             if (data.status === 'processing' || data.status === 'pending') {
               setProgress(data.progress || 0);
-              setCurrentPhase(data.output?.shots ? '正在识别镜头边界' : '正在分析视频关键帧');
+              setCurrentPhase(getPhaseText(data.output));
               if (data.output?.shots) {
                 setDetectedShots(data.output.shots.length);
               }
@@ -1272,15 +1242,25 @@ export default function VideoSplitDialog({
               setDetectedShots(data.output?.shots?.length || 0);
               setEstimatedCost(data.output?.estimatedCost || 0);
 
-              if (data.output?.shots) {
-                const newSplitPoints: SplitPoint[] = data.output.shots.slice(1).map((shot, idx) => ({
-                  id: generateId(),
-                  time: shot.startTime
-                }));
-                setSplitPoints(newSplitPoints);
+              if (!data.output?.shots || data.output.shots.length === 0) {
+                setError('阿里云分析完成，但未检测到镜头切换点。请尝试手动添加分割点，或调整视频后重试。');
+                setState('initial');
+                setMode('manual');
+                setShowAIMode(false);
+                return;
               }
 
+              const shots = data.output.shots as Array<{ startTime?: number; media?: Array<{ startTime?: number }> }>;
+              const newSplitPoints: SplitPoint[] = shots
+                .map(shot => ({
+                  id: generateId(),
+                  time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
+                }))
+                .filter(p => p.time > 0.5);
+              setSplitPoints(newSplitPoints);
+
               setMode('manual');
+              setShowAIMode(false);
               setState('initial');
             } else if (data.status === 'error') {
               if (pollIntervalRef.current) {
@@ -1304,7 +1284,7 @@ export default function VideoSplitDialog({
 
           if (data.status === 'processing' || data.status === 'pending') {
             setProgress(data.progress || 0);
-            setCurrentPhase(data.output?.shots ? '正在识别镜头边界' : '正在分析视频关键帧');
+            setCurrentPhase(getPhaseText(data.output));
             if (data.output?.shots) {
               setDetectedShots(data.output.shots.length);
             }
@@ -1318,24 +1298,20 @@ export default function VideoSplitDialog({
             setEstimatedCost(data.output?.estimatedCost || 0);
 
             if (data.output?.shots) {
-              const splitShots = data.output.shots as Array<{ startTime: number; endTime: number; thumbnail?: string }>;
-              // 生成预览镜头列表
-              const newPreviewShots: SplitShot[] = splitShots.map((shot, i) => ({
-                startTime: shot.startTime,
-                endTime: shot.endTime,
-                index: i
-              }));
-              setPreviewShots(newPreviewShots);
-              const newSplitPoints: SplitPoint[] = splitShots.slice(1).map((shot, idx) => ({
-                id: generateId(),
-                time: shot.startTime
-              }));
+              const shots = data.output.shots as Array<{ startTime?: number; media?: Array<{ startTime?: number }> }>;
+              const newSplitPoints: SplitPoint[] = shots
+                .slice(1)
+                .map(shot => ({
+                  id: generateId(),
+                  time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
+                }))
+                .filter(p => p.time > 0);
               setSplitPoints(newSplitPoints);
             }
 
             setMode('manual');
             setShowAIMode(false);
-            setState('preview');  // 进入预览状态
+            setState('initial');  // 回到手动模式
           } else if (data.status === 'error') {
             if (pollIntervalRef.current) {
               clearInterval(pollIntervalRef.current);
@@ -1351,11 +1327,12 @@ export default function VideoSplitDialog({
     }
   }, []);
 
-  const handleStartSplit = async () => {
+  const handleStartSplit = async (overrideMode?: SplitMode) => {
+    const effectiveMode = overrideMode || mode;
     if (!currentVideoUrl) return;
 
     // 手动模式：直接基于当前分割点生成分割结果预览，不调用后端 API
-    if (mode === 'manual') {
+    if (effectiveMode === 'manual') {
       const shots: SplitShot[] = splitPoints.length > 0
         ? (() => {
             const result: SplitShot[] = [];
@@ -1377,6 +1354,7 @@ export default function VideoSplitDialog({
             return result;
           })()
         : [{ startTime: 0, endTime: videoDuration, index: 0 }];
+      setShotThumbnails({});
       setPreviewShots(shots);
       setState('preview');
       return;
@@ -1386,20 +1364,18 @@ export default function VideoSplitDialog({
     setError(null);
     setState('processing');
     setProgress(5);
-    setCurrentPhase('正在准备分割任务...');
+    const actualMode = effectiveMode === 'aliyun' ? 'aliyun' : 'ai_frame';
+    setCurrentPhase(actualMode === 'aliyun' ? '正在上传视频到阿里云分析服务...' : '正在准备本地镜头检测...');
 
     try {
-      const actualMode = mode === 'manual' ? 'manual' : aiMode;
       
       const body: {
         videoUrl: string;
         projectId: number;
         mode: string;
         sceneId?: number | null;
-        splitPoints?: number[];
-        videoDuration?: number;
       } = {
-        videoUrl: currentVideoUrl,
+        videoUrl: currentVideoRawUrl,
         projectId,
         mode: actualMode
       };
@@ -1408,25 +1384,26 @@ export default function VideoSplitDialog({
         body.sceneId = sceneId;
       }
 
-      if (mode === 'manual' && splitPoints.length > 0) {
-        body.splitPoints = splitPoints.map(p => p.time);
-        body.videoDuration = videoDuration;
-      }
-
       const res = await fetch('/api/ai/split-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
 
+      if (!res.ok) {
+        throw new Error(`服务器返回错误: ${res.status}`);
+      }
+
       const data = await res.json();
 
       if (data.taskId) {
         setTaskId(data.taskId);
         pollTaskStatus(data.taskId);
-      } else if (data.error) {
-        setError(data.error);
+      } else if (data.error || data.message) {
+        setError(data.error || data.message);
         setState('initial');
+      } else {
+        throw new Error('服务器未返回任务ID');
       }
     } catch (e) {
       console.error('提交分割任务失败:', e);
@@ -1469,13 +1446,17 @@ export default function VideoSplitDialog({
   };
 
   const generateAllThumbnails = useCallback(async () => {
-    if (splitPoints.length === 0 || !thumbVideoRef.current) return;
+    if (!thumbVideoRef.current) return;
+    // 有 previewShots 时用 previewShots 的 startTime，否则用 splitPoints
+    const times = previewShots.length > 0
+      ? previewShots.map(s => s.startTime)
+      : [0, ...splitPoints.map(p => p.time)];
+    if (times.length === 0) return;
 
     setGeneratingThumbs(true);
     const thumbs: Record<string, string> = {};
 
     try {
-      const times = [0, ...splitPoints.map(p => p.time)];
       for (let i = 0; i < times.length; i++) {
         try {
           const thumb = await generateThumbnail(times[i]);
@@ -1488,13 +1469,15 @@ export default function VideoSplitDialog({
     } finally {
       setGeneratingThumbs(false);
     }
-  }, [splitPoints]);
+  }, [splitPoints, previewShots]);
 
   useEffect(() => {
-    if (state === 'completed' && videoDuration > 0 && splitPoints.length > 0) {
+    if (videoDuration > 0 && currentVideoUrl &&
+        (state === 'completed' || state === 'preview') &&
+        (splitPoints.length > 0 || previewShots.length > 0)) {
       generateAllThumbnails();
     }
-  }, [state, videoDuration, splitPoints, generateAllThumbnails]);
+  }, [state, videoDuration, splitPoints, previewShots, generateAllThumbnails, currentVideoUrl]);
 
   const handleCancel = () => {
     if (pollIntervalRef.current) {
@@ -1520,7 +1503,7 @@ export default function VideoSplitDialog({
       onClick={onClose}
     >
       <div
-        className={`absolute ${isMobile ? 'inset-0 rounded-none max-h-none' : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[90vh] rounded-3xl'} w-full border border-white/10 bg-slate-900 flex flex-col shadow-2xl`}
+        className={`absolute ${isMobile ? 'inset-0 rounded-none max-h-none' : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[90vh] min-h-[700px] h-[85vh] rounded-3xl'} w-full border border-white/10 bg-slate-900 flex flex-col shadow-2xl`}
         onClick={e => e.stopPropagation()}
       >
         <div className={`flex items-center justify-between ${isMobile ? 'px-4 py-3' : 'px-6 py-4'} border-b border-white/10`}>
@@ -1550,17 +1533,17 @@ export default function VideoSplitDialog({
                     <div className="aspect-video bg-black relative">
                       {video.thumbnail ? (
                         <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
-                      ) : (() => {
-                        const ossThumb = getVideoThumbnail(video.url);
-                        if (ossThumb) {
-                          return <img src={ossThumb} alt={video.name} className="w-full h-full object-cover" />;
-                        }
-                        return (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <Video className="w-5 h-5 text-slate-600" />
-                          </div>
-                        );
-                      })()}
+                      ) : (
+                        <img
+                          src={getVideoThumbnail(video.url) || ''}
+                          alt={video.name}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            const target = e.target as HTMLImageElement;
+                            target.style.display = 'none';
+                          }}
+                        />
+                      )}
                     </div>
                     {!isShotMode && (
                       <button
@@ -1576,8 +1559,7 @@ export default function VideoSplitDialog({
                 {!isShotMode && uploadedVideos.length < maxUploads && (
                   <button
                     onClick={handleUploadClick}
-                    disabled={isUploading}
-                    className="aspect-video rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50 flex flex-col items-center justify-center"
+                    className="aspect-video rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all flex flex-col items-center justify-center"
                   >
                     <Upload className="w-4 h-4 text-slate-400 mb-1" />
                     <div className="text-[10px] text-slate-400">上传</div>
@@ -1606,17 +1588,17 @@ export default function VideoSplitDialog({
                       <div className="aspect-video bg-black relative">
                         {video.thumbnail ? (
                           <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
-                        ) : (() => {
-                          const ossThumb = getVideoThumbnail(video.url);
-                          if (ossThumb) {
-                            return <img src={ossThumb} alt={video.name} className="w-full h-full object-cover" />;
-                          }
-                          return (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Video className="w-6 h-6 text-slate-600" />
-                            </div>
-                          );
-                        })()}
+                        ) : (
+                          <img
+                            src={getVideoThumbnail(video.url) || ''}
+                            alt={video.name}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.style.display = 'none';
+                            }}
+                          />
+                        )}
                         {!isShotMode && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDeleteVideo(video.id); }}
@@ -1637,8 +1619,7 @@ export default function VideoSplitDialog({
                 {!isShotMode && uploadedVideos.length < maxUploads && (
                   <button
                     onClick={handleUploadClick}
-                    disabled={isUploading}
-                    className="w-full p-3 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all disabled:opacity-50"
+                    className="w-full p-3 rounded-lg border-2 border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/10 transition-all"
                   >
                     <Upload className="w-4 h-4 mx-auto text-slate-400 mb-1" />
                     <div className="text-xs text-slate-400">上传视频</div>
@@ -1646,45 +1627,20 @@ export default function VideoSplitDialog({
                 )}
               </>
             )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              multiple
-              onChange={handleFileChange}
-              className="hidden"
-            />
           </div>
 
           <div className={`${isMobile ? '' : 'flex-1 overflow-y-auto custom-scrollbar'} ${isMobile ? 'p-3 space-y-3' : 'p-6 space-y-5'}`}>
             {error && (
-              <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                {error}
-              </div>
+              <AiErrorGuide
+                error={error}
+                onOpenSettings={() => {
+                  // 触发自定义事件，由 StoryboardPage 监听并打开设置面板
+                  window.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
+                }}
+              />
             )}
 
-            {isUploading && (
-              <div className="space-y-2 p-4 rounded-xl bg-violet-500/10 border border-violet-500/30">
-                <div className="flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
-                  <span className="text-sm text-slate-300">
-                    {totalUploadCount > 1 ? `上传中 (${currentUploadIndex}/${totalUploadCount})：` : ''}
-                    {uploadMessage}
-                  </span>
-                  <span className="text-sm text-violet-400 font-medium ml-auto">{uploadProgress}%</span>
-                </div>
-                <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {!currentVideoUrl && !isUploading && (
+            {!currentVideoUrl && (
               <div className="text-center py-12 text-slate-500">
                 <Video className="w-12 h-12 mx-auto mb-3 opacity-50" />
                 <p className="text-sm">请从左侧上传视频，或选择已上传的视频</p>
@@ -1724,7 +1680,7 @@ export default function VideoSplitDialog({
                       <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
                         <div className="text-center">
                           <Loader2 className="w-8 h-8 text-violet-400 animate-spin mx-auto mb-2" />
-                          <div className="text-sm text-white">正在分割视频... {progress}%</div>
+                          <div className="text-sm text-white">正在分析视频... {progress}%</div>
                         </div>
                       </div>
                     )}
@@ -1919,10 +1875,10 @@ export default function VideoSplitDialog({
                       </div>
                       <div className={`grid gap-3 ${isMobile ? 'grid-cols-2 max-h-72' : 'grid-cols-3 max-h-80'} overflow-y-auto custom-scrollbar pr-1`}>
                         {previewShots.map((shot, idx) => {
-                          const posterTime = Math.floor(shot.startTime * 1000);
-                          const posterUrl = currentVideoRawUrl
-                            ? `/api/oss-snapshot?url=${encodeURIComponent(currentVideoRawUrl)}&t=${posterTime}&w=320`
-                            : '';
+                          // 优先使用 canvas 生成的精确缩略图，回退到 OSS 截图
+                          const thumbKey = `shot_${idx}`;
+                          const posterUrl = shotThumbnails[thumbKey]
+                            || getVideoPoster(currentVideoRawUrl || '', shot.startTime);
                           const isPlaying = playingPreviewIndex === idx;
 
                           return (
@@ -2005,10 +1961,11 @@ export default function VideoSplitDialog({
                           style={{ width: `${progress}%` }}
                         />
                       </div>
-                      <p className="text-sm text-slate-400 mb-2">当前阶段：{currentPhase}</p>
-                      {detectedShots > 0 && (
-                        <p className="text-sm text-slate-400 mb-4">已识别 {detectedShots} 个镜头</p>
-                      )}
+                      <p className="text-sm text-slate-300 mb-1 font-medium">{currentPhase}</p>
+                      <p className="text-xs text-slate-500 mb-3">
+                        {mode === 'aliyun' ? '阿里云智能拆条' : '本地镜头检测'}
+                        {detectedShots > 0 && ` · 已识别 ${detectedShots} 个镜头`}
+                      </p>
                       <button
                         onClick={handleCancel}
                         className="px-5 py-2.5 rounded-xl border border-white/15 hover:bg-white/5 text-slate-300 text-sm font-medium transition"
@@ -2032,9 +1989,9 @@ export default function VideoSplitDialog({
                       <div className="flex items-center gap-3 text-left">
                         <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-5 h-5'} text-violet-400`} />
                         <div>
-                          <div className="text-sm font-medium text-white">AI 辅助分析</div>
+                          <div className="text-sm font-medium text-white">AI 智能拆条</div>
                           <div className="text-xs text-slate-400 mt-0.5">
-                            人工智能自动识别镜头切换点，生成后仍可手动调整
+                            自动识别镜头切换点，生成后可手动微调
                           </div>
                         </div>
                       </div>
@@ -2044,33 +2001,33 @@ export default function VideoSplitDialog({
                     {showAIMode && (
                       <>
                         <div className="space-y-3 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
-                          <div className="text-sm font-medium text-white">选择 AI 分析方式：</div>
+                          <div className="text-sm font-medium text-white">选择拆条模式：</div>
                           <div className="space-y-2">
                             {[
                               {
                                 id: 'ai_frame' as const,
-                                name: 'AI 抽帧分析',
-                                description: '抽取视频关键帧，通过多模态大模型分析镜头切换点',
-                                cost: '约 ¥0.3-0.8 / 5分钟',
-                                accuracy: '⭐⭐⭐⭐ 较好',
-                                speed: '约 30秒-2分钟',
+                                name: '本地镜头检测',
+                                description: '基于画面变化在本地快速检测镜头切换，无需联网上传视频',
+                                cost: '免费',
+                                accuracy: '良好',
+                                speed: '约 5-15 秒',
                                 available: true
                               },
                               {
                                 id: 'aliyun' as const,
-                                name: '阿里云视频拆条',
-                                description: '阿里云视觉智能平台专业视频分析',
-                                cost: '约 ¥0.5-2.5 / 5分钟',
-                                accuracy: '⭐⭐⭐⭐⭐ 精准',
-                                speed: '约 1-3分钟',
+                                name: '阿里云智能拆条',
+                                description: '基于阿里云视频理解能力进行专业级镜头拆分',
+                                cost: '按实际调用量计费',
+                                accuracy: '精准',
+                                speed: '约 1-3 分钟',
                                 available: aliyunConfigured
                               }
                             ].map(option => (
-                              <label 
+                              <label
                                 key={option.id}
                                 className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                                  !option.available 
-                                    ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed' 
+                                  !option.available
+                                    ? 'border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed'
                                     : aiMode === option.id
                                       ? 'border-violet-500 bg-violet-500/10'
                                       : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
@@ -2094,19 +2051,36 @@ export default function VideoSplitDialog({
                                       <span className="text-emerald-400">精度：{option.accuracy}</span>
                                       <span className="text-sky-400">速度：{option.speed}</span>
                                     </div>
+                                    {option.id === 'aliyun' && !option.available && (
+                                      <div className="mt-2 text-xs text-amber-400">
+                                        请先在设置中配置阿里云 AccessKey
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               </label>
                             ))}
                           </div>
+
                         </div>
+                        {splitPoints.length > 0 && (
+                          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/20 mt-3">
+                            <p className="text-xs text-amber-200">
+                              注意：AI 拆条将覆盖当前已手动添加的 {splitPoints.length} 个分割点
+                            </p>
+                          </div>
+                        )}
                         <button
-                          onClick={() => { setMode(aiMode === 'aliyun' ? 'aliyun' : 'ai_frame'); handleStartSplit(); }}
+                          onClick={() => {
+                            const targetMode: SplitMode = aiMode;
+                            setMode(targetMode);
+                            handleStartSplit(targetMode);
+                          }}
                           disabled={state === 'processing'}
                           className={`w-full flex items-center justify-center gap-2 ${isMobile ? 'py-3 text-base' : 'py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed mt-3`}
                         >
                           <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
-                          开始进行AI分析
+                          开始智能分析
                         </button>
                       </>
                     )}
@@ -2187,20 +2161,6 @@ export default function VideoSplitDialog({
           </div>
         )}
       </div>
-
-      <VideoCompressionDialog
-        isOpen={pendingCompressionVideo !== null}
-        onClose={() => {
-          pendingCompressionVideoRef.current = null;
-          setPendingCompressionVideo(null);
-          setPendingCompressionDecision(null);
-          pendingUploadRef.current = null;
-        }}
-        file={pendingCompressionVideo}
-        decision={pendingCompressionDecision}
-        aliyunConfigured={aliyunConfigured}
-        onSelect={handleCompressionSelect}
-      />
     </div>
   );
 }
