@@ -27,6 +27,7 @@ interface VideoSplitDialogProps {
   maxUploads?: number;
   source?: 'global' | 'shot';
   shotId?: number | null;
+  onOpenSettings?: () => void;
 }
 
 type SplitMode = 'manual' | 'ai_frame' | 'aliyun';
@@ -91,7 +92,8 @@ export default function VideoSplitDialog({
   onVideoUpload,
   maxUploads = 10,
   source = 'global',
-  shotId = null
+  shotId = null,
+  onOpenSettings
 }: VideoSplitDialogProps) {
   const isShotMode = source === 'shot';
   const { startUpload } = useUnifiedUpload();
@@ -103,6 +105,7 @@ export default function VideoSplitDialog({
   const [splitPoints, setSplitPoints] = useState<SplitPoint[]>([]);
   const [estimatedCost, setEstimatedCost] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [shotThumbnails, setShotThumbnails] = useState<Record<string, string>>({});
   const [generatingThumbs, setGeneratingThumbs] = useState(false);
@@ -275,7 +278,7 @@ export default function VideoSplitDialog({
     }
   };
 
-  const handleTimelineWheel = useCallback((e: React.WheelEvent) => {
+  const handleTimelineWheel = useCallback((e: WheelEvent) => {
     if (!timelineScrollRef.current || !videoDuration) return;
     e.preventDefault();
 
@@ -299,6 +302,16 @@ export default function VideoSplitDialog({
       }
     });
   }, [zoom, videoDuration, getMinZoom, getMaxZoom]);
+
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el || state === 'processing') return;
+    const handler = (e: WheelEvent) => handleTimelineWheel(e);
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', handler);
+    };
+  }, [handleTimelineWheel, state]);
 
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
@@ -1191,7 +1204,7 @@ export default function VideoSplitDialog({
         } else if (data.status === 'error' || data.status === 'failed') {
           sseClosed = true;
           eventSource.close();
-          setError(data.error || '分割失败，请重试');
+          setAiError(data.error || '分割失败，请重试');
           setState('initial');
         }
       };
@@ -1267,7 +1280,7 @@ export default function VideoSplitDialog({
                 clearInterval(pollIntervalRef.current);
                 pollIntervalRef.current = null;
               }
-              setError(data.error || '分割失败，请重试');
+              setAiError(data.error || '分割失败，请重试');
               setState('initial');
             }
           } catch (e) {
@@ -1317,7 +1330,7 @@ export default function VideoSplitDialog({
               clearInterval(pollIntervalRef.current);
               pollIntervalRef.current = null;
             }
-            setError(data.error || '分割失败，请重试');
+            setAiError(data.error || '分割失败，请重试');
             setState('initial');
           }
         } catch (e) {
@@ -1362,10 +1375,11 @@ export default function VideoSplitDialog({
 
     // AI 模式：调用后端 API
     setError(null);
+    setAiError(null);
     setState('processing');
     setProgress(5);
     const actualMode = effectiveMode === 'aliyun' ? 'aliyun' : 'ai_frame';
-    setCurrentPhase(actualMode === 'aliyun' ? '正在上传视频到阿里云分析服务...' : '正在准备本地镜头检测...');
+    setCurrentPhase(actualMode === 'aliyun' ? '正在上传视频到阿里云分析服务...' : '正在服务器端分析镜头切换点...');
 
     try {
       
@@ -1400,14 +1414,14 @@ export default function VideoSplitDialog({
         setTaskId(data.taskId);
         pollTaskStatus(data.taskId);
       } else if (data.error || data.message) {
-        setError(data.error || data.message);
+        setAiError(data.error || data.message);
         setState('initial');
       } else {
         throw new Error('服务器未返回任务ID');
       }
     } catch (e) {
       console.error('提交分割任务失败:', e);
-      setError('网络错误，请重试');
+      setAiError('网络错误，请重试');
       setState('initial');
     }
   };
@@ -1484,6 +1498,7 @@ export default function VideoSplitDialog({
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
+    setAiError(null);
     setState('initial');
     setProgress(0);
   };
@@ -1633,10 +1648,7 @@ export default function VideoSplitDialog({
             {error && (
               <AiErrorGuide
                 error={error}
-                onOpenSettings={() => {
-                  // 触发自定义事件，由 StoryboardPage 监听并打开设置面板
-                  window.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
-                }}
+                onOpenSettings={onOpenSettings}
               />
             )}
 
@@ -1729,7 +1741,6 @@ export default function VideoSplitDialog({
                       ref={timelineScrollRef}
                       className={`relative overflow-x-scroll overflow-y-hidden rounded-none bg-white/5 custom-scrollbar ${state === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
                       style={{ height: 96 }}
-                      onWheel={state === 'processing' ? undefined : handleTimelineWheel}
                     >
                       {/* 刻度：在时间轴上方 */}
                       <div
@@ -1963,7 +1974,7 @@ export default function VideoSplitDialog({
                       </div>
                       <p className="text-sm text-slate-300 mb-1 font-medium">{currentPhase}</p>
                       <p className="text-xs text-slate-500 mb-3">
-                        {mode === 'aliyun' ? '阿里云智能拆条' : '本地镜头检测'}
+                        {mode === 'aliyun' ? '阿里云智能拆条' : '快速镜头检测'}
                         {detectedShots > 0 && ` · 已识别 ${detectedShots} 个镜头`}
                       </p>
                       <button
@@ -1989,7 +2000,7 @@ export default function VideoSplitDialog({
                       <div className="flex items-center gap-3 text-left">
                         <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-5 h-5'} text-violet-400`} />
                         <div>
-                          <div className="text-sm font-medium text-white">AI 智能拆条</div>
+                          <div className="text-sm font-medium text-white">智能拆条</div>
                           <div className="text-xs text-slate-400 mt-0.5">
                             自动识别镜头切换点，生成后可手动微调
                           </div>
@@ -2006,8 +2017,8 @@ export default function VideoSplitDialog({
                             {[
                               {
                                 id: 'ai_frame' as const,
-                                name: '本地镜头检测',
-                                description: '基于画面变化在本地快速检测镜头切换，无需联网上传视频',
+                                name: '快速镜头检测（免费）',
+                                description: '基于 FFmpeg 场景变化检测算法，在服务器端分析画面切换点',
                                 cost: '免费',
                                 accuracy: '良好',
                                 speed: '约 5-15 秒',
@@ -2068,6 +2079,14 @@ export default function VideoSplitDialog({
                             <p className="text-xs text-amber-200">
                               注意：AI 拆条将覆盖当前已手动添加的 {splitPoints.length} 个分割点
                             </p>
+                          </div>
+                        )}
+                        {aiError && (
+                          <div className="mt-3">
+                            <AiErrorGuide
+                              error={aiError}
+                              onOpenSettings={onOpenSettings}
+                            />
                           </div>
                         )}
                         <button

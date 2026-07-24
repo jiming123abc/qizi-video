@@ -2727,10 +2727,25 @@ async function processVideoSplitAIFrame(taskId, videoUrl, params, settings) {
       output: { stage: 'downloading_video' }
     });
     
+    // 对 OSS 私有 URL 生成签名 URL（否则 fetch 私有视频会返回 403）
+    let downloadUrl = videoUrl;
+    if (isOSSConfigured && ossClient && videoUrl.includes('aliyuncs.com')) {
+      try {
+        const keyMatch = videoUrl.match(/aliyuncs\.com\/([^?]+)/);
+        if (keyMatch) {
+          const ossKey = decodeURIComponent(keyMatch[1]);
+          downloadUrl = ossClient.signatureUrl(ossKey, { expires: 3600 });
+          console.log(`[AI] 视频 OSS URL 已签名，用于本地下载`);
+        }
+      } catch (e) {
+        console.warn('[AI] 视频 URL 签名失败，使用原始 URL:', e.message);
+      }
+    }
+    
     // 1. 下载视频到本地临时文件
     const tempVideoPath = path.join(os.tmpdir(), `qizi_temp_split_${taskId}.mp4`);
     try {
-      const response = await fetch(videoUrl);
+      const response = await fetch(downloadUrl);
       if (!response.ok) throw new Error(`下载视频失败: HTTP ${response.status}`);
       const arrayBuffer = await response.arrayBuffer();
       fs.writeFileSync(tempVideoPath, Buffer.from(arrayBuffer));
@@ -2925,18 +2940,23 @@ async function createShotsFromSplitData(taskId, videoUrl, shots, params, videoSi
  */
 function detectSceneChanges(videoPath, threshold = 0.2) {
   const { spawn } = require('child_process');
-  const ffmpegBin = systemFfmpeg || require('ffmpeg-static');
+  // 场景检测需要完整的 ffmpeg（含 scene 滤镜和 null muxer），
+  // 系统 ffmpeg 可能是精简版（如 TRAE 内置版），强制使用 ffmpeg-static
+  const ffmpegBin = require('ffmpeg-static');
+  const isWindows = process.platform === 'win32';
 
   return new Promise((resolve, reject) => {
     const args = [
       '-i', videoPath,
+      '-an',
       '-vf', `select='gt(scene\\,${threshold})',showinfo`,
       '-fps_mode', 'vfr',
       '-f', 'null',
-      '-'
+      isWindows ? 'NUL' : '/dev/null'
     ];
 
-    console.log(`[AI] 开始场景检测: threshold=${threshold}, video=${videoPath}`);
+    console.log(`[AI] 开始场景检测: threshold=${threshold}, video=${videoPath}, ffmpeg=${ffmpegBin}`);
+    console.log(`[AI] ffmpeg args: ${args.join(' ')}`);
     const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     const timestamps = [];
@@ -2951,7 +2971,6 @@ function detectSceneChanges(videoPath, threshold = 0.2) {
         if (match) {
           const t = parseFloat(match[1]);
           timestamps.push(t);
-          console.log(`[AI] 检测到切换点: ${t.toFixed(2)}s`);
         }
       }
     });
@@ -2963,14 +2982,19 @@ function detectSceneChanges(videoPath, threshold = 0.2) {
         console.log(`[AI] 场景检测完成: 检测到 ${sorted.length} 个切换点 (threshold=${threshold})`);
         resolve(sorted);
       } else {
-        // 检查是否有错误信息
-        const errMatch = stderr.match(/Error|error|Invalid/);
-        if (errMatch) {
-          reject(new Error(`ffmpeg 场景检测失败: ${stderr.slice(-500)}`));
-        } else {
-          // 没有检测到切换点也是正常结果
-          resolve([]);
-        }
+        // 查找真正的错误行（不含 showinfo 输出）
+        const errorLines = stderr.split('\n').filter(line =>
+          line.trim() &&
+          !line.includes('Parsed_showinfo') &&
+          !line.includes('frame=') &&
+          !line.includes('size=') &&
+          !line.includes('bitrate=') &&
+          !line.includes('speed=') &&
+          !line.startsWith('[')
+        );
+        const errorMsg = errorLines.length > 0 ? errorLines.join('; ') : stderr.slice(-500);
+        console.error(`[AI] ffmpeg 场景检测失败 exit=${code}: ${errorMsg}`);
+        reject(new Error(`ffmpeg 场景检测失败: ${errorMsg}`));
       }
     });
 

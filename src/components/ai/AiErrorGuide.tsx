@@ -11,6 +11,20 @@ export interface ErrorGuide {
 export function analyzeAiError(errorMsg: string): ErrorGuide {
   const msg = errorMsg.toLowerCase();
 
+  if (msg.includes('videorecog') || msg.includes('regionid') || msg.includes('authorizefileupload') || msg.includes('未开通') || msg.includes('not activated') || msg.includes('ram')) {
+    return {
+      type: 'api_key',
+      title: '阿里云配置问题',
+      suggestions: [
+        '请确认阿里云账号已开通「视觉智能开放平台」服务',
+        '确认 AccessKey 拥有 videorecog 服务的调用权限',
+        '检查阿里云账号是否欠费或额度不足',
+        '在服务端环境变量中配置正确的 ALIYUN_ACCESS_KEY_ID 和 ALIYUN_ACCESS_KEY_SECRET',
+      ],
+      showSettingsButton: false,
+    };
+  }
+
   if (msg.includes('api key') || msg.includes('apikey') || msg.includes('401') || msg.includes('unauthorized') || msg.includes('未配置') || msg.includes('无效') || msg.includes('accesskey') || msg.includes('access key')) {
     return {
       type: 'api_key',
@@ -20,19 +34,6 @@ export function analyzeAiError(errorMsg: string): ErrorGuide {
         '确认 AccessKey ID 和 AccessKey Secret 没有拼写错误或多余空格',
         '确认 AccessKey 仍在有效期内，并拥有视频智能（videorecog）服务权限',
         '确认阿里云账号已开通视觉智能开放平台服务',
-      ],
-      showSettingsButton: true,
-    };
-  }
-
-  if (msg.includes('videorecog') || msg.includes('regionid') || msg.includes('authorizefileupload') || msg.includes('未开通') || msg.includes('not activated') || msg.includes('ram')) {
-    return {
-      type: 'api_key',
-      title: '阿里云配置问题',
-      suggestions: [
-        '请确认阿里云账号已开通「视觉智能开放平台」服务',
-        '确认 AccessKey 拥有 videorecog 服务的调用权限',
-        '检查阿里云账号是否欠费或额度不足',
       ],
       showSettingsButton: true,
     };
@@ -48,6 +49,30 @@ export function analyzeAiError(errorMsg: string): ErrorGuide {
         '确认该模型是否支持当前功能',
       ],
       showSettingsButton: true,
+    };
+  }
+
+  if (msg.includes('视频下载失败') || msg.includes('下载视频失败')) {
+    return {
+      type: 'network',
+      title: '视频下载失败',
+      suggestions: [
+        '请检查视频文件是否存在且可访问',
+        '确认网络连接正常',
+        '如视频文件过大，建议先压缩后再处理',
+      ],
+    };
+  }
+
+  if (msg.includes('ffmpeg') || msg.includes('视频处理失败') || msg.includes('场景检测失败')) {
+    return {
+      type: 'unknown',
+      title: '视频处理失败',
+      suggestions: [
+        '视频文件可能已损坏，请尝试重新上传',
+        '确认视频格式为常见格式（MP4、MOV 等）',
+        '尝试使用阿里云智能拆条功能',
+      ],
     };
   }
 

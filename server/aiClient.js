@@ -39,6 +39,8 @@ const MODEL_PRICES = {
  */
 function friendlyAiError(err) {
   const msg = (err && err.message) || '';
+  if (msg.includes('视频下载失败') || msg.includes('下载视频失败')) return msg;
+  if (msg.includes('ffmpeg') || msg.includes('场景检测失败')) return '视频处理失败：' + msg;
   if (msg.includes('HTTP 429')) return 'AI 服务繁忙（请求过多），请稍后重试';
   if (msg.includes('HTTP 401') || msg.includes('HTTP 403')) return 'AI 服务鉴权失败，请检查 API Key 配置';
   if (msg.includes('HTTP 400')) return '请求参数错误：' + msg;

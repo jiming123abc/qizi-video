@@ -1996,6 +1996,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         initialVideos={initialVideosForSplit.length > 0 ? initialVideosForSplit : undefined}
         source={videoSplitSource}
         shotId={videoSplitShotId}
+        onOpenSettings={() => setShowSettingsDialog(true)}
         onClose={() => {
           setShowVideoSplitDialog(false);
           setSelectedVideoForSplit(null);
