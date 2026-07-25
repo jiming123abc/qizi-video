@@ -120,6 +120,21 @@ export default function AIScriptDialog({
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
 
+  // 阻止页面滚动
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [isOpen]);
+
   // 重置状态
   const resetState = useCallback(() => {
     setState('initial');
@@ -626,8 +641,8 @@ export default function AIScriptDialog({
   const estimatedFee = estimateCost(shotCount);
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4">
-      <div className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] bg-slate-900 rounded-none sm:rounded-2xl sm:rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[100dvh] sm:max-h-[85vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4 flex items-center justify-center">
+      <div className="w-full max-w-lg w-[calc(100%-2rem)] bg-slate-900 rounded-3xl border border-white/10 p-4 sm:p-6 shadow-2xl max-h-[100dvh] sm:max-h-[85vh] overflow-hidden flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-4 sm:mb-6 shrink-0">
           <h2 className="text-lg font-semibold text-white">AI 自动生成分镜</h2>

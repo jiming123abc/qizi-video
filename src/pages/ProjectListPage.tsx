@@ -952,8 +952,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
       {/* 新建项目弹窗 */}
       {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => !createLoading && setShowCreateModal(false)}>
-          <div className="w-full sm:max-w-md sm:w-[calc(100%-2rem)] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[100dvh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => !createLoading && setShowCreateModal(false)}>
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-lg font-semibold">新建项目</h2>
               <button onClick={() => setShowCreateModal(false)} className="w-9 h-9 rounded-full hover:bg-white/10 flex items-center justify-center">

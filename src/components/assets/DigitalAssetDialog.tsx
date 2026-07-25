@@ -83,6 +83,21 @@ export default function DigitalAssetDialog({
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
 
+  // 阻止页面滚动
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [isOpen]);
+
   // 加载资产列表
   useEffect(() => {
     if (isOpen) {
@@ -367,11 +382,11 @@ export default function DigitalAssetDialog({
 
   return (
     <>
-    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4 transition-opacity duration-200 ${
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4 transition-opacity duration-200 flex items-center justify-center ${
       aiImageDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
     }`} onClick={onClose}>
       <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-4xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[90vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="w-full max-w-4xl w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[90vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -810,6 +825,20 @@ function AssetManageDialog({
 }: AssetManageDialogProps) {
   useEscapeKey(onClose, !!asset);
 
+  useEffect(() => {
+    if (asset) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [asset]);
+
   if (!asset) return null;
 
   const images = asset.images || [];
@@ -817,9 +846,9 @@ function AssetManageDialog({
   const canAddImage = images.length < maxImages;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[65] p-0 sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[65] p-4 flex items-center justify-center" onClick={onClose}>
       <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
+        className="w-full max-w-lg w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

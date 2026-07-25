@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { X, Server, Monitor, Hand, AlertTriangle, Cloud, FileVideo } from 'lucide-react';
 import type { UploadDecision } from '../../lib/ossUtils';
 import type { FileCompressionInfo } from '../../hooks/useUpload';
@@ -22,6 +22,20 @@ export function VideoCompressionDialog({
   aliyunConfigured = false,
   onSelect,
 }: VideoCompressionDialogProps) {
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [isOpen]);
+
   if (!isOpen || !decision) return null;
 
   const canServerCompress = decision.fileSizeMBNum <= 95;
@@ -34,9 +48,9 @@ export function VideoCompressionDialog({
   const isMultiple = compressionFiles.length > 1;
 
   return (
-    <div className="fixed inset-0 z-[70] p-0 sm:p-4 bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[70] p-4 bg-black/60 backdrop-blur-sm flex items-center justify-center">
       <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] bg-[#1a1530] border border-white/10 sm:rounded-2xl rounded-none shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-lg w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] bg-[#1a1530] border border-white/10 rounded-3xl shadow-2xl overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 shrink-0">

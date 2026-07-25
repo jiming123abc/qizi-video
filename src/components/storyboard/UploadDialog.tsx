@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Image as ImageIcon, X } from 'lucide-react';
 import type { UploadDecision } from '../../lib/ossUtils';
 import type { FileCompressionInfo } from '../../hooks/useUpload';
@@ -44,6 +44,20 @@ export function UploadDialog({
   onRetryFailed,
   maxFiles = 100,
 }: UploadDialogProps) {
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const isUploading = uploadingFiles.some(f => f.status === 'uploading');
@@ -77,9 +91,9 @@ export function UploadDialog({
 
   return (
     <>
-      <div className={`fixed inset-0 z-[60] p-0 sm:p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={handleBackdropClick}>
+      <div className={`fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 flex items-center justify-center ${pendingCompressionVideo !== null ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} onClick={handleBackdropClick}>
         <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-xl sm:w-[calc(100%-2rem)] min-h-[420px] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden p-6"
+        className="w-full max-w-xl w-[calc(100%-2rem)] min-h-[420px] max-h-[100dvh] sm:max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl flex flex-col shadow-2xl overflow-hidden p-6"
         onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-5 shrink-0">
             <div>

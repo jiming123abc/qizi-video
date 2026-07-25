@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
+import { useEffect } from 'react';
 
 interface DialogProps {
   open: boolean;
@@ -12,15 +13,29 @@ interface DialogProps {
 }
 
 export function Dialog({ open, onClose, title, children, maxWidth = 'max-w-sm', showClose = true, maxHeight = 'max-h-[85vh]' }: DialogProps) {
+  useEffect(() => {
+    if (open) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [open]);
+
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[60] p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm flex items-center justify-center"
       onClick={onClose}
     >
       <div
-          className={`absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:${maxWidth} sm:${maxHeight} sm:rounded-3xl rounded-none border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl overflow-hidden flex flex-col`}
+          className={`w-full ${maxWidth} ${maxHeight} rounded-3xl border border-white/10 bg-slate-900/95 backdrop-blur-xl p-6 shadow-2xl overflow-hidden flex flex-col`}
           onClick={(e) => e.stopPropagation()}
         >
         {title && (

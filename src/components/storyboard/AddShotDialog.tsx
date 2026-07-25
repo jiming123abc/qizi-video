@@ -122,7 +122,17 @@ export default function AddShotDialog({
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    }
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
   }, [isOpen, onClose]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -208,11 +218,11 @@ export default function AddShotDialog({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4"
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4 flex items-center justify-center"
       onClick={onClose}
     >
       <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-lg sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl rounded-none border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
+        className="w-full max-w-lg max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >

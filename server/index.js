@@ -142,7 +142,10 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   : [
       'https://video.qiziwenhua.top',
       'https://qiziwenhua.top',
-      'https://www.qiziwenhua.top'
+      'https://www.qiziwenhua.top',
+      'https://video.qingyungongxiang.com',
+      'https://qingyungongxiang.com',
+      'https://www.qingyungongxiang.com'
     ];
 
 // P4-6：CORS 收紧——无 Origin 头时仅放行读操作（GET/HEAD/OPTIONS），

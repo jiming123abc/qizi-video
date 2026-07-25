@@ -177,6 +177,21 @@ export default function MediaManagerDialog({
   // Escape 键关闭对话框
   useEscapeKey(onClose, isOpen);
 
+  // 阻止页面滚动
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [isOpen]);
+
   const updateMediaOrder = (newList: ShotMedia[]) => {
     const updated = newList.map((m, idx) => ({ ...m, sortOrder: idx }));
     setMediaList(updated);
@@ -360,11 +375,11 @@ export default function MediaManagerDialog({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-0 sm:p-4 transition-opacity duration-200 ${
+    <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] p-4 transition-opacity duration-200 flex items-center justify-center ${
       childDialogOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'
     }`} onClick={onClose}>
       <div
-        className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:max-w-2xl sm:w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] sm:rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
+        className="w-full max-w-2xl w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] rounded-3xl border border-white/10 bg-slate-900 flex flex-col shadow-2xl overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
