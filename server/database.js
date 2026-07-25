@@ -863,25 +863,25 @@ const projects = {
 
     // 2. shot_media（按 url 去重，排除已在 videos 中统计的 url）
     const shotMediaSizeRows = await storyboardAsync.all(
-      `SELECT v.projectId, SUM(s) as totalSize FROM (
+      `SELECT projectId, SUM(s) as totalSize FROM (
         SELECT v.projectId, m.url, MAX(m.size) as s
         FROM shot_media m JOIN videos v ON m.shotId = v.id
         WHERE v.deleted = 0 AND m.url IS NOT NULL AND m.url != ''
           AND m.url NOT IN (SELECT url FROM videos WHERE projectId = v.projectId AND deleted = 0 AND url IS NOT NULL AND url != '')
         GROUP BY v.projectId, m.url
-      ) GROUP BY v.projectId`
+      ) GROUP BY projectId`
     );
     const shotMediaSizeMap = new Map();
     shotMediaSizeRows.forEach(r => shotMediaSizeMap.set(r.projectId, r.totalSize || 0));
 
     // 3. 数字资产图（按 url 去重）
     const assetImgSizeRows = await storyboardAsync.all(
-      `SELECT da.projectId, SUM(s) as totalSize FROM (
+      `SELECT projectId, SUM(s) as totalSize FROM (
         SELECT da.projectId, dai.imageUrl as url, MAX(dai.size) as s
         FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
         WHERE dai.imageUrl IS NOT NULL AND dai.imageUrl != ''
         GROUP BY da.projectId, dai.imageUrl
-      ) GROUP BY da.projectId`
+      ) GROUP BY projectId`
     );
     const assetImgSizeMap = new Map();
     assetImgSizeRows.forEach(r => assetImgSizeMap.set(r.projectId, r.totalSize || 0));
