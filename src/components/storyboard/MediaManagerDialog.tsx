@@ -23,8 +23,12 @@ function MediaThumb({ media, signedUrls }: { media: ShotMedia; signedUrls: Recor
   const [hasError, setHasError] = useState(false);
   const isVideo = media.type === 'video';
 
+  // 封面图时间添加 0.05 秒偏移，避免截到上一镜头的尾帧（与 ShotCard/VideoSplitDialog 保持一致）
+  const shotStartTime = media.startTime || 0;
+  const shotEndTime = shotStartTime + (media.duration || 0);
+  const thumbTime = Math.min(shotStartTime + 0.05, Math.max(shotEndTime - 0.01, shotStartTime));
   const thumbUrl = isVideo && media.url
-    ? getVideoPoster(media.url, media.startTime)
+    ? getVideoPoster(media.url, thumbTime)
     : (media.url ? signedUrls[media.url] : undefined);
 
   return (

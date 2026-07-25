@@ -316,7 +316,6 @@ async function splitVideo(videoUrl, options = {}) {
 }
 
 function parseSplitResult(result) {
-  const shots = [];
   const themeSegments = [];
 
   // 提取元素的时间字段（兼容大小写）
@@ -334,26 +333,48 @@ function parseSplitResult(result) {
     return begin >= 0 && end > begin;
   };
 
+  // 判断数组的级别：shot（镜头级，细粒度）/ theme（主题级，粗粒度）
+  // 镜头级数组：key 含 shot/element/part，或元素 type 为空/shot
+  // 主题级数组：key 含 theme/scene/segment，或元素 type=common、by=multimodal
+  const classifyArray = (key, array) => {
+    const keyLower = (key || '').toLowerCase();
+    // 先看 key
+    if (keyLower.includes('shot') || keyLower.includes('element')) return 'shot';
+    if (keyLower.includes('theme') || keyLower.includes('scene') || keyLower.includes('segment')) return 'theme';
+    // key 含 part 时，需要看元素字段：type=common/by=multimodal 的是主题级
+    if (keyLower.includes('part')) {
+      const themeCount = array.filter(isTimeSegment).filter(e =>
+        getType(e) === 'common' || getBy(e) === 'multimodal'
+      ).length;
+      return themeCount > array.filter(isTimeSegment).length / 2 ? 'theme' : 'shot';
+    }
+    // key 无明确线索时，看元素字段
+    const validElems = array.filter(isTimeSegment);
+    const themeCount = validElems.filter(e =>
+      getType(e) === 'common' || getBy(e) === 'multimodal'
+    ).length;
+    return themeCount > validElems.length / 2 ? 'theme' : 'shot';
+  };
+
   // 递归查找对象中所有"包含时间段落元素的数组"
-  // 返回 [{ array, path, key }] 列表，按找到顺序
+  // 返回 [{ array, path, key, level }] 列表
   const findAllSegmentArrays = (obj, path = 'root') => {
     const found = [];
     if (!obj || typeof obj !== 'object') return found;
 
     if (Array.isArray(obj)) {
-      // 检查数组本身是否就是段落数组
       const validCount = obj.filter(isTimeSegment).length;
       if (validCount > 0 && validCount >= obj.length / 2) {
-        found.push({ array: obj, path, key: path.split('.').pop() });
+        const key = path.split('.').pop().replace(/\[\d+\]$/, '');
+        const level = classifyArray(key, obj);
+        found.push({ array: obj, path, key, level });
       }
-      // 同时递归每个元素
       obj.forEach((item, i) => {
         found.push(...findAllSegmentArrays(item, `${path}[${i}]`));
       });
       return found;
     }
 
-    // 普通对象：递归每个字段
     for (const key of Object.keys(obj)) {
       found.push(...findAllSegmentArrays(obj[key], path === 'root' ? key : `${path}.${key}`));
     }
@@ -365,27 +386,32 @@ function parseSplitResult(result) {
     result && typeof result === 'object' ? '顶层keys:' + Object.keys(result).join(',') : '');
 
   const allArrays = findAllSegmentArrays(result);
-  console.log('[Aliyun] 找到段落数组数量:', allArrays.length,
-    allArrays.map(a => `path=${a.path}, len=${a.array.length}`).join(' | '));
+  const shotLevelArrays = allArrays.filter(a => a.level === 'shot');
+  const themeLevelArrays = allArrays.filter(a => a.level === 'theme');
+  console.log('[Aliyun] 段落数组统计: 总数=', allArrays.length,
+    '镜头级=', shotLevelArrays.length, '主题级=', themeLevelArrays.length);
+  console.log('[Aliyun] 段落数组详情:',
+    allArrays.map(a => `path=${a.path}, len=${a.array.length}, level=${a.level}`).join(' | '));
+
+  // 优先使用镜头级数组；若没有镜头级，才用主题级
+  // 这避免了"外层主题段落 + 内层镜头段落"被同时收录导致的数据重复
+  const targetArrays = shotLevelArrays.length > 0 ? shotLevelArrays : themeLevelArrays;
+  const usedLevel = shotLevelArrays.length > 0 ? 'shot' : 'theme';
 
   // 去重：同一个数组对象只处理一次
   const processedArrays = new Set();
-  for (const { array, path, key } of allArrays) {
+  const rawShots = [];
+  for (const { array, key } of targetArrays) {
     if (processedArrays.has(array)) continue;
     processedArrays.add(array);
 
-    // 根据路径/key 和元素字段判断类型
-    // type=common/by=multimodal 通常代表主题段落；其余视为镜头
     array.forEach((elem, index) => {
       if (!isTimeSegment(elem)) return;
       const begin = getBegin(elem);
       const end = getEnd(elem);
       const typeStr = getType(elem);
       const byStr = getBy(elem);
-      const isTheme = key.toLowerCase().includes('theme') ||
-                      key.toLowerCase().includes('scene') ||
-                      key.toLowerCase().includes('segment') ||
-                      key.toLowerCase().includes('part') ||
+      const isTheme = usedLevel === 'theme' ||
                       typeStr === 'common' ||
                       byStr === 'multimodal';
 
@@ -397,13 +423,14 @@ function parseSplitResult(result) {
         theme: getTheme(elem),
         by: byStr
       };
-      shots.push(seg);
+      rawShots.push(seg);
       if (isTheme) themeSegments.push(seg);
     });
   }
 
-  // 兜底：如果递归没找到，尝试常见 key（保持向后兼容）
-  if (shots.length === 0) {
+  // 兜底：如果分级逻辑没命中，尝试常见 key（保持向后兼容）
+  if (rawShots.length === 0) {
+    console.log('[Aliyun] 分级逻辑未命中，回退到兜底 key 查找');
     const findArray = (obj, candidates) => {
       for (const k of candidates) {
         if (obj && Array.isArray(obj[k]) && obj[k].length > 0) return obj[k];
@@ -418,7 +445,7 @@ function parseSplitResult(result) {
         const begin = getBegin(elem);
         const end = getEnd(elem);
         if (begin >= 0 && end > begin) {
-          shots.push({
+          rawShots.push({
             index: index + 1,
             beginTime: begin,
             endTime: end,
@@ -430,13 +457,28 @@ function parseSplitResult(result) {
     }
   }
 
-  shots.sort((a, b) => a.beginTime - b.beginTime);
+  // 时间段去重：按 beginTime 排序后，相邻两个 shot 若 begin/end 都接近（< 0.5 秒），视为重复
+  // 这处理了"同一数组被不同路径重复收录"或"嵌套结构下父子段落重叠"的情况
+  const sortedShots = rawShots.sort((a, b) => a.beginTime - b.beginTime);
+  const shots = [];
+  for (const s of sortedShots) {
+    const last = shots[shots.length - 1];
+    if (last &&
+        Math.abs(s.beginTime - last.beginTime) < 0.5 &&
+        Math.abs(s.endTime - last.endTime) < 0.5) {
+      continue; // 跳过重复段落
+    }
+    shots.push(s);
+  }
+
+  console.log('[Aliyun] parseSplitResult 输出: 使用级别=', usedLevel,
+    '去重前=', rawShots.length, '去重后=', shots.length,
+    'theme=', themeSegments.length);
+  console.log('[Aliyun] 前3个镜头:', shots.slice(0, 3).map(s =>
+    `[${s.beginTime}-${s.endTime}] type=${s.type}`).join(' '));
+
   // 重新编号
   shots.forEach((s, i) => { s.index = i + 1; });
-
-  console.log('[Aliyun] parseSplitResult 输出: shots=', shots.length,
-    'theme=', themeSegments.length,
-    shots.slice(0, 3).map(s => `[${s.beginTime}-${s.endTime}]`).join(' '));
 
   return {
     shots: shots,

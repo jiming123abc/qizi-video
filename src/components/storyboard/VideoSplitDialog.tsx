@@ -107,8 +107,6 @@ export default function VideoSplitDialog({
   const [error, setError] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [shotThumbnails, setShotThumbnails] = useState<Record<string, string>>({});
-  const [generatingThumbs, setGeneratingThumbs] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
   // 根据后端 stage 映射前端提示文字
@@ -134,9 +132,6 @@ export default function VideoSplitDialog({
   }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const thumbVideoRef = useRef<HTMLVideoElement>(null);
-  const thumbCanvasRef = useRef<HTMLCanvasElement>(null);
-  const canvasRef = thumbCanvasRef;
   const timelineRef = useRef<HTMLDivElement>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -147,6 +142,8 @@ export default function VideoSplitDialog({
   const [selectedSplitPoint, setSelectedSplitPoint] = useState<string | null>(null);
   const [aliyunConfigured, setAliyunConfigured] = useState(false);
   const [aiMode, setAiMode] = useState<'ai_frame' | 'aliyun'>('ai_frame');
+  // FFmpeg 场景检测敏感度：high=0.15（多检出）/ medium=0.3（平衡）/ low=0.5（少检出）
+  const [sensitivity, setSensitivity] = useState<'high' | 'medium' | 'low'>('medium');
   // AI 模型选择
 
   const [zoom, setZoom] = useState(1);
@@ -795,11 +792,6 @@ export default function VideoSplitDialog({
     if (videoRef.current) {
       videoRef.current.pause();
     }
-    if (thumbVideoRef.current) {
-      thumbVideoRef.current.pause();
-      thumbVideoRef.current.removeAttribute('src');
-      thumbVideoRef.current.load();
-    }
     setSelectedVideoId(videoId);
     resetSplitState();
   };
@@ -843,7 +835,6 @@ export default function VideoSplitDialog({
     setEstimatedCost(0);
     setError(null);
     setTaskId(null);
-    setShotThumbnails({});
     setVideoDuration(0);
     setCurrentTime(0);
     setIsPlaying(false);
@@ -1340,54 +1331,51 @@ export default function VideoSplitDialog({
     }
   }, []);
 
-  const handleStartSplit = async (overrideMode?: SplitMode) => {
-    const effectiveMode = overrideMode || mode;
+  const handleStartSplit = () => {
+    if (!currentVideoUrl || splitPoints.length === 0) return;
+
+    const shots: SplitShot[] = (() => {
+      const result: SplitShot[] = [];
+      const times = [0, ...splitPoints.map(p => p.time), videoDuration].sort((a, b) => a - b);
+      for (let i = 0; i < times.length - 1; i++) {
+        const startTime = times[i];
+        const endTime = times[i + 1];
+        if (endTime - startTime >= MIN_SHOT_DURATION) {
+          result.push({
+            startTime,
+            endTime,
+            index: result.length
+          });
+        }
+      }
+      if (result.length === 0) {
+        result.push({ startTime: 0, endTime: videoDuration, index: 0 });
+      }
+      return result;
+    })();
+
+    setPreviewShots(shots);
+    setState('preview');
+  };
+
+  const handleStartAIAnalysis = async () => {
     if (!currentVideoUrl) return;
 
-    // 手动模式：直接基于当前分割点生成分割结果预览，不调用后端 API
-    if (effectiveMode === 'manual') {
-      const shots: SplitShot[] = splitPoints.length > 0
-        ? (() => {
-            const result: SplitShot[] = [];
-            const times = [0, ...splitPoints.map(p => p.time), videoDuration].sort((a, b) => a - b);
-            for (let i = 0; i < times.length - 1; i++) {
-              const startTime = times[i];
-              const endTime = times[i + 1];
-              if (endTime - startTime >= MIN_SHOT_DURATION) {
-                result.push({
-                  startTime,
-                  endTime,
-                  index: result.length
-                });
-              }
-            }
-            if (result.length === 0) {
-              result.push({ startTime: 0, endTime: videoDuration, index: 0 });
-            }
-            return result;
-          })()
-        : [{ startTime: 0, endTime: videoDuration, index: 0 }];
-      setShotThumbnails({});
-      setPreviewShots(shots);
-      setState('preview');
-      return;
-    }
-
-    // AI 模式：调用后端 API
+    setMode(aiMode);
     setError(null);
     setAiError(null);
     setState('processing');
     setProgress(5);
-    const actualMode = effectiveMode === 'aliyun' ? 'aliyun' : 'ai_frame';
+    const actualMode = aiMode === 'aliyun' ? 'aliyun' : 'ai_frame';
     setCurrentPhase(actualMode === 'aliyun' ? '正在上传视频到阿里云分析服务...' : '正在服务器端分析镜头切换点...');
 
     try {
-      
       const body: {
         videoUrl: string;
         projectId: number;
         mode: string;
         sceneId?: number | null;
+        sensitivity?: 'high' | 'medium' | 'low';
       } = {
         videoUrl: currentVideoRawUrl,
         projectId,
@@ -1396,6 +1384,10 @@ export default function VideoSplitDialog({
 
       if (sceneId !== undefined && sceneId !== null) {
         body.sceneId = sceneId;
+      }
+
+      if (actualMode === 'ai_frame') {
+        body.sensitivity = sensitivity;
       }
 
       const res = await fetch('/api/ai/split-video', {
@@ -1425,73 +1417,6 @@ export default function VideoSplitDialog({
       setState('initial');
     }
   };
-
-  const generateThumbnail = (time: number): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const video = thumbVideoRef.current;
-      const canvas = thumbCanvasRef.current;
-      if (!video || !canvas) {
-        reject(new Error('video or canvas not available'));
-        return;
-      }
-
-      const handleSeeked = () => {
-        try {
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            reject(new Error('canvas context not available'));
-            return;
-          }
-          canvas.width = 160;
-          canvas.height = 90;
-          ctx.drawImage(video, 0, 0, 160, 90);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-          video.removeEventListener('seeked', handleSeeked);
-          resolve(dataUrl);
-        } catch (e) {
-          video.removeEventListener('seeked', handleSeeked);
-          reject(e);
-        }
-      };
-
-      video.addEventListener('seeked', handleSeeked);
-      video.currentTime = Math.min(time, video.duration - 0.1);
-    });
-  };
-
-  const generateAllThumbnails = useCallback(async () => {
-    if (!thumbVideoRef.current) return;
-    // 有 previewShots 时用 previewShots 的 startTime，否则用 splitPoints
-    const times = previewShots.length > 0
-      ? previewShots.map(s => s.startTime)
-      : [0, ...splitPoints.map(p => p.time)];
-    if (times.length === 0) return;
-
-    setGeneratingThumbs(true);
-    const thumbs: Record<string, string> = {};
-
-    try {
-      for (let i = 0; i < times.length; i++) {
-        try {
-          const thumb = await generateThumbnail(times[i]);
-          thumbs[`shot_${i}`] = thumb;
-        } catch (e) {
-          console.warn('生成缩略图失败:', times[i], e);
-        }
-      }
-      setShotThumbnails(thumbs);
-    } finally {
-      setGeneratingThumbs(false);
-    }
-  }, [splitPoints, previewShots]);
-
-  useEffect(() => {
-    if (videoDuration > 0 && currentVideoUrl &&
-        (state === 'completed' || state === 'preview') &&
-        (splitPoints.length > 0 || previewShots.length > 0)) {
-      generateAllThumbnails();
-    }
-  }, [state, videoDuration, splitPoints, previewShots, generateAllThumbnails, currentVideoUrl]);
 
   const handleCancel = () => {
     if (pollIntervalRef.current) {
@@ -1822,16 +1747,14 @@ export default function VideoSplitDialog({
                           <Trash2 className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
                           {isMobile ? '清除全部' : '清除全部'}
                         </button>
-                        {mode === 'manual' && (
-                          <button
-                            onClick={handleStartSplit}
-                            disabled={splitPoints.length === 0}
-                            className={`flex items-center justify-center gap-2 ${isMobile ? 'w-full py-3 text-base' : 'px-4 py-2 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
-                          >
-                            <Scissors className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
-                            开始分割
-                          </button>
-                        )}
+                        <button
+                          onClick={handleStartSplit}
+                          disabled={splitPoints.length === 0}
+                          className={`flex items-center justify-center gap-2 ${isMobile ? 'w-full py-3 text-base' : 'px-4 py-2 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
+                        >
+                          <Scissors className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
+                          开始分割
+                        </button>
                       </div>
 
                       <div className="space-y-1">
@@ -1886,10 +1809,8 @@ export default function VideoSplitDialog({
                       </div>
                       <div className={`grid gap-3 ${isMobile ? 'grid-cols-2 max-h-72' : 'grid-cols-3 max-h-80'} overflow-y-auto custom-scrollbar pr-1`}>
                         {previewShots.map((shot, idx) => {
-                          // 优先使用 canvas 生成的精确缩略图，回退到 OSS 截图
-                          const thumbKey = `shot_${idx}`;
-                          const posterUrl = shotThumbnails[thumbKey]
-                            || getVideoPoster(currentVideoRawUrl || '', shot.startTime);
+                          const thumbTime = Math.min(shot.startTime + 0.05, Math.max(shot.endTime - 0.01, shot.startTime));
+                          const posterUrl = getVideoPoster(currentVideoRawUrl || '', thumbTime);
                           const isPlaying = playingPreviewIndex === idx;
 
                           return (
@@ -1974,7 +1895,7 @@ export default function VideoSplitDialog({
                       </div>
                       <p className="text-sm text-slate-300 mb-1 font-medium">{currentPhase}</p>
                       <p className="text-xs text-slate-500 mb-3">
-                        {mode === 'aliyun' ? '阿里云智能拆条' : '快速镜头检测'}
+                        {mode === 'aliyun' ? '阿里云语义拆条' : '快速镜头检测'}
                         {detectedShots > 0 && ` · 已识别 ${detectedShots} 个镜头`}
                       </p>
                       <button
@@ -2000,7 +1921,7 @@ export default function VideoSplitDialog({
                       <div className="flex items-center gap-3 text-left">
                         <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-5 h-5'} text-violet-400`} />
                         <div>
-                          <div className="text-sm font-medium text-white">智能拆条</div>
+                          <div className="text-sm font-medium text-white">自动拆条</div>
                           <div className="text-xs text-slate-400 mt-0.5">
                             自动识别镜头切换点，生成后可手动微调
                           </div>
@@ -2018,18 +1939,18 @@ export default function VideoSplitDialog({
                               {
                                 id: 'ai_frame' as const,
                                 name: '快速镜头检测（免费）',
-                                description: '基于 FFmpeg 场景变化检测算法，在服务器端分析画面切换点',
+                                description: '基于 FFmpeg 场景变化检测算法，在服务器端逐帧分析画面切换点，精度更高',
                                 cost: '免费',
-                                accuracy: '良好',
+                                accuracy: '精准',
                                 speed: '约 5-15 秒',
                                 available: true
                               },
                               {
                                 id: 'aliyun' as const,
-                                name: '阿里云智能拆条',
-                                description: '基于阿里云视频理解能力进行专业级镜头拆分',
+                                name: '阿里云语义拆条',
+                                description: '基于阿里云视频理解能力进行语义级段落划分，适合内容索引',
                                 cost: '按实际调用量计费',
-                                accuracy: '精准',
+                                accuracy: '中等',
                                 speed: '约 1-3 分钟',
                                 available: aliyunConfigured
                               }
@@ -2073,11 +1994,40 @@ export default function VideoSplitDialog({
                             ))}
                           </div>
 
+                          {/* 敏感度选择器：仅快速镜头检测模式下显示 */}
+                          {aiMode === 'ai_frame' && (
+                            <div className="mt-3 pt-3 border-t border-slate-700">
+                              <div className="text-xs text-slate-400 mb-2">敏感度（检测阈值）：</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                {([
+                                  { id: 'high' as const, label: '高', desc: '多检出', hint: '可能误判' },
+                                  { id: 'medium' as const, label: '中', desc: '平衡', hint: '推荐' },
+                                  { id: 'low' as const, label: '低', desc: '少检出', hint: '可能漏判' }
+                                ]).map(opt => (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => setSensitivity(opt.id)}
+                                    disabled={state === 'processing'}
+                                    className={`px-2 py-2 rounded-lg border text-center transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                                      sensitivity === opt.id
+                                        ? 'border-violet-500 bg-violet-500/15 text-white'
+                                        : 'border-slate-700 bg-slate-800/50 text-slate-300 hover:border-slate-600'
+                                    }`}
+                                  >
+                                    <div className="text-sm font-medium">{opt.label}</div>
+                                    <div className="text-[10px] text-slate-400 mt-0.5">{opt.desc}</div>
+                                    <div className="text-[10px] text-slate-500">{opt.hint}</div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                         {splitPoints.length > 0 && (
                           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/20 mt-3">
                             <p className="text-xs text-amber-200">
-                              注意：AI 拆条将覆盖当前已手动添加的 {splitPoints.length} 个分割点
+                              注意：自动拆条将覆盖当前已手动添加的 {splitPoints.length} 个分割点
                             </p>
                           </div>
                         )}
@@ -2090,32 +2040,18 @@ export default function VideoSplitDialog({
                           </div>
                         )}
                         <button
-                          onClick={() => {
-                            const targetMode: SplitMode = aiMode;
-                            setMode(targetMode);
-                            handleStartSplit(targetMode);
-                          }}
+                          onClick={handleStartAIAnalysis}
                           disabled={state === 'processing'}
                           className={`w-full flex items-center justify-center gap-2 ${isMobile ? 'py-3 text-base' : 'py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium transition disabled:opacity-50 disabled:cursor-not-allowed mt-3`}
                         >
                           <Sparkles className={`${isMobile ? 'w-5 h-5' : 'w-4 h-4'}`} />
-                          开始智能分析
+                          开始自动分析
                         </button>
                       </>
                     )}
                   </div>
                 )}
 
-                <div className="hidden">
-                  <video
-                    ref={thumbVideoRef}
-                    src={currentVideoUrl}
-                    crossOrigin="anonymous"
-                    muted
-                    playsInline
-                  />
-                  <canvas ref={thumbCanvasRef} />
-                </div>
               </>
             )}
           </div>
@@ -2128,19 +2064,10 @@ export default function VideoSplitDialog({
           >
             取消
           </button>
-          {state === 'initial' && currentVideoUrl && (
-            <button
-              onClick={handleStartSplit}
-              disabled={mode === 'manual' && splitPoints.length === 0}
-              className={`${isMobile ? 'flex-1 py-3 text-base' : 'px-5 py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              开始分割
-            </button>
-          )}
-          {state === 'preview' && currentVideoUrl && (
+          {currentVideoUrl && (
             <button
               onClick={handleConfirmMarked}
-              disabled={previewShots.length === 0}
+              disabled={state !== 'preview' || previewShots.length === 0}
               className={`${isMobile ? 'flex-1 py-3 text-base' : 'px-5 py-2.5 text-sm'} rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               应用

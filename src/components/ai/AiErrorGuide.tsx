@@ -71,7 +71,7 @@ export function analyzeAiError(errorMsg: string): ErrorGuide {
       suggestions: [
         '视频文件可能已损坏，请尝试重新上传',
         '确认视频格式为常见格式（MP4、MOV 等）',
-        '尝试使用阿里云智能拆条功能',
+        '尝试使用阿里云语义拆条功能',
       ],
     };
   }

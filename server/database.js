@@ -840,83 +840,78 @@ const projects = {
     );
     if (projects.length === 0) return [];
 
-    // P4-8：5 个 GROUP BY 聚合查询替代 N+1（1+5N → 7）
-    // 1. 分镜主视频（videos 表，reference=0）
-    const videoStatsRows = await storyboardAsync.all(
-      `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
+    // 统计分镜数量
+    const shotCountRows = await storyboardAsync.all(
+      `SELECT projectId, COUNT(*) as cnt
        FROM videos WHERE deleted = 0 AND reference = 0
        GROUP BY projectId`
     );
-    const videoMap = new Map();
-    videoStatsRows.forEach(r => videoMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+    const shotCountMap = new Map();
+    shotCountRows.forEach(r => shotCountMap.set(r.projectId, r.cnt));
 
-    // 2. 项目参考文件（videos 表，reference=1）
-    const refStatsRows = await storyboardAsync.all(
-      `SELECT projectId, COUNT(*) as cnt, COALESCE(SUM(size),0) as totalSize
-       FROM videos WHERE deleted = 0 AND reference = 1
-       GROUP BY projectId`
+    // 统计存储占用（按 DISTINCT url 去重，避免同一文件被多次引用时重复计算）
+    // 1. videos 表（分镜 + 参考文件，按 url 去重）
+    const videoSizeRows = await storyboardAsync.all(
+      `SELECT projectId, SUM(s) as totalSize FROM (
+        SELECT projectId, MAX(size) as s FROM videos
+        WHERE deleted = 0 AND url IS NOT NULL AND url != ''
+        GROUP BY projectId, url
+      ) GROUP BY projectId`
     );
-    const refMap = new Map();
-    refStatsRows.forEach(r => refMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+    const videoSizeMap = new Map();
+    videoSizeRows.forEach(r => videoSizeMap.set(r.projectId, r.totalSize || 0));
 
-    // 3. 分镜参考画面（shot_media JOIN videos）
-    const shotMediaStatsRows = await storyboardAsync.all(
-      `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(m.size),0) as totalSize
-       FROM shot_media m JOIN videos v ON m.shotId = v.id
-       WHERE v.deleted = 0
-       GROUP BY v.projectId`
+    // 2. shot_media（按 url 去重，排除已在 videos 中统计的 url）
+    const shotMediaSizeRows = await storyboardAsync.all(
+      `SELECT v.projectId, SUM(s) as totalSize FROM (
+        SELECT v.projectId, m.url, MAX(m.size) as s
+        FROM shot_media m JOIN videos v ON m.shotId = v.id
+        WHERE v.deleted = 0 AND m.url IS NOT NULL AND m.url != ''
+          AND m.url NOT IN (SELECT url FROM videos WHERE projectId = v.projectId AND deleted = 0 AND url IS NOT NULL AND url != '')
+        GROUP BY v.projectId, m.url
+      ) GROUP BY v.projectId`
     );
-    const shotMediaMap = new Map();
-    shotMediaStatsRows.forEach(r => shotMediaMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+    const shotMediaSizeMap = new Map();
+    shotMediaSizeRows.forEach(r => shotMediaSizeMap.set(r.projectId, r.totalSize || 0));
 
-    // 4. 数字资产图（digital_asset_images JOIN digital_assets）
-    //    P3-26：digital_asset_images 现在存 size 字段，totalSize 用真实值
-    const assetImgStatsRows = await storyboardAsync.all(
-      `SELECT da.projectId, COUNT(*) as cnt, COALESCE(SUM(dai.size),0) as totalSize
-       FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
-       GROUP BY da.projectId`
+    // 3. 数字资产图（按 url 去重）
+    const assetImgSizeRows = await storyboardAsync.all(
+      `SELECT da.projectId, SUM(s) as totalSize FROM (
+        SELECT da.projectId, dai.imageUrl as url, MAX(dai.size) as s
+        FROM digital_asset_images dai JOIN digital_assets da ON dai.assetId = da.id
+        WHERE dai.imageUrl IS NOT NULL AND dai.imageUrl != ''
+        GROUP BY da.projectId, dai.imageUrl
+      ) GROUP BY da.projectId`
     );
-    const assetImgMap = new Map();
-    assetImgStatsRows.forEach(r => assetImgMap.set(r.projectId, { cnt: r.cnt, totalSize: r.totalSize }));
+    const assetImgSizeMap = new Map();
+    assetImgSizeRows.forEach(r => assetImgSizeMap.set(r.projectId, r.totalSize || 0));
 
-    // 5. AI 生图历史（ai_generated_images，按 shot/asset 维度关联到项目）
-    //    该查询涉及两个子查询（shot/asset），无法直接 GROUP BY projectId
-    //    分两次查询：shot 维度和 asset 维度分别聚合，再在内存合并
-    const aiHistShotRows = await storyboardAsync.all(
-      `SELECT v.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
-       FROM ai_generated_images a JOIN videos v ON a.ownerId = v.id
-       WHERE a.ownerType = 'shot' AND v.deleted = 0
-       GROUP BY v.projectId`
+    // 4. AI 生图历史（按 url 去重，排除已在上述来源中统计的）
+    const aiHistSizeRows = await storyboardAsync.all(
+      `SELECT projectId, SUM(s) as totalSize FROM (
+        SELECT v.projectId, a.url, MAX(a.fileSize) as s
+        FROM ai_generated_images a JOIN videos v ON a.ownerId = v.id
+        WHERE a.ownerType = 'shot' AND v.deleted = 0 AND a.url IS NOT NULL AND a.url != ''
+        GROUP BY v.projectId, a.url
+        UNION ALL
+        SELECT da.projectId, a.url, MAX(a.fileSize) as s
+        FROM ai_generated_images a JOIN digital_assets da ON a.ownerId = da.id
+        WHERE a.ownerType = 'asset' AND a.url IS NOT NULL AND a.url != ''
+        GROUP BY da.projectId, a.url
+      ) GROUP BY projectId`
     );
-    const aiHistAssetRows = await storyboardAsync.all(
-      `SELECT da.projectId, COUNT(*) as cnt, COALESCE(SUM(a.fileSize),0) as totalSize
-       FROM ai_generated_images a JOIN digital_assets da ON a.ownerId = da.id
-       WHERE a.ownerType = 'asset'
-       GROUP BY da.projectId`
-    );
-    const aiHistMap = new Map();
-    aiHistShotRows.forEach(r => {
-      const cur = aiHistMap.get(r.projectId) || { cnt: 0, totalSize: 0 };
-      aiHistMap.set(r.projectId, { cnt: cur.cnt + r.cnt, totalSize: cur.totalSize + r.totalSize });
-    });
-    aiHistAssetRows.forEach(r => {
-      const cur = aiHistMap.get(r.projectId) || { cnt: 0, totalSize: 0 };
-      aiHistMap.set(r.projectId, { cnt: cur.cnt + r.cnt, totalSize: cur.totalSize + r.totalSize });
-    });
+    const aiHistSizeMap = new Map();
+    aiHistSizeRows.forEach(r => aiHistSizeMap.set(r.projectId, r.totalSize || 0));
 
     // 合并到 projects
-    // P3-25：统计包含所有项目媒体（分镜主视频 + 参考文件 + 参考画面 + 数字资产图 + AI 生图历史）
     const result = projects.map(p => {
-      const v = videoMap.get(p.id) || { cnt: 0, totalSize: 0 };
-      const r = refMap.get(p.id) || { cnt: 0, totalSize: 0 };
-      const sm = shotMediaMap.get(p.id) || { cnt: 0, totalSize: 0 };
-      const ai = assetImgMap.get(p.id) || { cnt: 0, totalSize: 0 };
-      const ah = aiHistMap.get(p.id) || { cnt: 0, totalSize: 0 };
       return {
         ...p,
-        shotCount: v.cnt,
-        videoCount: v.cnt + r.cnt,
-        totalSize: v.totalSize + r.totalSize + sm.totalSize + ai.totalSize + ah.totalSize
+        shotCount: shotCountMap.get(p.id) || 0,
+        totalSize: (videoSizeMap.get(p.id) || 0)
+                  + (shotMediaSizeMap.get(p.id) || 0)
+                  + (assetImgSizeMap.get(p.id) || 0)
+                  + (aiHistSizeMap.get(p.id) || 0)
       };
     });
     return result;
@@ -978,7 +973,7 @@ const scenes = {
     );
     if (scenes.length === 0) return [];
 
-    // P4-8：一次 GROUP BY 聚合替代 N+1（1+N → 2）
+    // 一次 GROUP BY 聚合替代 N+1
     const statsRows = await storyboardAsync.all(
       `SELECT sceneId, COUNT(*) as cnt
        FROM videos WHERE sceneId IS NOT NULL AND deleted = 0 AND reference = 0
@@ -989,7 +984,7 @@ const scenes = {
 
     return scenes.map(s => ({
       ...s,
-      videoCount: statsMap.get(s.id) || 0
+      shotCount: statsMap.get(s.id) || 0
     }));
   },
   create: async ({ projectId, name }) => {
@@ -1002,7 +997,7 @@ const scenes = {
       'INSERT INTO scenes (projectId, name, sortOrder) VALUES (?, ?, ?)',
       [projectId, name, nextSort]
     );
-    return { id: result.lastID, projectId, name, sortOrder: nextSort, videoCount: 0 };
+    return { id: result.lastID, projectId, name, sortOrder: nextSort, shotCount: 0 };
   },
   update: async (id, { name, scrollPosition }) => {
     const fields = [];

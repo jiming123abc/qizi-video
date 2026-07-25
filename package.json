@@ -37,6 +37,7 @@
     "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-legacy": "^6.1.1",
     "autoprefixer": "^10.4.21",
+    "playwright": "^1.62.0",
     "tailwindcss": "^4.1.14",
     "terser": "^5.48.0",
     "tsx": "^4.21.0",

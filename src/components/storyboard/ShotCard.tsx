@@ -350,7 +350,11 @@ export function ShotCard({
 
   // 从父级传入的批量签名结果中获取签名 URL（参考项目列表页模式）
   const mediaUrl = currentMedia?.url || '';
-  const posterUrl = isVideo ? getVideoPoster(mediaUrl, currentMedia?.startTime) : '';
+  // 封面图时间添加 0.05 秒偏移，避免截到上一镜头的尾帧（与 VideoSplitDialog 预览逻辑保持一致）
+  const shotStartTime = currentMedia?.startTime || 0;
+  const shotEndTime = shotStartTime + (currentMedia?.duration || 0);
+  const thumbTime = Math.min(shotStartTime + 0.05, Math.max(shotEndTime - 0.01, shotStartTime));
+  const posterUrl = isVideo ? getVideoPoster(mediaUrl, thumbTime) : '';
   const signedMediaUrl = signedMediaUrls?.[mediaUrl] || mediaUrl;
   // poster URL 现在使用后端代理 /api/oss-snapshot，不需要 OSS 签名
   const signedPosterUrl = posterUrl;

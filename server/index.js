@@ -1668,7 +1668,7 @@ async function deleteAiGeneratedByOwner(ownerType, ownerId) {
 // AI 视频分割
 app.post('/api/ai/split-video', async (req, res) => {
   try {
-    const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration, provider, model } = req.body;
+    const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration, provider, model, sensitivity } = req.body;
 
     console.log(`[AI] 收到视频分割请求: mode=${mode}, videoUrl=${videoUrl.substring(0, 100)}...`);
 
@@ -1693,7 +1693,8 @@ app.post('/api/ai/split-video', async (req, res) => {
       splitPoints: splitPoints || [],
       videoDuration: videoDuration || 0,
       provider: provider || null,
-      model: model || null
+      model: model || null,
+      sensitivity: sensitivity || null
     });
     
     res.json({ success: true, taskId: task.id });
@@ -2771,8 +2772,14 @@ async function processVideoSplitAIFrame(taskId, videoUrl, params, settings) {
       progress: 30,
       output: { stage: 'detecting_scenes', duration: Math.round(duration) }
     });
-    
-    const splitPoints = await detectSceneChanges(tempVideoPath, 0.3);
+
+    // 根据敏感度映射 threshold：高=0.15（更敏感，多检出）/ 中=0.3（平衡）/ 低=0.5（更保守，少检出）
+    const SENSITIVITY_MAP = { high: 0.15, medium: 0.3, low: 0.5 };
+    const sensitivity = params.sensitivity || 'medium';
+    const threshold = SENSITIVITY_MAP[sensitivity] || 0.3;
+    console.log(`[AI] 场景检测阈值: threshold=${threshold} (sensitivity=${sensitivity})`);
+
+    const splitPoints = await detectSceneChanges(tempVideoPath, threshold);
     
     await db.aiTasks.update(taskId, {
       progress: 80,
@@ -5348,13 +5355,15 @@ app.get('/api/oss-snapshot', async (req, res) => {
 
     // 截图持久化缓存：首次截图后保存到 OSS，后续直接读取，避免重复收取视频截帧处理费
     // 截图保存路径：与源视频同项目下 thumbnails/ 目录
+    // 缓存 key 包含模式标识（accurate=精确模式），避免旧 m_fast 模式缓存与精确模式混淆
     let projectIdFromKey = '';
     const projMatch = ossKey.match(/^projects\/(\d+)\//);
     if (projMatch) projectIdFromKey = projMatch[1];
     const thumbnailDir = projectIdFromKey
       ? `projects/${projectIdFromKey}/thumbnails`
       : 'thumbnails';
-    const thumbnailKey = `${thumbnailDir}/${crypto.createHash('md5').update(ossKey + '_' + time + '_' + width).digest('hex')}.jpg`;
+    const cacheMode = 'accurate';
+    const thumbnailKey = `${thumbnailDir}/${crypto.createHash('md5').update(ossKey + '_' + time + '_' + width + '_' + cacheMode).digest('hex')}.jpg`;
 
     // 先检查截图缓存是否已存在
     let cacheExists = false;
@@ -5382,7 +5391,8 @@ app.get('/api/oss-snapshot', async (req, res) => {
     }
 
     // 缓存未命中或读取失败：调用 OSS 视频截帧
-    const process = `video/snapshot,t_${time},f_jpg,w_${width},m_fast`;
+    // 注意：不使用 m_fast 模式，m_fast 基于关键帧截帧可能导致截到上一个镜头的画面
+    const process = `video/snapshot,t_${time},f_jpg,w_${width}`;
     const signedUrl = ossClient.signatureUrl(ossKey, {
       expires: 3600,
       process

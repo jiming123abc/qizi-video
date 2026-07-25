@@ -34,8 +34,12 @@ export function MediaFullscreen({
   const actualMediaType = currentMedia?.type || mediaType;
   const actualMediaUrl = currentMedia?.url || mediaUrl;
   const actualFilename = currentMedia?.filename || filename;
+  // 封面图时间添加 0.05 秒偏移，避免截到上一镜头的尾帧（与 ShotCard/VideoSplitDialog 保持一致）
+  const shotStartTime = currentMedia?.startTime || 0;
+  const shotEndTime = shotStartTime + (currentMedia?.duration || 0);
+  const thumbTime = Math.min(shotStartTime + 0.05, Math.max(shotEndTime - 0.01, shotStartTime));
   const posterUrl = actualMediaType === 'video' && actualMediaUrl
-    ? getVideoPoster(actualMediaUrl, currentMedia?.startTime)
+    ? getVideoPoster(actualMediaUrl, thumbTime)
     : '';
 
   const signedMediaUrl = getSignedUrlFromCache(actualMediaUrl) || actualMediaUrl;

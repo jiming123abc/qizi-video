@@ -17,7 +17,6 @@ interface Project {
   description: string;
   coverUrl?: string;
   sortOrder: number;
-  videoCount: number;
   shotCount: number;
   totalSize: number;
   shareUrl: string;
@@ -522,7 +521,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
 
     if (results.length > 0) {
       await loadReferences(project.id);
-      // 刷新项目卡片的 totalSize/videoCount 统计
+      // 刷新项目卡片的 shotCount/totalSize 统计
       loadProjects();
     }
   };
@@ -1012,7 +1011,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
             </div>
             <h2 className="text-center text-lg font-semibold mb-1.5">删除项目</h2>
             <p className="text-center text-sm text-slate-400 mb-1">确定要删除「{deleteTarget.name}」吗？</p>
-            <p className="text-center text-xs text-slate-500 mb-5">{deleteTarget.videoCount} 个视频 · {formatSize(deleteTarget.totalSize)} — 删除后无法恢复</p>
+            <p className="text-center text-xs text-slate-500 mb-5">{deleteTarget.shotCount} 个分镜 · {formatSize(deleteTarget.totalSize)} — 删除后无法恢复</p>
 
             {deleteStatus === 'deleting' && (
               <div className="mb-5">

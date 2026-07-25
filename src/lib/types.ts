@@ -67,7 +67,6 @@ export interface Project {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
-  videoCount?: number;
   shotCount?: number;
   totalSize?: number;
 }
@@ -80,7 +79,7 @@ export interface Scene {
   scrollPosition?: number;
   createdAt: string;
   updatedAt: string;
-  videoCount?: number;
+  shotCount?: number;
 }
 
 export interface AiPlatform {
