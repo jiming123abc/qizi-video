@@ -940,14 +940,16 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           })}
         </div>
 
-        {/* 底部新建项目按钮 */}
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="mt-6 w-full py-3 rounded-2xl border-2 border-dashed border-violet-400/30 bg-violet-500/5 hover:bg-violet-500/10 text-violet-300 text-sm font-medium transition flex items-center justify-center gap-2"
-        >
-          <Plus className="w-4 h-4" />
-          新建项目
-        </button>
+        {/* 底部新建项目按钮（无项目时由空状态提供入口，避免重复） */}
+        {projects.length > 0 && (
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="mt-6 w-full py-3 rounded-2xl border-2 border-dashed border-violet-400/30 bg-violet-500/5 hover:bg-violet-500/10 text-violet-300 text-sm font-medium transition flex items-center justify-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            新建项目
+          </button>
+        )}
       </div>
 
       {/* 新建项目弹窗 */}
