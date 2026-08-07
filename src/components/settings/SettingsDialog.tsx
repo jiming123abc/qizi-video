@@ -130,7 +130,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
     const key = type === 'llm' ? 'llm_fallback_chain' : 'image_fallback_chain';
     const newModel = type === 'llm'
       ? { model: '', provider: defaultProvider, cost: 'low' as const, supportsVision: false }
-      : { model: '', provider: defaultProvider, quality: 'standard', cost: 'mid' as const, supportsImageRef: false };
+      : { model: '', provider: defaultProvider, quality: 'standard', cost: 'mid' as const, supportsImageRef: true, maxRefImages: 10 };
 
     setSettings(prev => ({
       ...prev,
@@ -630,14 +630,14 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                     </div>
                     <div className="space-y-2">
                       {(settings.image_fallback_chain || []).map((model, index) => (
-                        <div key={index} className="flex items-center gap-2 p-3 rounded-xl bg-white/5 border border-white/10">
+                        <div key={index} className="flex items-center gap-2 p-3 rounded-xl bg-white/5 border border-white/10 flex-wrap">
                           <span className="text-xs text-slate-500 w-6">{index + 1}.</span>
                           <input
                             type="text"
                             value={model.model}
                             onChange={(e) => updateModel('image', index, 'model', e.target.value)}
                             placeholder="模型名"
-                            className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50"
+                            className="flex-1 min-w-[120px] px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm focus:outline-none focus:border-violet-400/50"
                           />
                           <div className="relative w-28">
                             <select
@@ -677,15 +677,21 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                           </div>
-                          <label className="flex items-center gap-1 cursor-pointer" title="支持图生图">
+                          {/* 图生图标签（固定显示，所有模型必须支持） */}
+                          <span className="text-xs px-2 py-1 rounded bg-violet-500/20 text-violet-300">图生图</span>
+                          {/* 最大参考图数量 */}
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-slate-400">最多</span>
                             <input
-                              type="checkbox"
-                              checked={model.supportsImageRef || false}
-                              onChange={(e) => updateModel('image', index, 'supportsImageRef', e.target.checked)}
-                              className="accent-violet-500"
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={model.maxRefImages || 10}
+                              onChange={(e) => updateModel('image', index, 'maxRefImages', parseInt(e.target.value) || 10)}
+                              className="w-16 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-sm text-white text-center focus:outline-none focus:border-violet-400/50"
                             />
-                            <span className="text-xs text-slate-400">图生图</span>
-                          </label>
+                            <span className="text-xs text-slate-400">张</span>
+                          </div>
                           <button
                             onClick={() => removeModel('image', index)}
                             className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition ml-auto"

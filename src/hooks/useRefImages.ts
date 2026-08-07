@@ -2,7 +2,6 @@ import { useState, useCallback, useEffect } from 'react';
 import type { RefImage, AiGeneratedImage } from '../lib/types';
 import { uploadImage } from '../lib/ossUtils';
 
-export const MAX_REF_IMAGES = 4;
 export const MAX_HISTORY = 20;
 
 /**
@@ -17,8 +16,9 @@ export function useRefImages(options: {
   ownerId: number;
   projectId?: number;
   enabled?: boolean;
+  maxRefImages?: number;
 }) {
-  const { ownerType, ownerId, projectId, enabled = true } = options;
+  const { ownerType, ownerId, projectId, enabled = true, maxRefImages = 1 } = options;
 
   const [refImages, setRefImages] = useState<RefImage[]>([]);
   const [historyImages, setHistoryImages] = useState<AiGeneratedImage[]>([]);
@@ -55,7 +55,7 @@ export function useRefImages(options: {
   ) => {
     setRefImages(prev => {
       if (prev.some(r => r.url === url)) return prev;  // 去重
-      if (prev.length >= MAX_REF_IMAGES) return prev;   // 上限
+      if (prev.length >= maxRefImages) return prev;   // 上限
       const newRef: RefImage = {
         id: `asset-${assetInfo.assetId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         url,
@@ -66,7 +66,7 @@ export function useRefImages(options: {
       };
       return [...prev, newRef];
     });
-  }, []);
+  }, [maxRefImages]);
 
   // 切换资产参考图选择状态（UI 用）
   const toggleAssetRef = useCallback((
@@ -78,7 +78,7 @@ export function useRefImages(options: {
       if (existing) {
         return prev.filter(r => r.id !== existing.id);
       }
-      if (prev.length >= MAX_REF_IMAGES) return prev;
+      if (prev.length >= maxRefImages) return prev;
       const newRef: RefImage = {
         id: `asset-${assetInfo.assetId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         url,
@@ -89,15 +89,15 @@ export function useRefImages(options: {
       };
       return [...prev, newRef];
     });
-  }, []);
+  }, [maxRefImages]);
 
   // 上传本地图片作为参考图
   const addUploadRef = useCallback(async (file: File) => {
     if (!projectId) {
       throw new Error('缺少 projectId，无法上传参考图');
     }
-    if (refImages.length >= MAX_REF_IMAGES) {
-      throw new Error(`参考图已达上限（${MAX_REF_IMAGES} 张）`);
+    if (refImages.length >= maxRefImages) {
+      throw new Error(`参考图已达上限（${maxRefImages} 张）`);
     }
     setUploading(true);
     setUploadProgress(0);
@@ -112,10 +112,12 @@ export function useRefImages(options: {
           setUploadMessage(p.message);
         }
       });
+      const currentCount = refImages.length;
       const newRef: RefImage = {
         id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         url: uploadResult.url,
         source: 'upload',
+        assetName: `参考图${currentCount + 1}`,
       };
       setRefImages(prev => [...prev, newRef]);
       setUploadProgress(100);
@@ -178,26 +180,30 @@ export function useRefImages(options: {
   }, [refImages]);
 
   // 直接添加 URL 作为参考图（用于分镜图片等无 File 的场景）
-  const addUrlRef = useCallback((url: string, label?: string) => {
+  const addUrlRef = useCallback((url: string, label?: string, source?: 'upload' | 'shot') => {
     setRefImages(prev => {
       if (prev.some(r => r.url === url)) return prev;  // 去重
-      if (prev.length >= MAX_REF_IMAGES) return prev;   // 上限
+      if (prev.length >= maxRefImages) return prev;   // 上限
+      const isShot = source === 'shot';
+      const defaultName = label || (isShot ? `分镜参考${prev.length + 1}` : `参考图${prev.length + 1}`);
       const newRef: RefImage = {
         id: `url-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         url,
-        source: 'upload',  // 复用 upload source 类型
-        assetName: label,  // 可选标签（如分镜标题）
+        source: source || 'upload',
+        assetName: defaultName,
+        shotTitle: isShot ? defaultName : undefined,
       };
       return [...prev, newRef];
     });
-  }, []);
+  }, [maxRefImages]);
 
-  const isFull = refImages.length >= MAX_REF_IMAGES;
+  const isFull = refImages.length >= maxRefImages;
 
   return {
     refImages,
+    setRefImages,
     historyImages,
-    MAX_REF_IMAGES,
+    maxRefImages,
     MAX_HISTORY,
     isFull,
     uploading,

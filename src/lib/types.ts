@@ -57,6 +57,7 @@ export interface ShotMedia {
   source: 'upload' | 'ai_generated' | 'video_split';
   ossKey?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Project {
@@ -96,7 +97,8 @@ export interface ModelConfig {
   quality?: string;
   provider: string;  // 引用 AiPlatform.id
   cost: 'free' | 'low' | 'mid' | 'mid_high' | 'high';
-  supportsImageRef?: boolean;
+  supportsImageRef: boolean;  // 是否支持参考图（所有生图模型必须支持）
+  maxRefImages?: number;  // 最大参考图数量
   supportsVision?: boolean;  // 是否支持视觉输入（用于AI分析）
 }
 
@@ -201,14 +203,16 @@ export interface AiGeneratedImage {
   createdAt: string;
 }
 
-// P3-24：统一的参考图（来自数字资产或用户上传），供 AI 生图使用
+// P3-24：统一的参考图（来自数字资产、分镜或用户上传），供 AI 生图使用
 export interface RefImage {
   id: string;          // 唯一 key
   url: string;         // 图片 URL（OSS）
-  source: 'asset' | 'upload';  // 来源
+  source: 'asset' | 'upload' | 'shot';  // 来源
   assetId?: number;    // 来自资产时记录
   assetName?: string;  // 用于 @引用 显示
   assetType?: 'actor' | 'prop' | 'scene';
+  shotId?: number;     // 来自分镜时记录
+  shotTitle?: string;  // 分镜标题，用于 @引用 显示
 }
 
 // any-audit：挂起上传任务（ProjectListPage pendingUploadRef）

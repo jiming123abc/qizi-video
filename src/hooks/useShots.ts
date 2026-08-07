@@ -31,6 +31,8 @@ interface UseShotsReturn {
   batchRestore: () => Promise<void>;
   batchHardDelete: (onConfirm: (fn: () => Promise<void>) => void) => void;
   batchMoveToScene: (sceneId: number | null) => Promise<void>;
+  batchUpdateStatus: (status: 'pending' | 'done') => Promise<void>;
+  moveShotToScene: (shotId: number, sceneId: number | null) => Promise<void>;
   batchMergeShots: (onReload: () => Promise<void>) => Promise<void>;
   handleItemDragStart: (id: number, e: DragEvent) => void;
   handleDragHandleMouseDown: () => void;

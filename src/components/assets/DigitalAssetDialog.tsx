@@ -550,19 +550,20 @@ export default function DigitalAssetDialog({
             ) : (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                 {assets.map(asset => (
-                  <AssetCard
-                    key={asset.id}
-                    asset={asset}
-                    isEditingName={editing.id === asset.id && editing.field === 'name'}
-                    editingNameValue={editing.id === asset.id ? editing.value : asset.name}
-                    onStartEditName={() => startEditing(asset, 'name')}
-                    onChangeEditingName={(v) => setEditing({ ...editing, value: v })}
-                    onSaveEditName={saveEditing}
-                    onCancelEditName={cancelEditing}
-                    onManage={() => setManagingAssetId(asset.id)}
-                    onQuickUpload={() => handleUploadImage(asset.id)}
-                    onQuickAiGenerate={() => openAiImageDialog(asset)}
-                  />
+                  <React.Fragment key={asset.id}>
+                    <AssetCard
+                      asset={asset}
+                      isEditingName={editing.id === asset.id && editing.field === 'name'}
+                      editingNameValue={editing.id === asset.id ? editing.value : asset.name}
+                      onStartEditName={() => startEditing(asset, 'name')}
+                      onChangeEditingName={(v) => setEditing({ ...editing, value: v })}
+                      onSaveEditName={saveEditing}
+                      onCancelEditName={cancelEditing}
+                      onManage={() => setManagingAssetId(asset.id)}
+                      onQuickUpload={() => handleUploadImage(asset.id)}
+                      onQuickAiGenerate={() => openAiImageDialog(asset)}
+                    />
+                  </React.Fragment>
                 ))}
               </div>
             )}

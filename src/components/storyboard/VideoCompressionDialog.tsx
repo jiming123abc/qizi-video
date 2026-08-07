@@ -48,7 +48,7 @@ export function VideoCompressionDialog({
   const isMultiple = compressionFiles.length > 1;
 
   return (
-    <div className="fixed inset-0 z-[70] p-4 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+    <div className="fixed inset-0 z-[80] p-4 bg-black/60 backdrop-blur-sm flex items-center justify-center">
       <div
         className="w-full max-w-lg w-[calc(100%-2rem)] max-h-[100dvh] sm:max-h-[85vh] bg-[#1a1530] border border-white/10 rounded-3xl shadow-2xl overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}

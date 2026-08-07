@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Upload, Loader2, CheckCircle, AlertCircle, Info, Plus, ChevronDown, Trash2, Archive, Film, Image as ImageIcon } from 'lucide-react';
-import type { Shot, Settings, ModelConfig, AiGeneratedImage, RefImage, DigitalAsset } from '../../lib/types';
+import { X, Upload, Loader2, CheckCircle, Info, Plus, ChevronDown, Trash2, Archive, Film, Image as ImageIcon } from 'lucide-react';
+import type { Shot, Settings, ModelConfig, AiGeneratedImage, RefImage, DigitalAsset, Scene } from '../../lib/types';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useSignedUrl } from '../../hooks/useSignedUrl';
 import ConfirmDialog from '../ConfirmDialog';
@@ -26,6 +26,8 @@ interface AIImageGenerateDialogProps {
   shot?: Shot;                    // 分镜上下文（传入时为分镜生图模式）
   ownerType?: 'shot' | 'asset';   // 默认 'asset'，shot 上下文时传 'shot'
   sceneShots?: Shot[];            // 当前场次的分镜列表（仅分镜模式，用于参考图选择）
+  scenes?: Scene[];               // 项目所有场次（用于场次分组显示）
+  allShots?: Shot[];              // 项目所有分镜（用于跨场次选择参考图）
 }
 
 type ImageSize = '1024x576' | '576x1024' | '768x768' | '1536x1024';
@@ -60,6 +62,8 @@ export default function AIImageGenerateDialog({
   shot,
   ownerType: ownerTypeProp = 'asset',
   sceneShots,
+  scenes,
+  allShots,
 }: AIImageGenerateDialogProps) {
   // 统一模式判断
   const isShotMode = !!shot;
@@ -96,6 +100,7 @@ export default function AIImageGenerateDialog({
   const [status, setStatus] = useState<'idle' | 'generating' | 'done' | 'error'>('idle');
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [genProgress, setGenProgress] = useState(0);
   const { showToast } = useToastContext();
   const { startUpload } = useUnifiedUpload();
 
@@ -114,17 +119,24 @@ export default function AIImageGenerateDialog({
   // P3-24：@引用浮层
   const [showAtDropdown, setShowAtDropdown] = useState(false);
   const [atDropdownPos, setAtDropdownPos] = useState<{ top: number; left: number } | null>(null);
+  const [atPanelTab, setAtPanelTab] = useState<'assets' | 'shots'>('assets');
 
   // 参考图来源选择面板
   const [showAssetPicker, setShowAssetPicker] = useState(false);
   const [showShotPicker, setShowShotPicker] = useState(false);
   const [digitalAssets, setDigitalAssets] = useState<DigitalAsset[]>([]);
+  const [loadedAllShots, setLoadedAllShots] = useState<Shot[]>([]);
+
+  // 根据模型配置计算参考图上限和 @引用可用性
+  const maxRefImages = selectedModel?.maxRefImages || 10;
+  const atEnabled = true;  // 所有模型都支持参考图和@引用
 
   // P3-24：使用 useRefImages hook 统一管理参考图与历史图
   const {
     refImages,
+    setRefImages,
     historyImages,
-    MAX_REF_IMAGES,
+    maxRefImages: hookMaxRefImages,
     MAX_HISTORY,
     isFull,
     uploading: refUploading,
@@ -139,11 +151,13 @@ export default function AIImageGenerateDialog({
     loadHistory,
     deleteHistory,
     getAllRefUrls,
+    parseAtReferences,
   } = useRefImages({
     ownerType: effectiveOwnerType,
     ownerId: effectiveOwnerId,
     projectId: effectiveProjectId,
     enabled: !!effectiveOwnerId,
+    maxRefImages,
   });
 
   // P3-24：轮询任务状态
@@ -222,16 +236,23 @@ export default function AIImageGenerateDialog({
       if (effectiveOwnerId) {
         loadHistory();
       }
+      // 清空加载的全部分镜，等待 useEffect 重新加载
+      setLoadedAllShots([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialPrompt, shot]);
 
-  // P3-24：@引用浮层 - 当无可引用的资产时自动关闭
+  // P3-24：@引用浮层 - 当模型不支持 @引用时自动关闭
   useEffect(() => {
-    if (showAtDropdown && !refImages.some(r => r.source === 'asset' && r.assetName)) {
+    if (showAtDropdown && !atEnabled) {
       setShowAtDropdown(false);
     }
-  }, [refImages, showAtDropdown]);
+  }, [refImages, showAtDropdown, atEnabled]);
+
+  // 模型切换时裁剪超额参考图
+  useEffect(() => {
+    setRefImages(prev => prev.length > maxRefImages ? prev.slice(0, maxRefImages) : prev);
+  }, [maxRefImages, setRefImages]);
 
   // 加载项目数字资产（用于参考图选择和 @引用）
   useEffect(() => {
@@ -251,6 +272,25 @@ export default function AIImageGenerateDialog({
     }
   }, [isOpen, effectiveProjectId]);
 
+  // 加载项目所有分镜（用于跨场次选择参考图）
+  useEffect(() => {
+    if (isOpen && isShotMode && effectiveProjectId) {
+      // 分别请求 pending 和 done 状态的分镜
+      Promise.all([
+        fetch(`/api/list?projectId=${effectiveProjectId}&status=pending`).then(r => r.json()),
+        fetch(`/api/list?projectId=${effectiveProjectId}&status=done`).then(r => r.json()),
+      ])
+        .then(([pendingData, doneData]) => {
+          const pendingShots = pendingData.success ? (pendingData.data || []) : [];
+          const doneShots = doneData.success ? (doneData.data || []) : [];
+          const all = [...pendingShots, ...doneShots];
+          all.sort((a: Shot, b: Shot) => (a.sortOrder || 0) - (b.sortOrder || 0));
+          setLoadedAllShots(all);
+        })
+        .catch(console.error);
+    }
+  }, [isOpen, isShotMode, effectiveProjectId]);
+
   // 根据平台过滤模型
   const filteredModels = availableModels.filter(m => m.provider === selectedProvider);
 
@@ -265,42 +305,60 @@ export default function AIImageGenerateDialog({
   const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     setPrompt(value);
-    // 检测 @ 触发（最后一个字符为 @，且存在可引用的资产参考图）
     const lastChar = value[value.length - 1];
-    if (lastChar === '@' && refImages.some(r => r.source === 'asset' && r.assetName)) {
+    if (lastChar === '@' && atEnabled) {
       const textarea = e.target;
       const rect = textarea.getBoundingClientRect();
       setAtDropdownPos({ top: rect.bottom + 4, left: rect.left + 20 });
       setShowAtDropdown(true);
-    } else {
+      // 自动选择有内容的 Tab
+      const hasAssets = refImages.some(r => r.source !== 'shot' && r.assetName);
+      const hasShots = refImages.some(r => r.source === 'shot' && r.assetName);
+      if (hasAssets && !hasShots) {
+        setAtPanelTab('assets');
+      } else if (hasShots && !hasAssets) {
+        setAtPanelTab('shots');
+      } else if (hasAssets && hasShots) {
+        const assetCount = refImages.filter(r => r.source !== 'shot' && r.assetName).length;
+        const shotCount = refImages.filter(r => r.source === 'shot' && r.assetName).length;
+        setAtPanelTab(assetCount >= shotCount ? 'assets' : 'shots');
+      } else {
+        setAtPanelTab('assets');
+      }
+    } else if (showAtDropdown && lastChar !== '@') {
       setShowAtDropdown(false);
     }
   };
 
   // P3-24：选择 @ 引用项
   const handleSelectAtRef = (refImg: RefImage) => {
-    if (!refImg.assetName) return;
-    setPrompt(prev => prev.replace(/@$/, `@${refImg.assetName} `));
+    const label = refImg.assetName || refImg.shotTitle;
+    if (!label) return;
+    setPrompt(prev => prev.replace(/@$/, `@${label} `));
     setShowAtDropdown(false);
     setAtDropdownPos(null);
   };
 
-  // P3-24：拖拽上传 - drop 时调用 addUploadRef
+  // P3-24：拖拽上传 - drop 时调用 addUploadRef（支持多文件）
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    const file = files[0];
-    if (!file.type.startsWith('image/')) return;
-    try {
-      await addUploadRef(file);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
+    const imageFiles = Array.from(files).filter((f: File) => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    const remaining = maxRefImages - refImages.length;
+    for (const file of imageFiles.slice(0, remaining)) {
+      try {
+        await addUploadRef(file);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
+        break;
+      }
     }
   };
 
-  // P3-24：触发统一上传模块上传参考图
+  // P3-24：触发统一上传模块上传参考图（多图模型支持选多张）
   const handleUploadClick = async () => {
     if (!effectiveProjectId) return;
     try {
@@ -308,11 +366,10 @@ export default function AIImageGenerateDialog({
         projectId: effectiveProjectId,
         usage: 'shot-reference',
         accept: 'image/*',
-        multiple: false,
+        multiple: maxRefImages > 1,
       });
-      if (results.length > 0) {
-        addUrlRef(results[0].url);
-      }
+      const remaining = maxRefImages - refImages.length;
+      results.slice(0, remaining).forEach(r => addUrlRef(r.url));
     } catch (err) {
       showToast(err instanceof Error ? err.message : '上传参考图失败', 'error');
     }
@@ -327,16 +384,28 @@ export default function AIImageGenerateDialog({
 
     setStatus('generating');
     setErrorMessage('');
+    setGenProgress(0);
 
     try {
       // P3-24：使用统一的参考图 URL 列表
       const refUrls = getAllRefUrls();
+
+      // 解析提示词中的 @引用，提取对应资产信息（供后端注入描述增强prompt）
+      const atRefs = parseAtReferences(prompt);
+      const atReferencedAssets = atRefs
+        .filter(r => r.source === 'asset' && r.assetId && r.assetName)
+        .map(r => ({
+          assetId: r.assetId,
+          assetName: r.assetName,
+          assetType: r.assetType,
+        }));
 
       // 根据模式选择 API 端点
       const apiEndpoint = isShotMode ? '/api/ai/generate-image' : '/api/ai/generic-image-gen';
       const requestBody: Record<string, unknown> = {
         prompt: prompt.trim(),
         refImages: refUrls,
+        atReferencedAssets,
         size: selectedSize,
         provider: selectedProvider,
         model: selectedModel.model,
@@ -380,9 +449,15 @@ export default function AIImageGenerateDialog({
           const task = result.data || result;
           consecutiveFailures = 0;
 
+          // 更新进度（后端在关键步骤更新 progress）
+          if (task.progress) {
+            setGenProgress(prev => task.progress > prev ? task.progress : prev);
+          }
+
           if (task.status === 'done') {
             clearInterval(pollingRef.current!);
             pollingRef.current = null;
+            setGenProgress(100);
 
             const imageUrl = task.output?.imageUrl;
             const uploaded = task.output?.uploaded !== false;
@@ -489,9 +564,9 @@ export default function AIImageGenerateDialog({
       'gpt-image-2': 'GPT-Image-2',
       'gpt-image-1': 'GPT-Image-1',
       'dall-e-3': 'DALL-E 3',
-      'z-image-turbo': 'Z-Image Turbo',
+      'kling-image-v3-omni': 'Kling 3.0 Omni',
       'nano-banana-2': 'Nano Banana 2',
-      'cogview-4': 'CogView 4',
+      'qwen-image-3.0': '千问 3.0',
       'flux': 'Flux',
     };
     return displayNames[model.model.toLowerCase()] || model.model;
@@ -528,20 +603,40 @@ export default function AIImageGenerateDialog({
                   onChange={handlePromptChange}
                   rows={3}
                   className="w-full px-4 py-3 rounded-xl border border-white/10 bg-white/5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50"
-                  placeholder="描述你想要生成的画面内容...（输入 @ 可引用资产）"
+                  placeholder={`描述你想要生成的画面内容...${atEnabled ? '（输入 @ 可引用资产）' : ''}`}
                 />
               </div>
 
-              {/* P3-24：已选参考图缩略图条（始终显示，含拖拽上传） */}
-              <div className={`mb-4 ${selectedModel && !selectedModel.supportsImageRef ? 'opacity-50 pointer-events-none' : ''}`}>
+              {/* 参考图功能说明（根据模型能力动态显示） */}
+              <div className="mb-3 p-2.5 rounded-lg bg-violet-500/5 border border-violet-400/15">
+                <div className="flex items-start gap-2">
+                  <Info className="w-4 h-4 text-violet-300 shrink-0 mt-0.5" />
+                  <div className="text-[11px] text-slate-400 leading-relaxed space-y-0.5">
+                    {!selectedModel ? (
+                      <p>选择模型后查看参考图能力说明。</p>
+                    ) : (
+                      <>
+                        <p>
+                          <span className="text-violet-200 font-medium">图生图模式：</span>
+                          最多 <span className="text-violet-300 font-semibold">{maxRefImages} 张</span> 参考图，可上传、从数字资产或分镜中选取。
+                        </p>
+                        <p>
+                          <span className="text-slate-300">@引用：</span>
+                          在提示词中输入 <span className="text-violet-300 font-mono">@</span> 可引用数字资产作为参考素材。
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 参考图区域（始终可交互） */}
+              <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
                   <label className="block text-sm font-medium text-slate-300">
-                    参考图 ({refImages.length}/{MAX_REF_IMAGES})
+                    参考图 ({refImages.length}/{hookMaxRefImages})
                   </label>
                 </div>
-                {selectedModel && !selectedModel.supportsImageRef && (
-                  <p className="text-xs text-orange-300 mb-2">当前模型不支持参考图</p>
-                )}
                 {/* 三个并列入口（仅空状态时显示） */}
                 {refImages.length === 0 && (
                   <div className="flex gap-2 mb-2">
@@ -563,7 +658,7 @@ export default function AIImageGenerateDialog({
                         数字资产
                       </button>
                     )}
-                    {isShotMode && sceneShots && (
+                    {isShotMode && (loadedAllShots.length || allShots?.length || sceneShots?.length) ? (
                       <button
                         onClick={() => { setShowShotPicker(!showShotPicker); setShowAssetPicker(false); }}
                         className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border transition text-sm ${showShotPicker ? 'border-violet-400 bg-violet-500/10 text-violet-300' : 'border-white/15 hover:border-violet-400 hover:bg-violet-500/10 text-slate-300'}`}
@@ -571,7 +666,7 @@ export default function AIImageGenerateDialog({
                         <Film className="w-4 h-4" />
                         从分镜选择
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 )}
                 <div
@@ -594,7 +689,9 @@ export default function AIImageGenerateDialog({
                     <>
                     <div className="flex gap-2 overflow-x-auto p-2">
                       {refImages.map(r => (
-                        <RefThumb key={r.id} refImg={r} onRemove={() => removeRef(r.id)} />
+                        <React.Fragment key={r.id}>
+                          <RefThumb refImg={r} onRemove={() => removeRef(r.id)} />
+                        </React.Fragment>
                       ))}
                       {!isFull && effectiveProjectId && !refUploading && (
                         <button
@@ -637,7 +734,11 @@ export default function AIImageGenerateDialog({
                           {digitalAssets.map(asset => {
                             const imgUrl = asset.imageUrl || (asset.images && asset.images[0]?.imageUrl);
                             if (!imgUrl) return null;
-                            return <AssetThumb key={asset.id} asset={asset} imgUrl={imgUrl} onAdd={() => addAssetRef(imgUrl, { assetId: asset.id, assetName: asset.name, assetType: asset.type })} isSelected={isRefSelected(imgUrl)} />;
+                            return (
+                              <React.Fragment key={asset.id}>
+                                <AssetThumb asset={asset} imgUrl={imgUrl} onAdd={() => addAssetRef(imgUrl, { assetId: asset.id, assetName: asset.name, assetType: asset.type })} isSelected={isRefSelected(imgUrl)} />
+                              </React.Fragment>
+                            );
                           })}
                         </div>
                       </>
@@ -647,98 +748,75 @@ export default function AIImageGenerateDialog({
                   </div>
                 )}
 
-                {/* 从当前场次分镜选择面板 */}
-                {showShotPicker && isShotMode && sceneShots && (
-                  <div className="mt-2 p-2 rounded-lg bg-slate-800/80 border border-white/10 max-h-48 overflow-y-auto">
-                    <p className="text-xs text-slate-400 mb-2 px-1">点击分镜图片添加为参考图</p>
-                    <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
-                      {sceneShots
-                        .filter(s => s.id !== shot?.id)  // 排除当前 shot
-                        .flatMap(s => {
-                          const images: { url: string; shotId: number; shotTitle: string }[] = [];
-                          if (s.media && Array.isArray(s.media)) {
-                            s.media.forEach((m: { url?: string; type?: string }) => {
-                              if (m.type === 'image' && m.url) {
-                                images.push({ url: m.url, shotId: s.id, shotTitle: s.title });
-                              }
-                            });
-                          }
-                          // 兼容旧字段
-                          if (s.type === 'image' && s.url && !s.media) {
-                            images.push({ url: s.url, shotId: s.id, shotTitle: s.title });
-                          }
-                          return images;
-                        })
-                        .map((img, idx) => (
-                          <ShotImageThumb key={`${img.shotId}-${idx}`} imgUrl={img.url} shotTitle={img.shotTitle} onAdd={() => addUrlRef(img.url, img.shotTitle)} />
-                        ))
-                      }
-                    </div>
-                    {sceneShots.filter(s => s.id !== shot?.id).length === 0 && (
-                      <p className="text-xs text-slate-500 text-center py-2">当前场次无其他分镜</p>
-                    )}
-                  </div>
+                {/* 分镜选择面板 - 支持场次分组 */}
+                {showShotPicker && isShotMode && (
+                  <ShotPickerPanel
+                    shots={loadedAllShots.length > 0 ? loadedAllShots : (allShots || sceneShots || [])}
+                    scenes={scenes}
+                    currentShotId={shot?.id}
+                    currentSceneId={shot?.sceneId}
+                    onAddImage={(url, title) => addUrlRef(url, title, 'shot')}
+                    isSelected={isRefSelected}
+                  />
                 )}
               </div>
 
-              {/* AI 模型选择（平台 + 模型并排） */}
+              {/* AI 模型选择（平台 + 模型卡片） */}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-slate-300 mb-2">AI 模型选择</label>
-                <div className="flex gap-3">
-                  {/* 平台选择 */}
-                  <div className="relative sm:w-36">
-                    <select
-                      value={selectedProvider}
-                      onChange={e => setSelectedProvider(e.target.value)}
-                      className="w-full px-3 py-3 pr-8 rounded-xl border border-white/10 bg-slate-800 text-white text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 cursor-pointer"
+                {/* 平台选择 */}
+                <div className="mb-3">
+                  <select
+                    value={selectedProvider}
+                    onChange={e => setSelectedProvider(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-white/10 bg-slate-800 text-white text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 cursor-pointer"
+                  >
+                    {(settings?.ai_platforms || []).map(p => (
+                      <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* 模型卡片选择 */}
+                <div className="grid grid-cols-2 gap-2">
+                  {filteredModels.map(model => (
+                    <button
+                      key={model.model}
+                      type="button"
+                      onClick={() => setSelectedModel(model)}
+                      className={`p-3 rounded-xl border transition text-left ${
+                        selectedModel?.model === model.model
+                          ? 'border-violet-400 bg-violet-500/10'
+                          : 'border-white/15 hover:border-white/25 bg-white/5'
+                      }`}
                     >
-                      {(settings?.ai_platforms || []).map(p => (
-                        <option key={p.id} value={p.id} className="bg-slate-800 text-slate-100">{p.name}</option>
-                      ))}
-                    </select>
-                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  </div>
-                  {/* 模型选择 */}
-                  <div className="relative flex-1">
-                    <select
-                      value={selectedModel?.model || ''}
-                      onChange={e => {
-                        const model = filteredModels.find(m => m.model === e.target.value);
-                        setSelectedModel(model || null);
-                      }}
-                      className="w-full px-3 py-3 pr-8 rounded-xl border border-white/10 bg-slate-800 text-white text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 cursor-pointer"
-                    >
-                      {filteredModels.map(model => (
-                        <option key={model.model} value={model.model} className="bg-slate-800 text-slate-100">
-                          {getModelDisplayName(model)} {model.supportsImageRef ? '(支持图生图)' : ''}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  </div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-white truncate">
+                          {getModelDisplayName(model)}
+                        </span>
+                        {model.cost === 'low' && <span className="text-[10px] text-green-400 whitespace-nowrap ml-1">低价</span>}
+                        {model.cost === 'mid' && <span className="text-[10px] text-yellow-400 whitespace-nowrap ml-1">中等</span>}
+                        {model.cost === 'mid_high' && <span className="text-[10px] text-orange-400 whitespace-nowrap ml-1">较高</span>}
+                        {model.cost === 'high' && <span className="text-[10px] text-red-400 whitespace-nowrap ml-1">高价</span>}
+                      </div>
+                      <div className="flex gap-1 flex-wrap">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">图生图</span>
+                        {model.maxRefImages && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">
+                            {model.maxRefImages}张
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
                 </div>
                 {/* 费用提示 */}
                 {selectedModel && (
-                  <p className="text-xs text-slate-500 mt-1">
+                  <p className="text-xs text-slate-500 mt-2">
                     费用：{COST_LABELS[selectedModel.cost] || '未知'}
+                    {selectedModel.maxRefImages && (
+                      <span className="ml-2 text-slate-400">· 最多 {selectedModel.maxRefImages} 张参考图</span>
+                    )}
                   </p>
-                )}
-                {/* P3-24：模型能力警告 */}
-                {selectedModel && !selectedModel.supportsImageRef && refImages.length > 0 && (
-                  <div className="mt-2 p-2 rounded-lg bg-orange-500/10 border border-orange-500/30 flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" />
-                    <p className="text-xs text-orange-300">
-                      当前模型不支持图生图，将仅以文字描述参考图风格生成
-                    </p>
-                  </div>
-                )}
-                {selectedModel?.supportsImageRef && refImages.length > 1 && (
-                  <div className="mt-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-start gap-2">
-                    <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
-                    <p className="text-xs text-blue-300">
-                      当前模型仅支持单张参考图，将使用第一张（已选 {refImages.length} 张）
-                    </p>
-                  </div>
                 )}
               </div>
 
@@ -803,17 +881,18 @@ export default function AIImageGenerateDialog({
                   </div>
                   <div className="flex gap-2 overflow-x-auto pb-1">
                     {stagedImages.map((img, idx) => (
-                      <StagedThumb
-                        key={img.id}
-                        img={img}
-                        idx={idx}
-                        isSelected={false}
-                        onSelect={() => {
-                          setSelectedStagedId(img.id);
-                          setGeneratedImageUrl(img.url);
-                          setStatus('done');
-                        }}
-                      />
+                      <React.Fragment key={img.id}>
+                        <StagedThumb
+                          img={img}
+                          idx={idx}
+                          isSelected={false}
+                          onSelect={() => {
+                            setSelectedStagedId(img.id);
+                            setGeneratedImageUrl(img.url);
+                            setStatus('done');
+                          }}
+                        />
+                      </React.Fragment>
                     ))}
                   </div>
                 </div>
@@ -828,7 +907,15 @@ export default function AIImageGenerateDialog({
               <p className="text-sm text-slate-400 mb-1">
                 模型：{getModelDisplayName(selectedModel)} ({selectedModel?.quality || 'standard'})
               </p>
-              <p className="text-xs text-slate-500">预计时间：15-30秒</p>
+              <p className="text-xs text-slate-500 mb-3">预计时间：15-30秒</p>
+              {/* 进度条 */}
+              <div className="w-full max-w-xs h-2 rounded-full bg-white/10 overflow-hidden mb-1">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-500"
+                  style={{ width: `${genProgress}%` }}
+                />
+              </div>
+              <p className="text-xs text-slate-500">{genProgress > 0 ? `${genProgress}%` : '排队中...'}</p>
               <p className="text-xs text-slate-600 mt-4">请勿关闭页面</p>
             </div>
           )}
@@ -844,25 +931,11 @@ export default function AIImageGenerateDialog({
               </div>
 
               {/* Q1：主预览区 - 显示当前选中的暂存图 */}
-              <div className="w-full rounded-xl border border-white/10 overflow-hidden mb-3 relative">
-                <img
-                  src={generatedImageUrl}
-                  alt="生成的图片"
-                  className="w-full h-auto max-h-80 object-contain bg-black/40"
-                />
-                {/* 预览/已上传标识 */}
-                {(() => {
-                  const selected = stagedImages.find(s => s.id === selectedStagedId);
-                  if (selected && !selected.uploaded) {
-                    return (
-                      <span className="absolute top-2 right-2 px-2 py-1 rounded-md bg-amber-500/80 text-white text-xs font-medium">
-                        预览（未上传）
-                      </span>
-                    );
-                  }
-                  return null;
-                })()}
-              </div>
+              {(() => {
+                const selected = stagedImages.find(s => s.id === selectedStagedId) || stagedImages[stagedImages.length - 1];
+                if (!selected) return null;
+                return <MainPreviewImage img={selected} />;
+              })()}
 
               {/* Q1：暂存图缩略图条 */}
               {stagedImages.length > 1 && (
@@ -870,16 +943,17 @@ export default function AIImageGenerateDialog({
                   <p className="text-xs text-slate-400 mb-2">点击缩略图选择</p>
                   <div className="flex gap-2 overflow-x-auto pb-2">
                     {stagedImages.map((img, idx) => (
-                      <StagedThumb
-                        key={img.id}
-                        img={img}
-                        idx={idx}
-                        isSelected={selectedStagedId === img.id}
-                        onSelect={() => {
-                          setSelectedStagedId(img.id);
-                          setGeneratedImageUrl(img.url);
-                        }}
-                      />
+                      <React.Fragment key={img.id}>
+                        <StagedThumb
+                          img={img}
+                          idx={idx}
+                          isSelected={selectedStagedId === img.id}
+                          onSelect={() => {
+                            setSelectedStagedId(img.id);
+                            setGeneratedImageUrl(img.url);
+                          }}
+                        />
+                      </React.Fragment>
                     ))}
                   </div>
                 </div>
@@ -904,26 +978,27 @@ export default function AIImageGenerateDialog({
               </div>
               <div className="flex gap-2 overflow-x-auto pb-2">
                 {historyImages.map((img) => (
-                  <HistoryThumb
-                    key={img.id}
-                    img={img}
-                    isSelected={generatedImageUrl === img.url}
-                    onSelect={() => {
-                      setGeneratedImageUrl(img.url);
-                      setStatus('done');
-                    }}
-                    onDelete={(e) => {
-                      e.stopPropagation();
-                      setConfirmDialog({
-                        title: '确认删除',
-                        message: '确定要删除这张历史图吗？',
-                        onConfirm: () => {
-                          setConfirmDialog(null);
-                          deleteHistory(img.id);
-                        }
-                      });
-                    }}
-                  />
+                  <React.Fragment key={img.id}>
+                    <HistoryThumb
+                      img={img}
+                      isSelected={generatedImageUrl === img.url}
+                      onSelect={() => {
+                        setGeneratedImageUrl(img.url);
+                        setStatus('done');
+                      }}
+                      onDelete={(e) => {
+                        e.stopPropagation();
+                        setConfirmDialog({
+                          title: '确认删除',
+                          message: '确定要删除这张历史图吗？',
+                          onConfirm: () => {
+                            setConfirmDialog(null);
+                            deleteHistory(img.id);
+                          }
+                        });
+                      }}
+                    />
+                  </React.Fragment>
                 ))}
               </div>
               {historyImages.length >= MAX_HISTORY && (
@@ -1019,21 +1094,64 @@ export default function AIImageGenerateDialog({
         </div>
       </div>
 
-      {/* P3-24：@引用浮层 */}
+      {/* P3-24：@引用浮层 - 支持资产和分镜 Tab 切换 */}
       {showAtDropdown && atDropdownPos && (
         <div
-          className="fixed z-[70] bg-slate-800 border border-white/10 rounded-lg shadow-xl py-1 max-h-48 overflow-y-auto min-w-[200px]"
+          className="fixed z-[70] bg-slate-800 border border-white/10 rounded-lg shadow-xl overflow-hidden min-w-[240px]"
           style={{ top: atDropdownPos.top, left: atDropdownPos.left }}
         >
-          {refImages.filter(r => r.source === 'asset' && r.assetName).map(r => (
+          {/* Tab 切换 */}
+          <div className="flex border-b border-white/10">
             <button
-              key={r.id}
-              onClick={() => handleSelectAtRef(r)}
-              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-white/10 text-white"
+              onClick={() => setAtPanelTab('assets')}
+              className={`flex-1 px-3 py-2 text-xs font-medium transition ${
+                atPanelTab === 'assets' ? 'text-violet-300 bg-violet-500/10' : 'text-slate-400 hover:text-white'
+              }`}
             >
-              @{r.assetName}
+              参考素材 ({refImages.filter(r => r.source !== 'shot' && r.assetName).length})
             </button>
-          ))}
+            {isShotMode && (
+              <button
+                onClick={() => setAtPanelTab('shots')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition ${
+                  atPanelTab === 'shots' ? 'text-violet-300 bg-violet-500/10' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                分镜 ({refImages.filter(r => r.source === 'shot' && r.assetName).length})
+              </button>
+            )}
+          </div>
+          {/* Tab 内容 */}
+          <div className="max-h-48 overflow-y-auto py-1">
+            {atPanelTab === 'assets' && refImages.filter(r => r.source !== 'shot' && r.assetName).length === 0 && (
+              <p className="px-3 py-2 text-xs text-slate-500">暂无引用，请先上传或添加参考图</p>
+            )}
+            {atPanelTab === 'assets' && refImages.filter(r => r.source !== 'shot' && r.assetName).map(r => (
+              <button
+                key={r.id}
+                onClick={() => handleSelectAtRef(r)}
+                className="block w-full text-left px-3 py-1.5 text-sm hover:bg-white/10 text-white flex items-center gap-2"
+              >
+                <span className="w-6 h-6 rounded bg-white/10 flex items-center justify-center text-xs">@</span>
+                <span className="truncate">{r.assetName}</span>
+                {r.source === 'upload' && <span className="ml-auto text-[10px] text-slate-500">上传</span>}
+                {r.source === 'asset' && <span className="ml-auto text-[10px] text-slate-500">资产</span>}
+              </button>
+            ))}
+            {atPanelTab === 'shots' && refImages.filter(r => r.source === 'shot' && r.assetName).length === 0 && (
+              <p className="px-3 py-2 text-xs text-slate-500">暂不分镜引用，请先添加分镜到参考图</p>
+            )}
+            {atPanelTab === 'shots' && refImages.filter(r => r.source === 'shot' && r.assetName).map(r => (
+              <button
+                key={r.id}
+                onClick={() => handleSelectAtRef(r)}
+                className="block w-full text-left px-3 py-1.5 text-sm hover:bg-white/10 text-white flex items-center gap-2"
+              >
+                <span className="w-6 h-6 rounded bg-violet-500/20 flex items-center justify-center text-xs text-violet-300">@</span>
+                <span className="truncate">{r.assetName}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -1181,16 +1299,20 @@ function ShotImageThumb({
   imgUrl,
   shotTitle,
   onAdd,
+  isSelected,
 }: {
   imgUrl: string;
   shotTitle: string;
   onAdd: () => void;
+  isSelected?: boolean;
 }) {
   const { url: signedUrl, ready } = useSignedUrl(imgUrl);
   return (
     <div
       onClick={onAdd}
-      className="relative shrink-0 aspect-square rounded-lg overflow-hidden border border-white/10 hover:border-violet-400/50 cursor-pointer transition"
+      className={`relative shrink-0 aspect-square rounded-lg overflow-hidden border cursor-pointer transition ${
+        isSelected ? 'border-violet-400 ring-2 ring-violet-400/50' : 'border-white/10 hover:border-violet-400/50'
+      }`}
       title={shotTitle}
     >
       {ready ? (
@@ -1205,8 +1327,265 @@ function ShotImageThumb({
           <ImageIcon className="w-6 h-6 text-white/30 animate-pulse" />
         </div>
       )}
+      {isSelected && (
+        <div className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-violet-500 flex items-center justify-center">
+          <CheckCircle className="w-3 h-3 text-white" />
+        </div>
+      )}
       <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate">
         {shotTitle}
+      </div>
+    </div>
+  );
+}
+
+// 分镜选择面板组件 - 按场次 + 分镜两级分组显示
+function ShotPickerPanel({
+  shots,
+  scenes,
+  currentShotId,
+  currentSceneId,
+  onAddImage,
+  isSelected,
+}: {
+  shots: Shot[];
+  scenes?: Scene[];
+  currentShotId?: number;
+  currentSceneId?: number;
+  onAddImage: (url: string, title: string) => void;
+  isSelected: (url: string) => boolean;
+}) {
+  const [expandedScenes, setExpandedScenes] = useState<Set<number>>(() => {
+    // 默认展开当前场次
+    if (currentSceneId != null) {
+      return new Set([currentSceneId]);
+    }
+    // 默认展开第一个场次
+    const firstScene = scenes?.[0];
+    return new Set(firstScene ? [firstScene.id] : []);
+  });
+  const [expandedShots, setExpandedShots] = useState<Set<number>>(() => {
+    // 默认展开当前分镜
+    if (currentShotId != null) {
+      return new Set([currentShotId]);
+    }
+    return new Set();
+  });
+
+  // 排除当前分镜
+  const filteredShots = shots.filter(s => s.id !== currentShotId);
+
+  // 整理图片数据
+  const shotImages = filteredShots
+    .map(s => {
+      const images: { url: string; shotId: number; shotTitle: string }[] = [];
+      if (s.media && Array.isArray(s.media)) {
+        s.media.forEach((m: { url?: string; type?: string }) => {
+          if (m.type === 'image' && m.url) {
+            images.push({ url: m.url, shotId: s.id, shotTitle: s.title || `分镜 ${s.id}` });
+          }
+        });
+      }
+      if (s.type === 'image' && s.url && !s.media) {
+        images.push({ url: s.url, shotId: s.id, shotTitle: s.title || `分镜 ${s.id}` });
+      }
+      return { shot: s, images };
+    })
+    .filter(s => s.images.length > 0);
+
+  // 按场次分组
+  const groupedByScene = () => {
+    if (!scenes || scenes.length === 0) {
+      // 无场次信息，直接平铺
+      return [{ scene: null as Scene | null, shots: shotImages }];
+    }
+
+    const groups: { scene: Scene | null; shots: { shot: Shot; images: { url: string; shotId: number; shotTitle: string }[] }[] }[] = [];
+    const processedSceneIds = new Set<number>();
+
+    // 按场次分组
+    for (const scene of scenes) {
+      const sceneShots = shotImages.filter(s => s.shot.sceneId === scene.id);
+      if (sceneShots.length > 0) {
+        groups.push({ scene, shots: sceneShots });
+        processedSceneIds.add(scene.id);
+      }
+    }
+
+    // 未分类分镜（sceneId 为 null 或不在 scenes 中的）
+    const uncategorized = shotImages.filter(s => {
+      if (s.shot.sceneId == null) return true;
+      return !processedSceneIds.has(s.shot.sceneId);
+    });
+    if (uncategorized.length > 0) {
+      groups.push({ scene: null, shots: uncategorized });
+    }
+
+    return groups;
+  };
+
+  const sceneGroups = groupedByScene();
+
+  const toggleScene = (sceneId: number) => {
+    setExpandedScenes(prev => {
+      const next = new Set(prev);
+      if (next.has(sceneId)) next.delete(sceneId);
+      else next.add(sceneId);
+      return next;
+    });
+  };
+
+  const toggleShot = (shotId: number) => {
+    setExpandedShots(prev => {
+      const next = new Set(prev);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
+  };
+
+  const expandAllScenes = () => {
+    const allSceneIds = new Set<number>();
+    sceneGroups.forEach(g => {
+      if (g.scene) allSceneIds.add(g.scene.id);
+    });
+    setExpandedScenes(allSceneIds);
+  };
+
+  const collapseAllScenes = () => {
+    setExpandedScenes(new Set());
+  };
+
+  if (filteredShots.length === 0) {
+    return (
+      <div className="mt-2 p-4 rounded-lg bg-slate-800/80 border border-white/10">
+        <p className="text-xs text-slate-500 text-center">暂无其他分镜</p>
+      </div>
+    );
+  }
+
+  if (shotImages.length === 0) {
+    return (
+      <div className="mt-2 p-4 rounded-lg bg-slate-800/80 border border-white/10">
+        <p className="text-xs text-slate-500 text-center">分镜暂无图片素材</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 p-2 rounded-lg bg-slate-800/80 border border-white/10 max-h-80 overflow-y-auto">
+      {/* 操作栏 */}
+      <div className="flex items-center justify-between mb-2 px-1">
+        <p className="text-xs text-slate-400">点击图片添加为参考图（支持跨场次选择）</p>
+        <div className="flex gap-1">
+          <button
+            onClick={expandAllScenes}
+            className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition"
+          >
+            全部展开
+          </button>
+          <button
+            onClick={collapseAllScenes}
+            className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition"
+          >
+            全部收起
+          </button>
+        </div>
+      </div>
+
+      {/* 场次分组列表 */}
+      <div className="space-y-2">
+        {sceneGroups.map(({ scene, shots: sceneShotImages }) => {
+          const sceneId = scene?.id ?? -1;
+          const isSceneExpanded = expandedScenes.has(sceneId);
+          const totalImages = sceneShotImages.reduce((acc, s) => acc + s.images.length, 0);
+          const totalSelected = sceneShotImages.reduce(
+            (acc, s) => acc + s.images.filter(img => isSelected(img.url)).length, 0
+          );
+
+          return (
+            <div key={`scene-${sceneId}`} className="rounded-lg border border-white/10 overflow-hidden">
+              {/* 场次标题栏 */}
+              <button
+                onClick={() => toggleScene(sceneId)}
+                className="w-full flex items-center justify-between px-3 py-2 bg-slate-800/70 hover:bg-slate-700/70 transition"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 text-slate-400 transition-transform shrink-0 ${isSceneExpanded ? 'rotate-0' : '-rotate-90'}`}
+                  />
+                  <span className="text-sm font-semibold text-white truncate">
+                    {scene?.name || '未分类'}
+                  </span>
+                  <span className="text-[10px] text-slate-400 shrink-0">
+                    ({sceneShotImages.length}个分镜 / {totalImages}张图)
+                  </span>
+                </div>
+                {totalSelected > 0 && (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 shrink-0">
+                    已选 {totalSelected}
+                  </span>
+                )}
+              </button>
+
+              {/* 场次内容 */}
+              {isSceneExpanded && (
+                <div className="p-2 bg-slate-900/40 space-y-1">
+                  {sceneShotImages.map(({ shot, images }) => {
+                    const shotId = shot.id;
+                    const isShotExpanded = expandedShots.has(shotId);
+                    const selectedCount = images.filter(img => isSelected(img.url)).length;
+
+                    return (
+                      <div key={shotId} className="rounded-md border border-white/5 overflow-hidden">
+                        {/* 分镜标题栏 */}
+                        <button
+                          onClick={() => toggleShot(shotId)}
+                          className="w-full flex items-center justify-between px-2 py-1 bg-slate-800/40 hover:bg-slate-700/40 transition"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <ChevronDown
+                              className={`w-3 h-3 text-slate-500 transition-transform shrink-0 ${isShotExpanded ? 'rotate-0' : '-rotate-90'}`}
+                            />
+                            <span className="text-xs text-slate-300 truncate">
+                              {shot.title || `分镜 ${shot.id}`}
+                            </span>
+                            <span className="text-[10px] text-slate-600 shrink-0">
+                              ({images.length}张)
+                            </span>
+                          </div>
+                          {selectedCount > 0 && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-violet-500/20 text-violet-300 shrink-0">
+                              {selectedCount}
+                            </span>
+                          )}
+                        </button>
+
+                        {/* 图片网格 */}
+                        {isShotExpanded && (
+                          <div className="p-1.5">
+                            <div className="grid grid-cols-4 sm:grid-cols-6 gap-1">
+                              {images.map((img, idx) => (
+                                <React.Fragment key={`${img.shotId}-${idx}`}>
+                                  <ShotImageThumb
+                                    imgUrl={img.url}
+                                    shotTitle={img.shotTitle}
+                                    onAdd={() => onAddImage(img.url, img.shotTitle)}
+                                    isSelected={isSelected(img.url)}
+                                  />
+                                </React.Fragment>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1258,6 +1637,41 @@ function StagedThumb({
       <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white text-center py-0.5">
         {idx + 1}{!img.uploaded && ' · 预览'}
       </span>
+    </div>
+  );
+}
+
+// 主预览图组件（独立组件以使用 useSignedUrl hook）
+function MainPreviewImage({ img }: { img: { id: string; url: string; uploaded: boolean } }) {
+  const { url: signedUrl, ready } = useSignedUrl(img.uploaded ? img.url : '');
+  return (
+    <div className="w-full rounded-xl border border-white/10 overflow-hidden mb-3 relative">
+      {img.uploaded ? (
+        ready ? (
+          <img
+            src={signedUrl}
+            alt="生成的图片"
+            className="w-full h-auto max-h-80 object-contain bg-black/40"
+            onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+          />
+        ) : (
+          <div className="w-full h-60 flex items-center justify-center bg-black/40">
+            <ImageIcon className="w-10 h-10 text-white/30 animate-pulse" />
+          </div>
+        )
+      ) : (
+        <img
+          src={img.url}
+          alt="生成的图片"
+          className="w-full h-auto max-h-80 object-contain bg-black/40"
+          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        />
+      )}
+      {!img.uploaded && (
+        <span className="absolute top-2 right-2 px-2 py-1 rounded-md bg-amber-500/80 text-white text-xs font-medium">
+          预览（未上传）
+        </span>
+      )}
     </div>
   );
 }

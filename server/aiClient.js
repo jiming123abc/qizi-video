@@ -26,9 +26,9 @@ const MODEL_PRICES = {
   
   // 生图模型：元/张
   'gpt-image-2': { medium: 0.08 },
-  'z-image-turbo': { standard: 0.02 },
+  'kling-image-v3-omni': { standard: 0.16 },
   'nano-banana-2': { standard: 0.05 },
-  'cogview-4': { standard: 0.05 },
+  'qwen-image-3.0': { standard: 0.18 },
 };
 
 // ========== 辅助函数 ==========
@@ -231,7 +231,7 @@ async function callImageGen(model, prompt, quality, size, baseUrl, apiKey) {
       n: 1,
       response_format: 'url'
     }),
-    signal: AbortSignal.timeout(60000)
+    signal: AbortSignal.timeout(120000)
   });
   
   if (!response.ok) {
@@ -257,26 +257,36 @@ async function callImageGen(model, prompt, quality, size, baseUrl, apiKey) {
 }
 
 /**
- * 调用图生图 API（如果有场景参考图）
+ * 调用图生图 API（支持单张或多张参考图）
+ * @param {string|string[]} refImageUrls - 参考图 URL（单张或数组）
  */
-async function callImageGenWithRef(model, prompt, refImageUrl, quality, size, baseUrl, apiKey) {
-  // 下载参考图片作为 base64
-  let refImageBase64 = null;
-  try {
-    const refResponse = await fetch(refImageUrl);
-    if (refResponse.ok) {
-      const buffer = await refResponse.arrayBuffer();
-      refImageBase64 = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
+async function callImageGenWithRef(model, prompt, refImageUrls, quality, size, baseUrl, apiKey) {
+  // 归一化为数组
+  const urls = Array.isArray(refImageUrls) ? refImageUrls : [refImageUrls];
+
+  // 下载所有参考图转为 base64
+  const base64Images = [];
+  for (const url of urls) {
+    try {
+      const refResponse = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      if (refResponse.ok) {
+        const buffer = await refResponse.arrayBuffer();
+        const mimeType = (refResponse.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
+        base64Images.push(`data:${mimeType};base64,${Buffer.from(buffer).toString('base64')}`);
+      }
+    } catch (e) {
+      console.warn(`[aiClient] 下载参考图失败: ${e.message}`);
     }
-  } catch (e) {
-    console.warn('[aiClient] 下载参考图失败，将使用文生图:', e.message);
+  }
+
+  if (base64Images.length === 0) {
+    console.warn('[aiClient] 所有参考图下载失败，将使用文生图');
     return callImageGen(model, prompt, quality, size, baseUrl, apiKey);
   }
-  
-  if (!refImageBase64) {
-    return callImageGen(model, prompt, quality, size, baseUrl, apiKey);
-  }
-  
+
+  // 单图保持 string（向后兼容），多图用数组
+  const imageField = base64Images.length === 1 ? base64Images[0] : base64Images;
+
   const response = await fetch(`${baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
@@ -291,15 +301,16 @@ async function callImageGenWithRef(model, prompt, refImageUrl, quality, size, ba
       watermark: false,
       n: 1,
       response_format: 'url',
-      image: refImageBase64
+      image: imageField
     }),
-    signal: AbortSignal.timeout(60000)
+    signal: AbortSignal.timeout(120000)
   });
-  
+
   if (!response.ok) {
     const errBody = await response.text();
     console.warn(`[aiClient] ${model} 图生图模式失败 (HTTP ${response.status})，降级到文生图: ${errBody.substring(0, 200)}`);
-    return callImageGen(model, prompt, quality, size, baseUrl, apiKey);
+    // 降级时使用带重试版本的 callImageGenWithRetry，确保文生图也有重试机会
+    return callImageGenWithRetry(model, prompt, quality, size, baseUrl, apiKey);
   }
   
   const data = await response.json();
@@ -331,7 +342,7 @@ async function callImageWithFallback(prompt, fallbackChain, settings, options = 
   
   for (let i = 0; i < fallbackChain.length; i++) {
     const item = fallbackChain[i];
-    const { model, quality = 'standard', provider, supportsImageRef } = item;
+    const { model, quality = 'standard', provider } = item;
     const baseUrl = getBaseUrl(provider, settings);
     const apiKey = getApiKey(provider, settings);
     
@@ -340,17 +351,13 @@ async function callImageWithFallback(prompt, fallbackChain, settings, options = 
       continue;
     }
     
-    console.log(`[aiClient] [${i + 1}/${fallbackChain.length}] 尝试模型 ${provider}/${model} (quality=${quality}, 图生图=${sceneImageUrl && supportsImageRef ? '是' : '否'})`);
+    console.log(`[aiClient] [${i + 1}/${fallbackChain.length}] 尝试模型 ${provider}/${model} (quality=${quality}, 图生图=${sceneImageUrl ? '是' : '否'})`);
     
     try {
       let result;
       
-      if (sceneImageUrl && supportsImageRef) {
+      if (sceneImageUrl) {
         result = await callImageGenWithRef(model, prompt, sceneImageUrl, quality, size, baseUrl, apiKey);
-      } else if (sceneImageUrl && !supportsImageRef) {
-        const sceneDesc = await analyzeSceneImage(sceneImageUrl, settings, taskId);
-        const enhancedPrompt = `${sceneDesc}, ${prompt}`;
-        result = await callImageGen(model, enhancedPrompt, quality, size, baseUrl, apiKey);
       } else {
         result = await callImageGen(model, prompt, quality, size, baseUrl, apiKey);
       }
@@ -383,10 +390,12 @@ async function analyzeSceneImage(imageUrl, settings, taskId) {
   // 下载图片
   let base64Image = null;
   try {
-    const response = await fetch(imageUrl);
+    const response = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) });
     if (response.ok) {
       const buffer = await response.arrayBuffer();
-      base64Image = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
+      // 从 Content-Type 头获取实际 MIME 类型，回退到 image/jpeg
+      const mimeType = (response.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
+      base64Image = `data:${mimeType};base64,${Buffer.from(buffer).toString('base64')}`;
     }
   } catch (e) {
     console.warn('[aiClient] 下载场景图失败:', e.message);
@@ -1005,10 +1014,12 @@ async function analyzeShotImage(mediaUrl, mediaType, provider, model, settings) 
     if (mediaType === 'video') {
       base64Image = await extractVideoFrame(mediaUrl);
     } else {
-      const response = await fetch(mediaUrl);
+      const response = await fetch(mediaUrl, { signal: AbortSignal.timeout(30000) });
       if (response.ok) {
         const buffer = await response.arrayBuffer();
-        base64Image = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
+        // 从 Content-Type 头获取实际 MIME 类型，回退到 image/jpeg
+        const mimeType = (response.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
+        base64Image = `data:${mimeType};base64,${Buffer.from(buffer).toString('base64')}`;
       }
     }
   } catch (e) {
@@ -1146,11 +1157,11 @@ async function callImageGenWithRetry(model, prompt, quality, size, baseUrl, apiK
 /**
  * P4-5 扩展：带重试的图生图（仅对 5xx/超时/ECONNRESET 重试 1 次，4xx 不重试）
  */
-async function callImageGenWithRefWithRetry(model, prompt, refImageUrl, quality, size, baseUrl, apiKey) {
+async function callImageGenWithRefWithRetry(model, prompt, refImageUrls, quality, size, baseUrl, apiKey) {
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return await callImageGenWithRef(model, prompt, refImageUrl, quality, size, baseUrl, apiKey);
+      return await callImageGenWithRef(model, prompt, refImageUrls, quality, size, baseUrl, apiKey);
     } catch (err) {
       lastErr = err;
       if (attempt === 0 && isRetryableError(err)) {

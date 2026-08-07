@@ -82,6 +82,7 @@ export default function AIScriptDialog({
   const [shots, setShots] = useState<ShotData[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   // P5-1：AI 生成的脚本文本（视频文案/场次划分/分镜脚本/拍摄脚本）+ 用户可编辑副本
   const [scriptText, setScriptText] = useState('');
   const [editingScriptText, setEditingScriptText] = useState('');
@@ -447,9 +448,9 @@ export default function AIScriptDialog({
     }
   };
 
-  // 应用素材镜头决策并提交到后端
-  const applyStockDecisionsAndSubmit = async () => {
-    // 过滤掉用户选择跳过的素材镜头
+  // 应用素材镜头决策：仅过滤 shots 并进入 completed 状态，最终创建由 handleConfirm 统一执行
+  // （修复：原实现在此处就提交 create-shots，导致 completed 状态的 handleConfirm 重复创建分镜）
+  const applyStockDecisionsAndSubmit = () => {
     const finalShots = shots.filter(shot => {
       if (shot.isStockOrEffect && stockDecisions[shot.shotIndex] === 'skip') {
         return false;
@@ -459,38 +460,7 @@ export default function AIScriptDialog({
 
     setShots(finalShots);
     setShotCount(finalShots.length);
-
-    // 提交到后端创建分镜
-    try {
-      const res = await fetch('/api/ai/create-shots', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          projectId,
-          sceneId,
-          shots: finalShots,
-          sceneMap: {} // 场次已在解析时创建
-        })
-      });
-
-      const data = await res.json();
-
-      if (data.success) {
-        setState('completed');
-        if (onSuccess) {
-          onSuccess({ shots: data.shots || finalShots, digitalAssets: generateDigitalAssets ? digitalAssets : null });
-        }
-      } else {
-        setError(data.message || '创建分镜失败');
-        setState('completed');
-      }
-    } catch (e) {
-      console.error('提交分镜失败:', e);
-      setError('网络错误，分镜数据已准备好但未能保存');
-      setState('completed');
-    }
+    setState('completed');
   };
 
   // 直接确认（无需分割或素材选择）
@@ -499,7 +469,10 @@ export default function AIScriptDialog({
       onClose();
       return;
     }
+    if (submitting) return; // 防止重复点击
 
+    setSubmitting(true);
+    setError(null);
     // 提交到后端创建分镜
     try {
       const res = await fetch('/api/ai/create-shots', {
@@ -528,6 +501,8 @@ export default function AIScriptDialog({
     } catch (e) {
       console.error('提交分镜失败:', e);
       setError('网络错误，请重试');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -1200,9 +1175,11 @@ export default function AIScriptDialog({
                 </button>
                 <button
                   onClick={handleConfirm}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 hover:shadow-lg hover:shadow-violet-500/30 text-white text-sm font-medium transition"
+                  disabled={submitting}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 hover:shadow-lg hover:shadow-violet-500/30 text-white text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
-                  创建分镜
+                  {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {submitting ? '创建中...' : '创建分镜'}
                 </button>
               </>
             )}

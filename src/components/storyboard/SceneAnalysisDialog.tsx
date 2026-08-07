@@ -34,7 +34,7 @@ export default function SceneAnalysisDialog({ isOpen, onClose, shots, projectId,
   const [results, setResults] = useState<AnalysisResultItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
-  const [deleteNonShots, setDeleteNonShots] = useState(true);
+  const [deleteNonShots, setDeleteNonShots] = useState(false);
 
   useEscapeKey(onClose, isOpen && phase !== 'analyzing');
 
@@ -45,7 +45,7 @@ export default function SceneAnalysisDialog({ isOpen, onClose, shots, projectId,
       setResults([]);
       setError(null);
       setIsApplying(false);
-      setDeleteNonShots(true);
+      setDeleteNonShots(false);
     }
   }, [isOpen]);
 

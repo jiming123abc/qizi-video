@@ -43,7 +43,7 @@ export function UploadDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[60] p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 flex items-center justify-center"
+      className="fixed inset-0 z-[75] p-4 bg-black/60 backdrop-blur-sm transition-opacity duration-200 flex items-center justify-center"
       onClick={onCancel}
     >
       <div

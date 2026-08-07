@@ -93,7 +93,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 收集所有媒体 URL（含项目 coverUrl）并批量签名
   const signAllMediaUrls = useCallback(async () => {
     const urls: string[] = [];
-    for (const refs of Object.values(referencesCache)) {
+    for (const refs of Object.values(referencesCache) as ReferenceItem[][]) {
       for (const ref of refs) {
         if (ref.url) urls.push(ref.url);
         // 视频封面走后端代理 /api/oss-snapshot，不需要签名
@@ -134,7 +134,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       signingRef.current = true;
       // 过滤出需要签名的URL（非data:uri）
       const needsSigning: string[] = [];
-      for (const refs of Object.values(referencesCache)) {
+      for (const refs of Object.values(referencesCache) as ReferenceItem[][]) {
         for (const ref of refs) {
           if (ref.url && !ref.url.startsWith('data:')) {
             needsSigning.push(ref.url);
@@ -1218,6 +1218,8 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
           type: ref.type,
           filename: ref.title,
           size: 0,
+          sortOrder: 0,
+          source: 'upload',
           createdAt: '',
           updatedAt: '',
         }))) : undefined}

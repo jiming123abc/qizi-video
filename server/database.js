@@ -734,10 +734,10 @@ function initDefaultSettings(callback) {
     image_model: 'gpt-image-2',
     image_quality: 'medium',
     image_fallback_chain: JSON.stringify([
-      { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true },
-      { model: 'z-image-turbo', quality: 'standard', provider: 'geekai', cost: 'low', supportsImageRef: false },
-      { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true },
-      { model: 'cogview-4', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: false }
+      { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
+      { model: 'kling-image-v3-omni', quality: 'standard', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
+      { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+      { model: 'qwen-image-3.0', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 3 }
     ]),
     default_image_size: '1024x576',
     export_include_images: 'true',
@@ -751,9 +751,9 @@ function initDefaultSettings(callback) {
       'gpt-4o-mini': { input: 0.01, output: 0.03 },
       'glm-4-flash': { input: 0, output: 0 },
       'gpt-image-2': { per_image_medium: 0.08 },
-      'z-image-turbo': { per_image_standard: 0.02 },
+      'kling-image-v3-omni': { per_image_standard: 0.16 },
       'nano-banana-2': { per_image_standard: 0.05 },
-      'cogview-4': { per_image_standard: 0.05 }
+      'qwen-image-3.0': { per_image_standard: 0.18 }
     })
   };
 
@@ -771,7 +771,8 @@ function initDefaultSettings(callback) {
             remaining--;
             if (remaining === 0) {
               console.log('[app] 已初始化 settings: ' + inserted + ' 条');
-              callback && callback();
+              // 初始化完成后，迁移旧配置
+              migrateOldModelConfigs(callback);
             }
           }
         );
@@ -779,10 +780,127 @@ function initDefaultSettings(callback) {
         remaining--;
         if (remaining === 0) {
           console.log('[app] settings 已存在，跳过初始化');
-          callback && callback();
+          // 检查并迁移旧配置
+          migrateOldModelConfigs(callback);
         }
       }
     });
+  });
+}
+
+// ========== 迁移旧模型配置 ==========
+// 将旧的 z-image-turbo、cogview-4 配置升级为新模型
+function migrateOldModelConfigs(callback) {
+  const OLD_MODELS = ['z-image-turbo', 'cogview-4'];
+  const NEW_IMAGE_CHAIN = JSON.stringify([
+    { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
+    { model: 'kling-image-v3-omni', quality: 'standard', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
+    { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+    { model: 'qwen-image-3.0', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 3 }
+  ]);
+  const NEW_MODEL_PRICES = JSON.stringify({
+    'deepseek-chat': { input: 0.001, output: 0.002 },
+    'gpt-4o-mini': { input: 0.01, output: 0.03 },
+    'glm-4-flash': { input: 0, output: 0 },
+    'gpt-image-2': { per_image_medium: 0.08 },
+    'kling-image-v3-omni': { per_image_standard: 0.16 },
+    'nano-banana-2': { per_image_standard: 0.05 },
+    'qwen-image-3.0': { per_image_standard: 0.18 }
+  });
+
+  // 检查 image_fallback_chain 是否包含旧模型
+  storyboardDb.get('SELECT value FROM settings WHERE key = ?', ['image_fallback_chain'], function(err, row) {
+    if (!row) {
+      migrateModelSupportsImageRef(callback);
+      return;
+    }
+    try {
+      const chain = JSON.parse(row.value);
+      const hasOldModel = chain.some(m => OLD_MODELS.includes(m.model));
+      if (hasOldModel) {
+        console.log('[app] 检测到旧模型配置，正在迁移...');
+        storyboardDb.run(
+          'UPDATE settings SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?',
+          [NEW_IMAGE_CHAIN, 'image_fallback_chain'],
+          function() {
+            console.log('[app] image_fallback_chain 已更新');
+            // 同时更新 model_prices
+            storyboardDb.get('SELECT value FROM settings WHERE key = ?', ['model_prices'], function(err2, row2) {
+              if (row2) {
+                try {
+                  const prices = JSON.parse(row2.value);
+                  const hasOldPrice = OLD_MODELS.some(m => prices[m]);
+                  if (hasOldPrice) {
+                    storyboardDb.run(
+                      'UPDATE settings SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?',
+                      [NEW_MODEL_PRICES, 'model_prices'],
+                      function() {
+                        console.log('[app] model_prices 已更新');
+                        migrateModelSupportsImageRef(callback);
+                      }
+                    );
+                  } else {
+                    migrateModelSupportsImageRef(callback);
+                  }
+                } catch (e) {
+                  migrateModelSupportsImageRef(callback);
+                }
+              } else {
+                migrateModelSupportsImageRef(callback);
+              }
+            });
+          }
+        );
+      } else {
+        migrateModelSupportsImageRef(callback);
+      }
+    } catch (e) {
+      migrateModelSupportsImageRef(callback);
+    }
+  });
+}
+
+// ========== 迁移：确保所有生图模型都支持参考图 ==========
+function migrateModelSupportsImageRef(callback) {
+  storyboardDb.get('SELECT value FROM settings WHERE key = ?', ['image_fallback_chain'], function(err, row) {
+    if (!row) {
+      callback && callback();
+      return;
+    }
+    try {
+      const chain = JSON.parse(row.value);
+      let needsUpdate = false;
+      const updatedChain = chain.map(m => {
+        const updated = { ...m };
+        // 确保 supportsImageRef 为 true
+        if (updated.supportsImageRef !== true) {
+          updated.supportsImageRef = true;
+          needsUpdate = true;
+        }
+        // 确保有 maxRefImages 默认值
+        if (!updated.maxRefImages || updated.maxRefImages < 1) {
+          updated.maxRefImages = 10;
+          needsUpdate = true;
+        }
+        return updated;
+      });
+
+      if (needsUpdate) {
+        console.log('[app] 更新模型配置：所有模型必须支持参考图');
+        storyboardDb.run(
+          'UPDATE settings SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?',
+          [JSON.stringify(updatedChain), 'image_fallback_chain'],
+          function() {
+            console.log('[app] image_fallback_chain 已更新：所有模型支持参考图');
+            callback && callback();
+          }
+        );
+      } else {
+        callback && callback();
+      }
+    } catch (e) {
+      callback && callback();
+    }
   });
 }
 

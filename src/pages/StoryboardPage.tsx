@@ -1255,6 +1255,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         );
       });
 
+  const selectedShotsForAnalysis = shots.filter(s => selectedIds.has(s.id));
+
   // # 编号快速定位
   useEffect(() => {
     const trimmed = searchQuery.trim();
@@ -1545,6 +1547,14 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
                 >
                   移动到场次
                 </button>
+                {currentTab === 'pending' && currentSceneId === null && (
+                  <button
+                    onClick={() => setShowSceneAnalysisDialog(true)}
+                    className="px-3 py-1.5 rounded-full text-xs border border-fuchsia-400/30 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 text-fuchsia-200 transition"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 inline mr-1" /> AI 场次分析
+                  </button>
+                )}
                 {currentTab === 'pending' && (
                   <button
                     onClick={batchMarkAsDoneWithConfirm}
@@ -1627,16 +1637,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
               >
                 <Plus className="w-4 h-4" />
                 增加分镜
-              </button>
-            )}
-            {/* 未分类视图：AI 场次分析按钮 */}
-            {currentSceneId === null && currentTab === 'pending' && filteredShots.length > 0 && (
-              <button
-                onClick={() => setShowSceneAnalysisDialog(true)}
-                className="mt-3 w-full py-3 rounded-2xl border border-fuchsia-400/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 hover:from-violet-500/20 hover:to-fuchsia-500/20 text-fuchsia-200 text-sm font-medium transition flex items-center justify-center gap-2"
-              >
-                <Sparkles className="w-4 h-4" />
-                AI 场次分析（自动归类 {filteredShots.length} 个分镜）
               </button>
             )}
           </div>
@@ -1964,7 +1964,8 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
           shot={selectedShotForAIGen}
           ownerType="shot"
           projectId={projectId}
-          sceneShots={shots.filter(s => s.sceneId === selectedShotForAIGen.sceneId)}
+          scenes={scenes}
+          allShots={shots}
           onUseImage={async (imageUrl, fileSize) => {
             const shotId = selectedShotForAIGen.id;
             await fetch(`/api/shots/${shotId}/media`, {
@@ -2068,7 +2069,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       <SceneAnalysisDialog
         isOpen={showSceneAnalysisDialog}
         onClose={() => setShowSceneAnalysisDialog(false)}
-        shots={filteredShots}
+        shots={selectedShotsForAnalysis}
         projectId={projectId}
         onApply={async (actions: SceneAction[]) => {
           try {

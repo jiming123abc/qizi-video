@@ -1429,7 +1429,7 @@ app.post('/api/ai/generate-image', async (req, res) => {
   try {
     // P3-24：refImages 优先于 sceneImageUrl（向后兼容）
     // Q1：previewOnly=true 时仅生成预览（不上传 OSS），用于多图暂存
-    const { shotId, prompt, sceneImageUrl, refImages, size, provider, model, quality, previewOnly } = req.body;
+    const { shotId, prompt, sceneImageUrl, refImages, atReferencedAssets, size, provider, model, quality, previewOnly } = req.body;
     
     if (!shotId) {
       return res.status(400).json({ success: false, message: '缺少 shotId' });
@@ -1469,6 +1469,7 @@ app.post('/api/ai/generate-image', async (req, res) => {
         shotId: parseInt(shotId), 
         prompt: prompt || shot.aiImagePrompt || shot.sceneContent, 
         refImages: normalizedRefUrls,
+        atReferencedAssets,
         size,
         provider,
         model,
@@ -1477,7 +1478,7 @@ app.post('/api/ai/generate-image', async (req, res) => {
     });
     
     // 异步处理
-    processImageGen(task.id, shot, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { previewOnly: !!previewOnly });
+    processImageGen(task.id, shot, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { previewOnly: !!previewOnly, atReferencedAssets });
     
     res.json({ success: true, taskId: task.id });
   } catch (error) {
@@ -1491,7 +1492,7 @@ app.post('/api/ai/generic-image-gen', async (req, res) => {
   try {
     // P3-22：新增 ownerType/ownerId 参数，用于持久化历史图
     // P3-24：refImages 优先于 refImageUrl（向后兼容）
-    const { prompt, refImageUrl, refImages, size, provider, model, quality, ownerType, ownerId, projectId, previewOnly } = req.body;
+    const { prompt, refImageUrl, refImages, atReferencedAssets, size, provider, model, quality, ownerType, ownerId, projectId, previewOnly } = req.body;
 
     if (!prompt || !provider || !model) {
       return res.status(400).json({ success: false, message: '缺少必要参数: prompt, provider, model' });
@@ -1511,11 +1512,11 @@ app.post('/api/ai/generic-image-gen', async (req, res) => {
       type: 'image_gen',
       status: 'processing',
       projectId: null,
-      input: { prompt, refImages: normalizedRefUrls, size, provider, model, quality: quality || 'standard', ownerType, ownerId }
+      input: { prompt, refImages: normalizedRefUrls, atReferencedAssets, size, provider, model, quality: quality || 'standard', ownerType, ownerId }
     });
 
     // 异步处理
-    processGenericImageGen(task.id, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { ownerType, ownerId, projectId, previewOnly: !!previewOnly });
+    processGenericImageGen(task.id, prompt, normalizedRefUrls, size, provider, model, quality || 'standard', { ownerType, ownerId, projectId, previewOnly: !!previewOnly, atReferencedAssets });
 
     res.json({ success: true, taskId: task.id });
   } catch (error) {
@@ -1744,28 +1745,55 @@ app.post('/api/ai/analyze-shot-scenes', async (req, res) => {
       try {
         let base64 = null;
         if (item.mediaType === 'image') {
-          // 图片直接使用
-          const resp = await fetch(item.mediaUrl);
+          // 图片：OSS 私有文件先签名再获取
+          let imageUrl = item.mediaUrl;
+          const ossKey = isOSSConfigured && ossClient ? extractOssKeyFromUrl(item.mediaUrl) : null;
+          if (ossKey) {
+            try {
+              imageUrl = ossClient.signatureUrl(ossKey, { expires: 3600 });
+            } catch (e) {
+              console.warn(`[AI] 图片签名失败，使用原始URL:`, e.message);
+            }
+          }
+          const resp = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) });
           if (resp.ok) {
             const buf = Buffer.from(await resp.arrayBuffer());
             const compressed = await compressImage(buf, 50);
             base64 = compressed.toString('base64');
           }
         } else {
-          // 视频：用 ffmpeg 提取 startTime 处的帧
-          const tempFrame = path.join(os.tmpdir(), `qizi_scene_frame_${Date.now()}_${i}.jpg`);
-          const ffmpegBin = systemFfmpeg || require('ffmpeg-static');
-          const { execSync } = require('child_process');
-          try {
-            execSync(`"${ffmpegBin}" -y -ss ${item.startTime} -i "${item.mediaUrl}" -frames:v 1 -q:v 5 -vf scale=480:-1 "${tempFrame}"`, { timeout: 15000, stdio: 'ignore' });
-            if (fs.existsSync(tempFrame)) {
-              const buf = fs.readFileSync(tempFrame);
-              const compressed = await compressImage(buf, 50);
-              base64 = compressed.toString('base64');
-              fs.unlinkSync(tempFrame);
+          // 视频：优先用 OSS 视频截图功能，失败再用 ffmpeg 兜底
+          const ossKey = isOSSConfigured && ossClient ? extractOssKeyFromUrl(item.mediaUrl) : null;
+          if (ossKey) {
+            try {
+              const snapshotTimeMs = Math.max(0, Math.round((item.startTime || 0) * 1000 + 50));
+              const process = `video/snapshot,t_${snapshotTimeMs},f_jpg,w_480`;
+              const signedUrl = ossClient.signatureUrl(ossKey, { expires: 3600, process });
+              const resp = await fetch(signedUrl, { signal: AbortSignal.timeout(30000) });
+              if (resp.ok) {
+                const buf = Buffer.from(await resp.arrayBuffer());
+                const compressed = await compressImage(buf, 50);
+                base64 = compressed.toString('base64');
+              }
+            } catch (e) {
+              console.warn(`[AI] OSS 截图失败，尝试 ffmpeg 兜底:`, e.message);
             }
-          } catch (e) {
-            console.warn(`[AI] 提取分镜 ${item.shotId} 帧失败:`, e.message);
+          }
+          if (!base64) {
+            const tempFrame = path.join(os.tmpdir(), `qizi_scene_frame_${Date.now()}_${i}.jpg`);
+            const ffmpegBin = systemFfmpeg || require('ffmpeg-static');
+            const { execSync } = require('child_process');
+            try {
+              execSync(`"${ffmpegBin}" -y -ss ${item.startTime} -i "${item.mediaUrl}" -frames:v 1 -q:v 5 -vf scale=480:-1 "${tempFrame}"`, { timeout: 15000, stdio: 'ignore' });
+              if (fs.existsSync(tempFrame)) {
+                const buf = fs.readFileSync(tempFrame);
+                const compressed = await compressImage(buf, 50);
+                base64 = compressed.toString('base64');
+                fs.unlinkSync(tempFrame);
+              }
+            } catch (e) {
+              console.warn(`[AI] 提取分镜 ${item.shotId} 帧失败:`, e.message);
+            }
           }
         }
         if (base64) {
@@ -1964,11 +1992,32 @@ async function autoAssignScenesByNames(projectId, sceneNames, manualSceneId) {
     return sceneMap;
   }
 
+  // 查询项目下已存在的场次，避免重复创建同名胜次
+  let existingScenes = [];
+  try {
+    existingScenes = await db.scenes.getByProjectId(projectId);
+  } catch (err) {
+    console.warn('[autoAssignScenes] 查询已有场次失败，将创建新场次:', err.message);
+  }
+  const existingMap = new Map();
+  for (const s of existingScenes) {
+    if (s.name) {
+      existingMap.set(s.name.trim().toLowerCase(), s.id);
+    }
+  }
+
   for (const name of orderedNames) {
     try {
-      const scene = await db.scenes.create(projectId, name);
       const key = name.toLowerCase();
+      // 优先复用已存在的同名胜次
+      if (existingMap.has(key)) {
+        sceneMap.set(key, existingMap.get(key));
+        continue;
+      }
+      // 修复：scenes.create 接收 { projectId, name } 对象，而非位置参数
+      const scene = await db.scenes.create({ projectId, name });
       sceneMap.set(key, scene.id);
+      existingMap.set(key, scene.id); // 防止同一次任务内重复创建
     } catch (err) {
       console.error('[autoAssignScenes] 创建场次失败:', name, err.message);
     }
@@ -2096,9 +2145,37 @@ async function processFinalShots(taskId, scriptContent, mode, settings, params, 
   let shotsData = [];
   let digitalAssets = { mainActors: [], keyProps: [], mainScenes: [] };
   try {
-    const jsonMatch = result.content.match(/```json\s*([\s\S]*?)\s*```/) || result.content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const jsonStr = jsonMatch[1] || jsonMatch[0];
+    // 优先匹配 ```json 代码块；其次用平衡花括号提取首个完整 JSON 对象（避免贪婪匹配越界）
+    let jsonStr = null;
+    const codeBlockMatch = result.content.match(/```json\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1];
+    } else {
+      // 手动扫描平衡花括号，提取第一个完整的 {...} 对象
+      const text = result.content;
+      const start = text.indexOf('{');
+      if (start !== -1) {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = start; i < text.length; i++) {
+          const ch = text[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === '{') depth++;
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0) {
+              jsonStr = text.substring(start, i + 1);
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (jsonStr) {
       const parsed = JSON.parse(jsonStr);
       shotsData = Array.isArray(parsed) ? parsed : (parsed.shots || []);
       // 提取数字资产信息
@@ -2195,7 +2272,7 @@ async function processFinalShots(taskId, scriptContent, mode, settings, params, 
 }
 
 async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size, provider, model, quality, options = {}) {
-  const { previewOnly = false } = options;
+  const { previewOnly = false, atReferencedAssets = [] } = options;
   // 跟踪已上传到项目 OSS 的图片 URL（用于失败时清理，避免残留）
   let uploadedOssUrl = '';
   try {
@@ -2208,40 +2285,11 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
     }
     const baseUrl = aiClient.getBaseUrl(provider);
     
-    // P3-24：确定参考图 URL 数组（用户选择 > 自动匹配）
-    // userSelectedImageUrls 已是数组（[] 或 [url1, url2, ...]）
-    let styleRefImageUrls = Array.isArray(userSelectedImageUrls) ? userSelectedImageUrls.filter(u => u) : [];
+    // P3-24：用户直接传的参考图 URL 数组，不再做任何自动匹配
+    const styleRefImageUrls = Array.isArray(userSelectedImageUrls) ? userSelectedImageUrls.filter(u => u) : [];
     
-    // 若用户未选择参考图，按地点/场次自动匹配（保持原有行为，单图回退）
-    if (styleRefImageUrls.length === 0) {
-      if (shot.location && shot.location.trim()) {
-        // 按地点匹配场景数字资产
-        const normalizedLocation = shot.location.trim().toLowerCase();
-        const sceneAssets = await db.digitalAssets.getByProjectId(shot.projectId, 'scene');
-        const matchedAsset = sceneAssets.find(a => a.name && a.name.trim().toLowerCase() === normalizedLocation && a.imageUrl);
-        if (matchedAsset) {
-          styleRefImageUrls = [matchedAsset.imageUrl];
-          console.log(`[AI] 使用场景数字资产作为参考图（地点匹配: ${shot.location}）: ${styleRefImageUrls[0].substring(0, 50)}...`);
-        } else {
-          // 按地点查找同项目下的参考图
-          const locationImages = await db.shotMedia.getByLocation(shot.projectId, shot.location);
-          if (locationImages && locationImages.length > 0) {
-            styleRefImageUrls = [locationImages[0].url];
-            console.log(`[AI] 使用同地点参考图作为风格参考（地点: ${shot.location}）: ${styleRefImageUrls[0].substring(0, 50)}...`);
-          }
-        }
-      }
-      
-      // 如果地点没找到，回退到按场次查找
-      if (styleRefImageUrls.length === 0 && shot.sceneId) {
-        const sceneImages = await db.shotMedia.getBySceneId(shot.sceneId);
-        if (sceneImages && sceneImages.length > 0) {
-          styleRefImageUrls = [sceneImages[0].url];
-          console.log(`[AI] 使用同场次参考图作为风格参考: ${styleRefImageUrls[0].substring(0, 50)}...`);
-        }
-      }
-    } else {
-      console.log(`[AI] 使用用户选择的 ${styleRefImageUrls.length} 张参考图`);
+    if (styleRefImageUrls.length > 0) {
+      console.log(`[AI] 使用用户选择的 ${styleRefImageUrls.length} 张参考图（不再自动匹配）`);
     }
     
     // P3-24：对所有 OSS 私有 URL 生成签名 URL
@@ -2260,72 +2308,98 @@ async function processImageGen(taskId, shot, prompt, userSelectedImageUrls, size
     };
     const signedRefUrls = styleRefImageUrls.map(signOssUrl);
     
-    // 获取模型配置，检查是否支持图生图
+    // 获取模型配置
     const imageModels = settings.image_models || [];
     const modelConfig = imageModels.find(m => m.model === model && m.provider === provider);
-    const supportsImageRef = modelConfig?.supportsImageRef || false;
-    
-    // 生成最终 prompt
+
+    // 生成最终 prompt：优先用户prompt → 回退 shot.aiImagePrompt → 回退 shot.sceneContent
     let finalPrompt = prompt || shot.aiImagePrompt || shot.sceneContent;
     
-    // 调用 AI 生图
+    // P3-24：注入 @引用资产的描述到 prompt（查 digital_assets 表）
+    if (Array.isArray(atReferencedAssets) && atReferencedAssets.length > 0 && shot?.projectId) {
+      const assetIds = atReferencedAssets
+        .map(a => parseInt(a.assetId))
+        .filter(id => Number.isInteger(id) && id > 0);
+      if (assetIds.length > 0) {
+        try {
+          const rows = await db.storyboardAsync.all(
+            'SELECT id, name, type, description FROM digital_assets WHERE projectId = ? AND id IN (' + assetIds.map(() => '?').join(',') + ')',
+            [shot.projectId, ...assetIds]
+          );
+          if (rows && rows.length > 0) {
+            const assetLabelMap = { actor: '角色', prop: '道具', scene: '场景' };
+            const descParts = [];
+            rows.forEach(row => {
+              const label = assetLabelMap[row.type] || '素材';
+              // 资产名 + 描述（有描述时用描述，没有时仅写"请确保画面中出现[资产名]"）
+              const content = row.description && row.description.trim()
+                ? `${row.description.trim()}`
+                : `请确保画面中出现此${label}`;
+              descParts.push(`[参考${label}：${row.name || ''}] ${content}`);
+            });
+            if (descParts.length > 0) {
+              finalPrompt = `${finalPrompt}。${descParts.join('；')}。`;
+              console.log(`[AI] 已注入 ${descParts.length} 个 @引用资产描述到 prompt`);
+            }
+          }
+        } catch (e) {
+          console.warn('[AI] @引用资产描述注入失败（不影响主流程）:', e.message);
+        }
+      }
+    }
+    
+    // 调用 AI 生图（所有模型都支持图生图）
     let result;
-    if (signedRefUrls.length > 0 && supportsImageRef) {
-      // 模型支持图生图：当前 aiClient.callImageGenWithRef 仅支持单图，取第一张
-      // 多图扩展待后续支持（受限于各家 API 单次只能传 1 张参考图）
-      if (signedRefUrls.length > 1) {
-        console.log(`[AI] 模型仅支持单张参考图，使用第一张（共 ${signedRefUrls.length} 张）`);
-      }
-      console.log(`[AI] 使用图生图模式，模型: ${model}，参考图: ${signedRefUrls[0].substring(0, 50)}...`);
-      result = await aiClient.callImageGenWithRefWithRetry(model, finalPrompt, signedRefUrls[0], quality, size || '1024x576', baseUrl, apiKey);
-    } else if (signedRefUrls.length > 0 && !supportsImageRef) {
-      // 模型不支持图生图：分析所有参考图风格并融入 prompt
-      console.log(`[AI] 模型不支持图生图，分析 ${signedRefUrls.length} 张参考图风格融入 prompt`);
-      const styleDescs = await Promise.all(
-        signedRefUrls.map(u => aiClient.analyzeSceneImage(u, settings, taskId))
-      );
-      const validDescs = styleDescs.filter(Boolean);
-      if (validDescs.length > 0) {
-        finalPrompt = `${validDescs.join('，')}, ${finalPrompt}`;
-      }
-      result = await aiClient.callImageGenWithRetry(model, finalPrompt, quality, size || '1024x576', baseUrl, apiKey);
+    if (signedRefUrls.length > 0) {
+      // 图生图模式
+      console.log(`[AI] 使用图生图模式，模型: ${model}，参考图: ${signedRefUrls.length} 张`);
+      await db.aiTasks.update(taskId, { progress: 30, status: 'processing' });
+      result = await aiClient.callImageGenWithRefWithRetry(model, finalPrompt, signedRefUrls, quality, size || '1024x576', baseUrl, apiKey);
     } else {
       // 无参考图，直接文生图
       console.log(`[AI] 直接文生图，模型: ${model}`);
+      await db.aiTasks.update(taskId, { progress: 30, status: 'processing' });
       result = await aiClient.callImageGenWithRetry(model, finalPrompt, quality, size || '1024x576', baseUrl, apiKey);
     }
+    await db.aiTasks.update(taskId, { progress: 70, status: 'processing' });
     
-    // 上传到 OSS
+    // 上传到 OSS（支持 url 和 b64_json 两种返回格式）
     let imageUrl = result.url;
     let fileSize = 0;
-    if (!previewOnly && isOSSConfigured && ossClient && imageUrl) {
+    if (!previewOnly && isOSSConfigured && ossClient && (imageUrl || result.b64_json)) {
       try {
-        const response = await fetch(imageUrl);
-        if (response.ok) {
+        let fileBuffer;
+        if (result.b64_json) {
+          // b64_json 返回格式：直接解码 base64
+          fileBuffer = Buffer.from(result.b64_json, 'base64');
+        } else {
+          // url 返回格式：下载图片
+          const response = await fetch(imageUrl, { signal: AbortSignal.timeout(60000) });
+          if (!response.ok) throw new Error(`下载图片失败: HTTP ${response.status}`);
           const buffer = await response.arrayBuffer();
-          let fileBuffer = Buffer.from(buffer);
-          fileSize = fileBuffer.length;
-          // AI 生图压缩：超过阈值则压缩
-          const aiThresholdStr = await db.settings.get('image_compress_threshold_kb');
-          const aiThresholdKB = aiThresholdStr ? parseInt(aiThresholdStr) : 300;
-          if (fileSize > aiThresholdKB * 1024) {
-            try {
-              fileBuffer = await compressImage(fileBuffer, aiThresholdKB, 'image/png');
-              fileSize = fileBuffer.length;
-              console.log(`[AI] 参考图已压缩: ${buffer.byteLength} -> ${fileSize} bytes`);
-            } catch (e) {
-              console.warn('[AI] 参考图压缩失败，使用原图:', e.message);
-            }
-          }
-          const ext = 'png';
-          const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
-          const folder = `projects/${shot.projectId}/shot-references/images`;
-          const ossKey = `${folder}/${fileName}`;
-          const ossResult = await ossClient.put(ossKey, fileBuffer);
-          imageUrl = ossResult.url;
-          uploadedOssUrl = imageUrl;
-          console.log(`[AI] 参考图已上传到 OSS: ${ossKey}`);
+          fileBuffer = Buffer.from(buffer);
         }
+        fileSize = fileBuffer.length;
+        // AI 生图压缩：超过阈值则压缩
+        const aiThresholdStr = await db.settings.get('image_compress_threshold_kb');
+        const aiThresholdKB = aiThresholdStr ? parseInt(aiThresholdStr) : 300;
+        if (fileSize > aiThresholdKB * 1024) {
+          try {
+            fileBuffer = await compressImage(fileBuffer, aiThresholdKB, 'image/png');
+            fileSize = fileBuffer.length;
+            console.log(`[AI] 参考图已压缩: ${fileSize} bytes`);
+          } catch (e) {
+            console.warn('[AI] 参考图压缩失败，使用原图:', e.message);
+          }
+        }
+        const ext = 'png';
+        const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
+        const folder = `projects/${shot.projectId}/shot-references/images`;
+        const ossKey = `${folder}/${fileName}`;
+        const ossResult = await ossClient.put(ossKey, fileBuffer);
+        imageUrl = ossResult.url;
+        uploadedOssUrl = imageUrl;
+        console.log(`[AI] 参考图已上传到 OSS: ${ossKey}`);
       } catch (e) {
         console.warn('[AI] 参考图 OSS 上传失败，使用原始 URL:', e.message);
       }
@@ -2418,7 +2492,7 @@ async function processVideoSplit(taskId, videoUrl, params) {
  * P3-24：refImageUrls 改为数组，支持多参考图
  */
 async function processGenericImageGen(taskId, prompt, refImageUrls, size, provider, model, quality, ownerInfo) {
-  const { previewOnly = false } = ownerInfo || {};
+  const { previewOnly = false, atReferencedAssets = [], projectId } = ownerInfo || {};
   try {
     const settings = await db.settings.getAll();
 
@@ -2448,68 +2522,98 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
     }
     const baseUrl = aiClient.getBaseUrl(provider);
 
-    // 查找模型配置以判断是否支持图生图
+    // 查找模型配置
     const imageModels = settings.image_models || [];
     const modelConfig = imageModels.find(m => m.model === model && m.provider === provider);
-    const supportsImageRef = modelConfig?.supportsImageRef || false;
 
-    console.log(`[AI] 通用生图: ${provider}/${model} (quality=${quality}, 参考图=${signedRefUrls.length}张, 图生图=${signedRefUrls.length > 0 && supportsImageRef ? '是' : '否'})`);
+    console.log(`[AI] 通用生图: ${provider}/${model} (quality=${quality}, 参考图=${signedRefUrls.length}张)`);
 
     let finalPrompt = prompt;
-    let result;
-    if (signedRefUrls.length > 0 && supportsImageRef) {
-      // 模型支持图生图：取第一张（API 单图限制）
-      if (signedRefUrls.length > 1) {
-        console.log(`[AI] 模型仅支持单张参考图，使用第一张（共 ${signedRefUrls.length} 张）`);
-      }
-      result = await aiClient.callImageGenWithRefWithRetry(model, prompt, signedRefUrls[0], quality, size || '1024x576', baseUrl, apiKey);
-    } else if (signedRefUrls.length > 0 && !supportsImageRef) {
-      // 模型不支持图生图：分析所有参考图风格融入 prompt
-      console.log(`[AI] 模型不支持图生图，分析 ${signedRefUrls.length} 张参考图风格融入 prompt`);
-      const styleDescs = await Promise.all(
-        signedRefUrls.map(u => aiClient.analyzeSceneImage(u, settings, taskId))
-      );
-      const validDescs = styleDescs.filter(Boolean);
-      if (validDescs.length > 0) {
-        finalPrompt = `${validDescs.join('，')}, ${prompt}`;
-      }
-      result = await aiClient.callImageGenWithRetry(model, finalPrompt, quality, size || '1024x576', baseUrl, apiKey);
-    } else {
-      result = await aiClient.callImageGenWithRetry(model, prompt, quality, size || '1024x576', baseUrl, apiKey);
-    }
 
-    // 上传到 OSS
-    let imageUrl = result.url;
-    let fileSize = 0;
-    if (!previewOnly && isOSSConfigured && ossClient && imageUrl) {
-      try {
-        const response = await fetch(imageUrl);
-        if (response.ok) {
-          const buffer = await response.arrayBuffer();
-          let fileBuffer = Buffer.from(buffer);
-          fileSize = fileBuffer.length;
-          // AI 生图压缩：超过阈值则压缩
-          const aiThresholdStr = await db.settings.get('image_compress_threshold_kb');
-          const aiThresholdKB = aiThresholdStr ? parseInt(aiThresholdStr) : 300;
-          if (fileSize > aiThresholdKB * 1024) {
-            try {
-              fileBuffer = await compressImage(fileBuffer, aiThresholdKB, 'image/png');
-              fileSize = fileBuffer.length;
-              console.log(`[AI] 图片已压缩: ${buffer.byteLength} -> ${fileSize} bytes`);
-            } catch (e) {
-              console.warn('[AI] 图片压缩失败，使用原图:', e.message);
+    // P3-24：注入 @引用资产的描述到 prompt（查 digital_assets 表）
+    if (Array.isArray(atReferencedAssets) && atReferencedAssets.length > 0 && projectId) {
+      const assetIds = atReferencedAssets
+        .map(a => parseInt(a.assetId))
+        .filter(id => Number.isInteger(id) && id > 0);
+      if (assetIds.length > 0) {
+        try {
+          const rows = await db.storyboardAsync.all(
+            'SELECT id, name, type, description FROM digital_assets WHERE projectId = ? AND id IN (' + assetIds.map(() => '?').join(',') + ')',
+            [projectId, ...assetIds]
+          );
+          if (rows && rows.length > 0) {
+            const assetLabelMap = { actor: '角色', prop: '道具', scene: '场景' };
+            const descParts = [];
+            rows.forEach(row => {
+              const label = assetLabelMap[row.type] || '素材';
+              const content = row.description && row.description.trim()
+                ? `${row.description.trim()}`
+                : `请确保画面中出现此${label}`;
+              descParts.push(`[参考${label}：${row.name || ''}] ${content}`);
+            });
+            if (descParts.length > 0) {
+              finalPrompt = `${finalPrompt}。${descParts.join('；')}。`;
+              console.log(`[AI] 通用生图已注入 ${descParts.length} 个 @引用资产描述到 prompt`);
             }
           }
-          const ext = 'png';
-          const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
-          const projectId = ownerInfo && ownerInfo.projectId;
-          if (!projectId) throw new Error('projectId 不能为空');
-          const folder = `projects/${projectId}/digital-assets`;
-          const ossKey = `${folder}/${fileName}`;
-          const ossResult = await ossClient.put(ossKey, fileBuffer);
-          imageUrl = ossResult.url;
-          console.log(`[AI] 图片已上传到 OSS: ${ossKey}`);
+        } catch (e) {
+          console.warn('[AI] 通用生图 @引用资产描述注入失败（不影响主流程）:', e.message);
         }
+      }
+    }
+
+    let result;
+    if (signedRefUrls.length > 0) {
+      // 图生图模式
+      console.log(`[AI] 通用生图使用图生图模式，参考图: ${signedRefUrls.length} 张`);
+      await db.aiTasks.update(taskId, { progress: 30, status: 'processing' });
+      result = await aiClient.callImageGenWithRefWithRetry(model, finalPrompt, signedRefUrls, quality, size || '1024x576', baseUrl, apiKey);
+    } else {
+      await db.aiTasks.update(taskId, { progress: 30, status: 'processing' });
+      result = await aiClient.callImageGenWithRetry(model, finalPrompt, quality, size || '1024x576', baseUrl, apiKey);
+    }
+    await db.aiTasks.update(taskId, { progress: 70, status: 'processing' });
+
+    // 上传到 OSS（支持 url 和 b64_json 两种返回格式）
+    let imageUrl = result.url;
+    let fileSize = 0;
+    let uploadedOssUrl = '';
+    if (!previewOnly && isOSSConfigured && ossClient && (imageUrl || result.b64_json)) {
+      try {
+        let fileBuffer;
+        if (result.b64_json) {
+          // b64_json 返回格式：直接解码 base64
+          fileBuffer = Buffer.from(result.b64_json, 'base64');
+        } else {
+          // url 返回格式：下载图片
+          const response = await fetch(imageUrl, { signal: AbortSignal.timeout(60000) });
+          if (!response.ok) throw new Error(`下载图片失败: HTTP ${response.status}`);
+          const buffer = await response.arrayBuffer();
+          fileBuffer = Buffer.from(buffer);
+        }
+        fileSize = fileBuffer.length;
+        // AI 生图压缩：超过阈值则压缩
+        const aiThresholdStr = await db.settings.get('image_compress_threshold_kb');
+        const aiThresholdKB = aiThresholdStr ? parseInt(aiThresholdStr) : 300;
+        if (fileSize > aiThresholdKB * 1024) {
+          try {
+            fileBuffer = await compressImage(fileBuffer, aiThresholdKB, 'image/png');
+            fileSize = fileBuffer.length;
+            console.log(`[AI] 图片已压缩: ${fileSize} bytes`);
+          } catch (e) {
+            console.warn('[AI] 图片压缩失败，使用原图:', e.message);
+          }
+        }
+        const ext = 'png';
+        const fileName = `ai_${Date.now()}_${Math.random().toString(36).substr(2, 8)}.${ext}`;
+        const projectId = ownerInfo && ownerInfo.projectId;
+        if (!projectId) throw new Error('projectId 不能为空');
+        const folder = `projects/${projectId}/digital-assets`;
+        const ossKey = `${folder}/${fileName}`;
+        const ossResult = await ossClient.put(ossKey, fileBuffer);
+        imageUrl = ossResult.url;
+        uploadedOssUrl = imageUrl;
+        console.log(`[AI] 图片已上传到 OSS: ${ossKey}`);
       } catch (e) {
         console.warn('[AI] 图片 OSS 上传失败，使用原始 URL:', e.message);
       }
@@ -2526,6 +2630,8 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
       } catch (e) {
         console.warn('[AI] 写入 ai_generated_images 历史失败:', e.message);
       }
+      // OSS 文件已被 ai_generated_images 引用，后续失败不再清理
+      uploadedOssUrl = '';
     }
 
     // 记录使用日志
@@ -2547,6 +2653,15 @@ async function processGenericImageGen(taskId, prompt, refImageUrls, size, provid
     console.log(`[AI] 通用生图完成: ${imageUrl} (previewOnly=${previewOnly})`);
   } catch (error) {
     console.error('[AI] 通用生图失败:', error.message);
+    // 失败时清理已上传到项目 OSS 的图片文件，避免残留
+    if (uploadedOssUrl) {
+      try {
+        await deleteStandaloneOssFile(uploadedOssUrl);
+        console.log('[AI] 通用生图失败，已清理 OSS 图片:', uploadedOssUrl);
+      } catch (cleanupErr) {
+        console.error('[AI] 清理 OSS 图片失败:', cleanupErr.message);
+      }
+    }
     await db.aiTasks.update(taskId, {
       status: 'error',
       error: aiClient.friendlyAiError(error)
