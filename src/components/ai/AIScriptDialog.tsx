@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { X, Upload, FileText, Loader2, CheckCircle2, AlertCircle, Info, Scissors, ImageOff, ChevronDown, Download, Lightbulb } from 'lucide-react';
+import { X, Upload, FileText, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Info, Scissors, ImageOff, ChevronDown, Download, Lightbulb } from 'lucide-react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import type { ModelConfig, Settings, DigitalAsset, AiScriptShot } from '../../lib/types';
 import { AiErrorGuide } from './AiErrorGuide';
@@ -95,7 +95,7 @@ export default function AIScriptDialog({
 
   // 平台和模型选择
   const [provider, setProvider] = useState<string>('geekai');
-  const [modelId, setModelId] = useState('deepseek-chat');
+  const [modelId, setModelId] = useState('deepseek-flash');
   const [llmModels, setLlmModels] = useState<ModelConfig[]>([]);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -150,7 +150,7 @@ export default function AIScriptDialog({
     setScriptText('');
     setEditingScriptText('');
     setProvider('geekai');
-    setModelId('deepseek-chat');
+    setModelId('deepseek-flash');
     setShotCutDecisions({});
     setStockDecisions({});
     if (pollIntervalRef.current) {
@@ -190,10 +190,17 @@ export default function AIScriptDialog({
 
   // 轮询任务状态
   const pollTaskStatus = useCallback((tid: string) => {
+    let consecutiveFailures = 0;
     pollIntervalRef.current = setInterval(async () => {
       try {
         const res = await fetch(`/api/ai/task/${tid}`);
-        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const result = await res.json();
+        // 后端返回 { success, data }，需解包后再读任务字段（与其他 AI 弹窗一致）
+        const data = result.data || result;
+        consecutiveFailures = 0;
 
         if (data.status === 'processing' || data.status === 'pending') {
           setProgress(data.progress || 0);
@@ -310,6 +317,13 @@ export default function AIScriptDialog({
         }
       } catch (e) {
         console.error('轮询任务状态失败:', e);
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 5 && pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          setError('任务状态查询失败，请稍后重试');
+          setState('initial');
+        }
       }
     }, 2000);
   }, []);
@@ -637,7 +651,7 @@ export default function AIScriptDialog({
               {/* 文件上传 */}
               <div>
                 <label className="block text-sm text-slate-300 mb-2">
-                  上传文档（建议优先上传分镜脚本、拍摄脚本；也可上传解说词、旁白、视频策划案等）
+                  上传文档（支持 Word / PDF / Excel / 文本；建议优先上传分镜脚本、拍摄脚本、Excel 分镜表；也可上传解说词、旁白、视频策划案等）
                 </label>
                 <div
                   onClick={() => fileInputRef.current?.click()}
@@ -646,7 +660,7 @@ export default function AIScriptDialog({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".txt,.md,.docx,.pdf"
+                    accept=".txt,.md,.docx,.pdf,.xlsx,.xlsm,.xls,.csv"
                     className="hidden"
                     onChange={(e) => {
                       if (e.target.files?.[0]) {
@@ -658,13 +672,16 @@ export default function AIScriptDialog({
                   />
                   {file ? (
                     <div className="flex items-center justify-center gap-2 text-violet-300">
-                      <FileText className="w-5 h-5" />
+                      {/\.(xlsx|xlsm|xls|csv)$/i.test(file.name)
+                        ? <FileSpreadsheet className="w-5 h-5" />
+                        : <FileText className="w-5 h-5" />}
                       <span className="text-sm font-medium">{file.name}</span>
                     </div>
                   ) : (
                     <>
                       <Upload className="w-8 h-8 mx-auto mb-2 text-slate-500" />
-                      <p className="text-sm text-slate-400">点击选择文件（支持 .txt / .md / .docx / .pdf）</p>
+                      <p className="text-sm text-slate-400">点击选择文件（支持 .txt / .md / .docx / .pdf / .xlsx / .xls / .csv）</p>
+                      <p className="text-xs text-slate-500 mt-1">Excel 分镜表将按工作表逐行识别（镜号、景别、画面内容、台词等列）</p>
                     </>
                   )}
                 </div>

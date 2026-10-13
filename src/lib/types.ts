@@ -268,16 +268,3 @@ export interface AiScriptShot {
   sceneName?: string;
   sceneId?: number | null;
 }
-
-// any-audit：视频上传任务结果（ossUtils pollTaskStatus 返回值）
-// 后端 server/index.js: { url, compressed, fileName, ossKey, fileSize }
-export interface UploadTaskResult {
-  url: string;
-  compressed?: boolean;
-  compressionFailed?: boolean;
-  originalSizeKB?: number;
-  compressedSizeKB?: number;
-  fileName?: string;
-  ossKey?: string;
-  fileSize?: number;
-}

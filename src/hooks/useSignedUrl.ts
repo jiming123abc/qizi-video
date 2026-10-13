@@ -1,5 +1,11 @@
 import { useState, useEffect } from 'react';
-import { batchGetSignedUrls, getSignedUrlFromCache, subscribeSignUrlUpdate } from '../lib/ossUtils';
+import {
+  batchGetSignedUrls,
+  getSignedUrlFromCache,
+  hasFreshSignedUrl,
+  isDirectAccessibleUrl,
+  subscribeSignUrlUpdate
+} from '../lib/ossUtils';
 
 const pendingUrls = new Set<string>();
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -30,38 +36,52 @@ export interface SignedUrlResult {
 }
 
 export function useSignedUrl(originalUrl: string | undefined | null): SignedUrlResult {
-  const initialValue = originalUrl ? getSignedUrlFromCache(originalUrl) : '';
-  const [signedUrl, setSignedUrl] = useState<string>(initialValue);
+  // 可直接访问的 URL（本地/代理/data URI）无需签名，立即就绪
+  const direct = isDirectAccessibleUrl(originalUrl);
+  const [signedUrl, setSignedUrl] = useState<string>(() =>
+    originalUrl ? getSignedUrlFromCache(originalUrl) : ''
+  );
+  const [ready, setReady] = useState<boolean>(
+    () => !!originalUrl && (isDirectAccessibleUrl(originalUrl) || hasFreshSignedUrl(originalUrl))
+  );
 
   useEffect(() => {
     if (!originalUrl) {
       setSignedUrl('');
+      setReady(false);
       return;
     }
 
-    const cached = getSignedUrlFromCache(originalUrl);
-    if (cached !== signedUrl) {
-      setSignedUrl(cached);
+    // 本地静态资源 / 后端代理 / data URI：直接使用原 URL，不发起签名
+    if (isDirectAccessibleUrl(originalUrl)) {
+      setSignedUrl(originalUrl);
+      setReady(true);
+      return;
     }
 
-    if (cached === originalUrl) {
+    // OSS URL：就绪与否以"缓存中是否有新鲜签名结果"为准，
+    // 不能比较签名值与原 URL 是否相等（后端回退时两者可能相同）
+    const syncFromCache = () => {
+      const latest = getSignedUrlFromCache(originalUrl);
+      setSignedUrl(prev => (prev !== latest ? latest : prev));
+      setReady(hasFreshSignedUrl(originalUrl));
+    };
+    syncFromCache();
+
+    if (!hasFreshSignedUrl(originalUrl)) {
       requestSignUrl(originalUrl);
     }
 
     const unsubscribe = subscribeSignUrlUpdate(updatedUrls => {
       if (updatedUrls.includes(originalUrl)) {
-        const latest = getSignedUrlFromCache(originalUrl);
-        setSignedUrl(prev => (prev !== latest ? latest : prev));
+        syncFromCache();
       }
     });
 
     const startTime = Date.now();
     const fallbackInterval = setInterval(() => {
-      const latest = getSignedUrlFromCache(originalUrl);
-      if (latest !== originalUrl) {
-        setSignedUrl(prev => (prev !== latest ? latest : prev));
-      }
-      if (latest !== originalUrl || Date.now() - startTime > 30000) {
+      syncFromCache();
+      if (hasFreshSignedUrl(originalUrl) || Date.now() - startTime > 30000) {
         clearInterval(fallbackInterval);
       }
     }, 2000);
@@ -73,7 +93,6 @@ export function useSignedUrl(originalUrl: string | undefined | null): SignedUrlR
   }, [originalUrl]);
 
   const finalUrl = signedUrl || originalUrl || '';
-  const ready = !!finalUrl && signedUrl !== '' && signedUrl !== originalUrl;
 
   return { url: finalUrl, ready };
 }

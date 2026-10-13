@@ -53,6 +53,8 @@ export default function AddShotDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
+  // 参考图的文件元信息，创建分镜后关联 media 时一并提交
+  const referenceImageMetaRef = useRef<{ filename?: string; size?: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const { startUpload } = useUnifiedUpload();
@@ -90,9 +92,27 @@ export default function AddShotDialog({
       setError(null);
       setIsSubmitting(false);
       setReferenceImageUrl(null);
+      referenceImageMetaRef.current = null;
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [isOpen, projectId, sceneId]);
+
+  // 关闭弹窗时若参考图仍未关联到任何分镜，清理 OSS 孤儿文件
+  // （deleteOssFileIfNotReferenced 有引用计数，已关联的图片不会被删除）
+  useEffect(() => {
+    if (isOpen) return;
+    const abandonedUrl = referenceImageUrl;
+    if (!abandonedUrl) return;
+    setReferenceImageUrl(null);
+    referenceImageMetaRef.current = null;
+    fetch('/api/oss/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: [abandonedUrl] })
+    }).catch(() => {});
+    // 仅在 isOpen 变化时执行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   // 表单变化时持久化到 sessionStorage
   useEffect(() => {
@@ -172,11 +192,45 @@ export default function AddShotDialog({
         throw new Error(data.error || '创建分镜失败');
       }
 
+      // 分镜创建成功后，关联之前上传的参考画面（上传时 createShot:false，不会自动建 media）
+      if (referenceImageUrl && data.data?.id) {
+        const newShotId = data.data.id;
+        try {
+          const mediaRes = await fetch(`/api/shots/${newShotId}/media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: referenceImageUrl,
+              type: 'image',
+              filename: referenceImageMetaRef.current?.filename || '',
+              size: referenceImageMetaRef.current?.size || 0,
+              source: 'upload',
+            })
+          });
+          const mediaData = await mediaRes.json().catch(() => ({}));
+          if (!mediaRes.ok || !mediaData.success) {
+            // 关联失败：清理已上传但无人引用的 OSS 文件，避免孤儿文件
+            await fetch('/api/oss/cleanup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ urls: [referenceImageUrl] })
+            }).catch(() => {});
+            console.error('参考画面关联失败:', mediaData.message || mediaRes.status);
+          } else if (onAdd && data.data) {
+            // 让父组件直接拿到带 media 的新分镜
+            data.data.media = [mediaData.data];
+          }
+        } catch (mediaErr) {
+          console.error('参考画面关联异常:', mediaErr);
+        }
+      }
+
       if (onAdd && data.data) {
         onAdd(data.data);
       }
       // 成功提交：清空缓存
       clearAddShotCache();
+      referenceImageMetaRef.current = null;
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建分镜失败');
@@ -208,6 +262,7 @@ export default function AddShotDialog({
       });
       if (results.length > 0) {
         setReferenceImageUrl(results[0].url);
+        referenceImageMetaRef.current = { filename: results[0].filename, size: results[0].size };
       }
     } catch (err) {
       console.error('上传失败:', err);
@@ -498,7 +553,19 @@ export default function AddShotDialog({
               <img src={referenceImageUrl} alt="参考画面" className="w-full h-40 object-cover" />
               <button
                 type="button"
-                onClick={() => setReferenceImageUrl(null)}
+                onClick={() => {
+                  const abandonedUrl = referenceImageUrl;
+                  setReferenceImageUrl(null);
+                  referenceImageMetaRef.current = null;
+                  // 已上传但不使用的参考图，清理 OSS 上的孤儿文件
+                  if (abandonedUrl) {
+                    fetch('/api/oss/cleanup', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ urls: [abandonedUrl] })
+                    }).catch(() => {});
+                  }
+                }}
                 className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60 backdrop-blur hover:bg-black/80 flex items-center justify-center text-white"
               >
                 <X className="w-4 h-4" />

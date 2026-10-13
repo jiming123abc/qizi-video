@@ -561,6 +561,10 @@ export default function AIImageGenerateDialog({
   const getModelDisplayName = (model: ModelConfig | null) => {
     if (!model) return '未选择';
     const displayNames: Record<string, string> = {
+      'gpt-image-2.5-flare': 'GPT-Image-2.5 Flare',
+      'gpt-image-2.5-sunburst': 'GPT-Image-2.5 Sunburst',
+      'doubao-seedream-5.0-flash': 'Doubao-Seedream-5.0-flash',
+      'nano-banana-2-lite': 'Nano Banana 2 Lite',
       'gpt-image-2': 'GPT-Image-2',
       'gpt-image-1': 'GPT-Image-1',
       'dall-e-3': 'DALL-E 3',
@@ -983,6 +987,25 @@ export default function AIImageGenerateDialog({
                       img={img}
                       isSelected={generatedImageUrl === img.url}
                       onSelect={() => {
+                        // 历史图必须进入暂存区，"使用此图片" 才能正确取到它
+                        const existing = stagedImages.find(s => s.url === img.url);
+                        if (existing) {
+                          setSelectedStagedId(existing.id);
+                        } else {
+                          const stagedId = `staged-history-${img.id}`;
+                          setStagedImages(prev => {
+                            const entry = { id: stagedId, url: img.url, uploaded: true, fileSize: img.fileSize };
+                            if (prev.length < MAX_STAGED_IMAGES) {
+                              return [...prev, entry];
+                            }
+                            // 暂存区已满：替换一个已上传的暂存项（历史图已持久化，不会丢失）
+                            const replaceIdx = prev.findIndex(s => s.uploaded);
+                            const next = prev.slice();
+                            next[replaceIdx >= 0 ? replaceIdx : prev.length - 1] = entry;
+                            return next;
+                          });
+                          setSelectedStagedId(stagedId);
+                        }
                         setGeneratedImageUrl(img.url);
                         setStatus('done');
                       }}

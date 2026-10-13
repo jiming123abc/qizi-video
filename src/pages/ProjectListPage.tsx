@@ -127,6 +127,14 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // referencesCache 变化时批量签名（防抖，避免频繁触发）
   const signingRef = useRef(false);
   const signingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // stats 并发请求批次号：丢弃过期批次的响应，防止旧数据覆盖新数据
+  const statsBatchRef = useRef(0);
+  // 组件卸载标志：在途请求返回后不再 setState
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   useEffect(() => {
     if (signingRef.current) return;
     if (signingTimeoutRef.current) clearTimeout(signingTimeoutRef.current);
@@ -205,25 +213,29 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   }, []);
 
   const loadProjects = useCallback(async () => {
+    // 本次加载的批次号；并发调用时只有最新批次允许写 state
+    const batchId = ++statsBatchRef.current;
     try {
       const res = await fetch('/api/projects');
       const data = await res.json();
+      if (!mountedRef.current || statsBatchRef.current !== batchId) return;
       if (data.success) {
         setProjects(data.data);
         const ids = (data.data || []).map((p: Project) => p.id);
-        
-        // 批量获取统计数据
+
+        // 批量获取统计数据（按批次号+挂载标志过滤过期响应）
         ids.forEach(id => {
           fetch(`/api/stats?projectId=${id}`)
             .then(r => r.json())
             .then(d => {
+              if (!mountedRef.current || statsBatchRef.current !== batchId) return;
               if (d.success) {
                 setProjectStats(prev => ({ ...prev, [id]: d.data }));
               }
             })
             .catch(() => {});
         });
-        
+
         // 批量加载所有项目的参考文件（一次请求）
         if (ids.length > 0) {
           loadAllReferences(ids);
@@ -232,7 +244,9 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     } catch (e) {
       console.error('加载项目列表失败:', e);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && statsBatchRef.current === batchId) {
+        setLoading(false);
+      }
     }
   }, [loadAllReferences]);
 
@@ -451,16 +465,21 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
   // 调用「设置项目封面」API，并本地乐观更新
   const setProjectCover = async (projectId: number, coverUrl: string) => {
     try {
-      await fetch(`/api/projects/${projectId}/cover`, {
+      const res = await fetch(`/api/projects/${projectId}/cover`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ coverUrl })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `设置封面失败(${res.status})`);
+      }
       setProjects(prev => prev.map(p => p.id === projectId ? { ...p, coverUrl } : p));
       setUploadDialogProject(prev => prev && prev.id === projectId ? { ...prev, coverUrl } : prev);
       loadProjects();
     } catch (e) {
       console.error('设置封面失败:', e);
+      showToast(e instanceof Error ? e.message : '设置封面失败', 'error');
     }
   };
 
@@ -543,28 +562,40 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
     const n = name.trim();
     if (!n) return;
     try {
-      await fetch(`/api/projects/${projectId}`, {
+      const res = await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: n })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `保存失败(${res.status})`);
+      }
       setProjects(prev => prev.map(p => p.id === projectId ? { ...p, name: n } : p));
     } catch (e) {
       console.error('更新项目名称失败:', e);
+      showToast(e instanceof Error ? e.message : '项目名称保存失败', 'error');
+      loadProjects(); // 恢复服务端真实值，避免本地显示与数据不一致
     }
   };
 
   // 更新项目描述
   const updateProjectDescription = async (projectId: number, description: string) => {
     try {
-      await fetch(`/api/projects/${projectId}`, {
+      const res = await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ description })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `保存失败(${res.status})`);
+      }
       setProjects(prev => prev.map(p => p.id === projectId ? { ...p, description } : p));
     } catch (e) {
       console.error('更新项目描述失败:', e);
+      showToast(e instanceof Error ? e.message : '项目描述保存失败', 'error');
+      loadProjects();
     }
   };
 
@@ -1074,7 +1105,7 @@ export function ProjectListPage({ onSelectProject }: ProjectListPageProps) {
       {/* 上传参考文件对话框 */}
       {uploadDialogProject && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm" onClick={() => setUploadDialogProject(null)}>
-          <div className="absolute inset-x-0 top-0 bottom-0 sm:w-[calc(100%-2rem)] sm:max-w-xl bg-slate-900/95 backdrop-blur-xl sm:rounded-3xl rounded-none border border-white/10 flex flex-col shadow-2xl max-h-[100dvh] sm:max-h-[90vh] p-6 overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="absolute inset-x-0 top-0 bottom-0 sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-[calc(100%-2rem)] sm:max-w-xl bg-slate-900/95 backdrop-blur-xl sm:rounded-3xl rounded-none border border-white/10 flex flex-col shadow-2xl max-h-[100dvh] sm:max-h-[90vh] p-6 overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-5">
               <div>
                 <h2 className="text-lg font-semibold">项目封面与参考视频</h2>

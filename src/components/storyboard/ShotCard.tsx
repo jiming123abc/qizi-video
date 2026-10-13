@@ -358,7 +358,10 @@ export function ShotCard({
   const signedMediaUrl = signedMediaUrls?.[mediaUrl] || mediaUrl;
   // poster URL 现在使用后端代理 /api/oss-snapshot，不需要 OSS 签名
   const signedPosterUrl = posterUrl;
-  const mediaReady = !!mediaUrl && signedMediaUrl !== mediaUrl;
+  // 本地存储（/uploads/）与后端代理（/api/）的 URL 无需 OSS 签名，直接可用；
+  // 否则未配置 OSS 时签名 map 回填原值，signedMediaUrl === mediaUrl，媒体永远停在加载态
+  const isDirectMediaUrl = mediaUrl.startsWith('/uploads/') || mediaUrl.startsWith('/api/');
+  const mediaReady = !!mediaUrl && (isDirectMediaUrl || signedMediaUrl !== mediaUrl);
   const posterReady = !!posterUrl;
 
   // 媒体切换时重置错误和播放状态

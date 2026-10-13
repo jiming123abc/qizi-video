@@ -37,7 +37,22 @@ export interface UseUploadOptions {
 export function useUpload(options: UseUploadOptions) {
   const { projectId, currentSceneId, showToast, onUploadComplete, loadShots, loadStats, loadProject, loadSceneStats } = options;
 
-  const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
+  const [uploadingFiles, setUploadingFilesState] = useState<UploadingFile[]>([]);
+  // ref 作为即时事实来源：setter 调用瞬间同步更新 ref，使"改状态后立刻跑队列"
+  // 的路径能读到最新值。注意不能在 React 的函数式 updater 内写 ref——updater
+  // 直到渲染期才执行，紧随其后的 runUploadQueue（同一同步执行流）会读到旧值。
+  const uploadingFilesRef = useRef<UploadingFile[]>([]);
+  const setUploadingFiles = useCallback(
+    (action: UploadingFile[] | ((prev: UploadingFile[]) => UploadingFile[])) => {
+      const prev = uploadingFilesRef.current;
+      const next = typeof action === 'function'
+        ? (action as (p: UploadingFile[]) => UploadingFile[])(prev)
+        : action;
+      uploadingFilesRef.current = next;
+      setUploadingFilesState(next);
+    },
+    []
+  );
 
   const [pendingCompressionFiles, setPendingCompressionFiles] = useState<FileCompressionInfo[]>([]);
   const [pendingCompressionDecision, setPendingCompressionDecision] = useState<UploadDecision | null>(null);
@@ -154,34 +169,35 @@ export function useUpload(options: UseUploadOptions) {
   const runUploadQueue = useCallback(() => {
     if (uploadCancelledRef.current) return;
 
-    setUploadingFiles(current => {
-      const pendingFiles = pendingValidFilesRef.current.map((f, i) => ({ file: f, index: i }))
-        .filter((_, i) => {
-          const uf = current[i];
-          return uf && uf.status === 'pending';
-        });
-
-      const canStart = maxConcurrent - concurrentCountRef.current;
-      if (canStart <= 0 || pendingFiles.length === 0) return current;
-
-      const toStart = pendingFiles.slice(0, canStart);
-      toStart.forEach(({ file, index }) => {
-        concurrentCountRef.current++;
-        const needsCompression = pendingCompressionIndicesRef.current.has(index);
-        const method = needsCompression ? (pendingCompressionMethodRef.current || 'server') : 'none';
-        const uf = current[index];
-        const retryCount = uf ? uf.retryCount : 0;
-        uploadSingleFile(file, index, retryCount, method).then(() => {
-          concurrentCountRef.current--;
-          runUploadQueueRef.current();
-        });
+    // 基于 ref 快照在 updater 之外完成调度决策，副作用只执行一次
+    const current = uploadingFilesRef.current;
+    const pendingFiles = pendingValidFilesRef.current.map((f, i) => ({ file: f, index: i }))
+      .filter((_, i) => {
+        const uf = current[i];
+        return uf && uf.status === 'pending';
       });
 
-      return current.map((uf, idx) => {
-        if (toStart.some(p => p.index === idx)) {
-          return { ...uf, status: 'uploading' as const, progress: 5 };
-        }
-        return uf;
+    const canStart = maxConcurrent - concurrentCountRef.current;
+    if (canStart <= 0 || pendingFiles.length === 0) return;
+
+    const toStart = pendingFiles.slice(0, canStart);
+
+    // 先占位为 uploading，防止重入时同一 pending 项被重复启动
+    // （setter 即时更新 ref，紧接的并发调度读到的就是占位后的状态）
+    const startSet = new Set(toStart.map(p => p.index));
+    setUploadingFiles(cur => cur.map((uf, idx) =>
+      startSet.has(idx) ? { ...uf, status: 'uploading' as const, progress: 5 } : uf
+    ));
+
+    // 启动上传的副作用放在状态更新之外，不随 updater 双调用而重复
+    toStart.forEach(({ file, index }) => {
+      concurrentCountRef.current++;
+      const needsCompression = pendingCompressionIndicesRef.current.has(index);
+      const method = needsCompression ? (pendingCompressionMethodRef.current || 'server') : 'none';
+      const retryCount = current[index]?.retryCount || 0;
+      uploadSingleFile(file, index, retryCount, method).then(() => {
+        concurrentCountRef.current--;
+        runUploadQueueRef.current();
       });
     });
   }, [uploadSingleFile]);
@@ -195,26 +211,26 @@ export function useUpload(options: UseUploadOptions) {
       clearInterval(completionCheckRef.current);
     }
     const checkComplete = setInterval(() => {
-      setUploadingFiles(current => {
-        const isAllDone = current.every(f => f.status === 'done' || f.status === 'error' || f.status === 'cancelled');
-        if (isAllDone && !compressionDecisionPendingRef.current && concurrentCountRef.current === 0) {
-          if (completionCheckRef.current) {
-            clearInterval(completionCheckRef.current);
-            completionCheckRef.current = null;
-          }
-          setTimeout(() => {
-            refreshAfterUpload();
-            const successCount = current.filter(f => f.status === 'done').length;
-            const errorCount = current.filter(f => f.status === 'error').length;
-            if (errorCount === 0) {
-              showToast(`上传完成（${successCount} 项）`);
-            } else {
-              showToast(`上传完成（成功 ${successCount} 项，失败 ${errorCount} 项）`);
-            }
-          }, 0);
+      // 直接读 ref 快照，不借助 setState updater，避免 updater 双调重复刷新/弹提示
+      const current = uploadingFilesRef.current;
+      const isAllDone = current.length > 0
+        && current.every(f => f.status === 'done' || f.status === 'error' || f.status === 'cancelled');
+      if (isAllDone && !compressionDecisionPendingRef.current && concurrentCountRef.current === 0) {
+        if (completionCheckRef.current) {
+          clearInterval(completionCheckRef.current);
+          completionCheckRef.current = null;
         }
-        return current;
-      });
+        setTimeout(() => {
+          refreshAfterUpload();
+          const successCount = current.filter(f => f.status === 'done').length;
+          const errorCount = current.filter(f => f.status === 'error').length;
+          if (errorCount === 0) {
+            showToast(`上传完成（${successCount} 项）`);
+          } else {
+            showToast(`上传完成（成功 ${successCount} 项，失败 ${errorCount} 项）`);
+          }
+        }, 0);
+      }
     }, 500);
     completionCheckRef.current = checkComplete;
   }, [refreshAfterUpload, showToast]);

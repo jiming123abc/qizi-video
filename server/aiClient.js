@@ -20,15 +20,16 @@ const SILICONFLOW_BASE = 'https://api.siliconflow.cn/v1';
 // 模型费用（单位：元）
 const MODEL_PRICES = {
   // 文本模型：元/千tokens
-  'deepseek-chat': { input: 0.001, output: 0.002 },
-  'gpt-4o-mini': { input: 0.01, output: 0.03 },
-  'glm-4-flash': { input: 0, output: 0 },
-  
+  'deepseek-flash': { input: 0.001, output: 0.002 },
+  'doubao-seed-2.1-lite': { input: 0.0004, output: 0.00135 },
+  'mimo-v2.6-pro': { input: 0.0024, output: 0.0048 },
+  'gpt-6-luna': { input: 0.000075, output: 0.000375 },
+  'claude-sonnet-5-5': { input: 0.0015, output: 0.0075 },
+
   // 生图模型：元/张
-  'gpt-image-2': { medium: 0.08 },
-  'kling-image-v3-omni': { standard: 0.16 },
-  'nano-banana-2': { standard: 0.05 },
-  'qwen-image-3.0': { standard: 0.18 },
+  'gpt-image-2.5-flare': { per_image_medium: 0.077 },
+  'doubao-seedream-5.0-flash': { per_image_standard: 0.096 },
+  'nano-banana-2-lite': { per_image_standard: 0.125 },
 };
 
 // ========== 辅助函数 ==========
@@ -213,6 +214,115 @@ async function callChatWithFallback(messages, fallbackChain, settings, options =
 }
 
 /**
+ * 画图模型参数适配（极客智坊 OpenAI 兼容接口，规则参考 https://docs.geekai.co/cn/docs/image）
+ * 不同模型族支持的参数差异较大：
+ * - gpt-image-2.5 系列：size 任意（宽高为16倍数、像素 655360~8294400），quality=low/medium/high/xhigh/max
+ * - doubao-seedream-5.0 系列：不支持 quality/n/aspect_ratio，size 用 2K/3K/4K 档像素值
+ * - nano-banana 系列：不支持 quality/size/watermark，用 aspect_ratio 控制比例
+ */
+
+// 从 '1024x576' / '16:9' 等格式解析宽高比
+function getImageAspectRatio(size) {
+  if (typeof size !== 'string') return '1:1';
+  const arMatch = size.match(/^\s*(\d+)\s*[:：]\s*(\d+)\s*$/);
+  if (arMatch) return `${parseInt(arMatch[1])}:${parseInt(arMatch[2])}`;
+  const m = size.match(/(\d+)\s*[x×X]\s*(\d+)/);
+  if (!m) return '1:1';
+  const w = parseInt(m[1]);
+  const h = parseInt(m[2]);
+  const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+  const g = gcd(w, h);
+  return `${w / g}:${h / g}`;
+}
+
+// 在支持的宽高比中挑选与目标最接近的
+function closestAspectRatio(target, allowed) {
+  if (allowed.includes(target)) return target;
+  const [tw, th] = target.split(':').map(Number);
+  const tv = tw / th;
+  return allowed.reduce((best, ratio) => {
+    const [rw, rh] = ratio.split(':').map(Number);
+    const [bw, bh] = best.split(':').map(Number);
+    return Math.abs(rw / rh - tv) < Math.abs(bw / bh - tv) ? ratio : best;
+  }, allowed[0]);
+}
+
+// GPT-Image-2.5（Flare/Sunburst）：宽高须为 16 的倍数，总像素不低于 655360
+const GPT_IMAGE_25_SIZE_MAP = {
+  '16:9': '1280x720',
+  '9:16': '720x1280',
+  '1:1': '1024x1024',
+  '3:2': '1536x1024',
+  '2:3': '1024x1536',
+  '4:3': '1280x960',
+  '3:4': '960x1280',
+};
+
+// Doubao-Seedream-5.0 系列：2K 分辨率档像素值
+const SEEDREAM_5_SIZE_MAP = {
+  '16:9': '2848x1600',
+  '9:16': '1600x2848',
+  '1:1': '2048x2048',
+  '3:2': '2496x1664',
+  '2:3': '1664x2496',
+  '4:3': '2304x1728',
+  '3:4': '1728x2304',
+  '21:9': '3136x1344',
+};
+
+const NANO_BANANA_RATIOS = ['1:1', '2:3', '3:2', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9', '9:21'];
+
+const GPT_IMAGE_25_QUALITY_MAP = {
+  standard: 'medium',
+  medium: 'medium',
+  hd: 'high',
+  high: 'high',
+  ultra: 'xhigh',
+  low: 'low',
+};
+
+/**
+ * 按模型族构建 /images/generations 请求体
+ * @param {string[]} [refImages] 参考图（data URL 或远程 URL），可选
+ */
+function buildImageRequestBody(model, prompt, quality, size, refImages) {
+  const modelName = (model || '').toLowerCase();
+  const ratio = getImageAspectRatio(size || '1024x576');
+  const body = { model, prompt, response_format: 'url' };
+
+  if (modelName.startsWith('gpt-image-2.5') || modelName.startsWith('gpt-image-2-5')) {
+    body.size = GPT_IMAGE_25_SIZE_MAP[closestAspectRatio(ratio, Object.keys(GPT_IMAGE_25_SIZE_MAP))] || '1024x1024';
+    body.quality = GPT_IMAGE_25_QUALITY_MAP[quality] || 'medium';
+    body.n = 1;
+    body.watermark = false;
+  } else if (modelName.startsWith('doubao-seedream-5')) {
+    // 5.0 系列不支持 quality/n/aspect_ratio；默认 2K 档
+    body.size = SEEDREAM_5_SIZE_MAP[closestAspectRatio(ratio, Object.keys(SEEDREAM_5_SIZE_MAP))] || '2048x2048';
+    body.output_format = 'png';
+    body.watermark = false;
+  } else if (modelName.startsWith('nano-banana')) {
+    // Nano Banana 系列仅支持 aspect_ratio（lite 仅 1K 输出）
+    body.aspect_ratio = closestAspectRatio(ratio, NANO_BANANA_RATIOS);
+  } else {
+    // 其它模型：OpenAI 兼容通用参数
+    body.size = size || '1024x576';
+    body.quality = quality || 'standard';
+    body.watermark = false;
+    body.n = 1;
+  }
+
+  if (refImages) {
+    const list = (Array.isArray(refImages) ? refImages : [refImages]).filter(Boolean);
+    if (list.length > 0) {
+      // 单图 string、多图 string[]（极客智坊画图 API 手册约定）
+      body.image = list.length === 1 ? list[0] : list;
+    }
+  }
+
+  return body;
+}
+
+/**
  * 调用文生图 API
  */
 async function callImageGen(model, prompt, quality, size, baseUrl, apiKey) {
@@ -222,15 +332,7 @@ async function callImageGen(model, prompt, quality, size, baseUrl, apiKey) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify({
-      model,
-      prompt,
-      size: size || '1024x576',
-      quality: quality || 'standard',
-      watermark: false,
-      n: 1,
-      response_format: 'url'
-    }),
+    body: JSON.stringify(buildImageRequestBody(model, prompt, quality, size)),
     signal: AbortSignal.timeout(120000)
   });
   
@@ -284,25 +386,13 @@ async function callImageGenWithRef(model, prompt, refImageUrls, quality, size, b
     return callImageGen(model, prompt, quality, size, baseUrl, apiKey);
   }
 
-  // 单图保持 string（向后兼容），多图用数组
-  const imageField = base64Images.length === 1 ? base64Images[0] : base64Images;
-
   const response = await fetch(`${baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify({
-      model,
-      prompt,
-      size: size || '1024x576',
-      quality: quality || 'standard',
-      watermark: false,
-      n: 1,
-      response_format: 'url',
-      image: imageField
-    }),
+    body: JSON.stringify(buildImageRequestBody(model, prompt, quality, size, base64Images)),
     signal: AbortSignal.timeout(120000)
   });
 
@@ -404,10 +494,12 @@ async function analyzeSceneImage(imageUrl, settings, taskId) {
   
   if (!base64Image) return '';
   
-  // 获取默认的文本模型
-  const defaultChain = settings.llm_fallback_chain || [
-    { model: 'deepseek-chat', provider: 'geekai' }
+  // 图片分析需要视觉模型：优先取标记 supportsVision 的模型，避免在无视觉能力的模型上空跑一次失败调用
+  const fullChain = settings.llm_fallback_chain || [
+    { model: 'doubao-seed-2.1-lite', provider: 'geekai', supportsVision: true }
   ];
+  const visionChain = fullChain.filter(m => m.supportsVision);
+  const defaultChain = visionChain.length > 0 ? visionChain : fullChain;
   
   const messages = [
     {
@@ -442,189 +534,14 @@ async function analyzeSceneImage(imageUrl, settings, taskId) {
 
 /**
  * 解析拍摄脚本生成分镜
+ *
+ * 已改为分批生成（见 shotBatcher.js）：先出紧凑大纲确定分镜总数，
+ * 再按每批 15 个补全完整字段，支持 100~200+ 分镜不被 max_tokens 截断。
  */
 async function parseScript(scriptContent, mode, settings, taskId, options = {}) {
-  const autoAssignScene = options.autoAssignScene !== false;
-  const provider = options.provider || 'geekai';
-  const model = options.model || 'deepseek-chat';
-
-  let systemPrompt = '';
-
-  if (mode === 'shooting_script' || mode === 'storyboard_script' || mode === 'script') {
-    systemPrompt = `你是一个专业的影视分镜脚本分析师。
-根据用户提供的拍摄脚本或分镜脚本，将其拆解为分镜列表。
-
-【分镜粒度原则 - 重要】
-1. 每个分镜**不包含镜头切换**，即一个分镜只对应一个连续的画面
-2. 如果用户上传的是分镜脚本或拍摄脚本，**严格遵循脚本中标注的分镜数量**，不要合并或拆分
-3. 文档中缺少的信息项根据上下文自动补全（如景别、镜头运动等）
-
-对每个分镜提取以下信息：
-- sceneContent: 画面内容描述
-- actors: 出场演员/角色
-- costume: 演员服饰/服装
-- props: 需要的道具
-- location: 拍摄地点
-- focalLength: 建议焦段（格式为"数字mm"，如"35mm"、"50mm"、"85mm"，不要返回"广角"等描述词）
-- narration: 旁白或台词
-- cameraMovement: 镜头运动方式（必须从以下选择：固定、推、拉、摇、移、跟、升降、旋转、环绕、变焦、手持、甩）
-- shotType: 景别（必须从以下选择：大远景、远景、全景、中景、中近景、近景、特写、大特写）
-- shotAngle: 拍摄角度（必须从以下选择：平拍、俯拍、仰拍、正拍、侧拍、反打、鸟瞰、主观视角、客观视角）
-- lighting: 灯光要求
-- notes: 其他备注
-- estimatedDuration: 预估时长（纯数字秒数，如 5、8、12，不要带单位或范围）
-- aiImagePrompt: 英文的AI图像生成提示词
-- hasShotCut: 布尔值，该分镜是否包含镜头切换（如脚本中描述"镜头从A切到B"）
-- isStockOrEffect: 布尔值，该分镜是否为素材镜头或特效镜头（不需要实际拍摄，如"空镜素材"、"转场特效"、"字幕动画"等）
-${autoAssignScene ? `- sceneName: 所属场次名称
-  【场次划分规则】
-  1. 如果脚本中有明确的场次划分标记（如"第一场/第二场"、"场景一/场景二"、"第1幕/第2幕"、"INT./EXT."、"内景/外景"等），必须严格按照脚本中的划分来，一个场次都不能合并或省略，场次名称使用脚本中的原始名称
-  2. 如果脚本中没有明确的场次划分标记，则根据场景/地点/时间变化自动划分，遵循"宜少不宜多"原则` : ''}
-
-【数字资产提取 - 重要】
-除分镜列表外，还需要提取以下数字资产信息（用于后续生成参考图）：
-- mainActors: 主要角色数组，每项包含 { name: 角色名称, imagePrompt: 英文AI生图提示词 }
-- keyProps: 关键道具数组，每项包含 { name: 道具名称, imagePrompt: 英文AI生图提示词 }
-- mainScenes: 主要场景数组，每项包含 { name: 场景名称, imagePrompt: 英文AI生图提示词 }
-
-请以JSON对象格式返回，包含两个字段：
-{
-  "shots": [分镜数组],
-  "digitalAssets": {
-    "mainActors": [角色数组],
-    "keyProps": [道具数组],
-    "mainScenes": [场景数组]
-  }
-}`;
-  } else {
-    systemPrompt = `你是一个专业的视频导演和分镜师。
-用户将提供视频文案/旁白/策划案，请你先创作一份拍摄脚本，然后将其拆解为分镜列表。
-
-【分镜粒度原则 - 重要】
-1. 每个分镜**不包含镜头切换**，即一个分镜只对应一个连续的画面
-2. 根据文案内容合理划分分镜数量，每个分镜对应一个独立的画面
-3. 文档中缺少的信息项根据上下文自动补全
-
-对每个分镜提取以下信息：
-- sceneContent: 画面内容描述
-- actors: 出场演员/角色
-- costume: 演员服饰/服装
-- props: 需要的道具
-- location: 拍摄地点
-- focalLength: 建议焦段（格式为"数字mm"，如"35mm"、"50mm"、"85mm"，不要返回"广角"等描述词）
-- narration: 旁白或台词
-- cameraMovement: 镜头运动方式（必须从以下选择：固定、推、拉、摇、移、跟、升降、旋转、环绕、变焦、手持、甩）
-- shotType: 景别（必须从以下选择：大远景、远景、全景、中景、中近景、近景、特写、大特写）
-- shotAngle: 拍摄角度（必须从以下选择：平拍、俯拍、仰拍、正拍、侧拍、反打、鸟瞰、主观视角、客观视角）
-- lighting: 灯光要求
-- notes: 其他备注
-- estimatedDuration: 预估时长（纯数字秒数，如 5、8、12，不要带单位或范围）
-- aiImagePrompt: 英文的AI图像生成提示词
-- hasShotCut: 布尔值，该分镜是否包含镜头切换（如描述中涉及画面切换）
-- isStockOrEffect: 布尔值，该分镜是否为素材镜头或特效镜头（不需要实际拍摄，如"空镜素材"、"转场特效"、"字幕动画"等）
-${autoAssignScene ? `- sceneName: 所属场次名称
-  【场次划分规则】
-  1. 根据场景/地点/时间变化自动划分场次，遵循"宜少不宜多"原则` : ''}
-
-【数字资产提取 - 重要】
-除分镜列表外，还需要提取以下数字资产信息（用于后续生成参考图）：
-- mainActors: 主要角色数组，每项包含 { name: 角色名称, imagePrompt: 英文AI生图提示词 }
-- keyProps: 关键道具数组，每项包含 { name: 道具名称, imagePrompt: 英文AI生图提示词 }
-- mainScenes: 主要场景数组，每项包含 { name: 场景名称, imagePrompt: 英文AI生图提示词 }
-
-请以JSON对象格式返回，包含两个字段：
-{
-  "shots": [分镜数组],
-  "digitalAssets": {
-    "mainActors": [角色数组],
-    "keyProps": [道具数组],
-    "mainScenes": [场景数组]
-  }
-}`;
-  }
-
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: scriptContent }
-  ];
-
-  // 直接使用传入的 provider/model，不使用降级链
-  const baseUrl = getBaseUrl(provider, settings);
-  const apiKey = getApiKey(provider, settings);
-
-  if (!apiKey) {
-    throw new Error(`${provider} API Key 未配置，请检查环境变量或数据库设置`);
-  }
-
-  console.log(`[aiClient] 使用模型 ${provider}/${model} 解析脚本`);
-
-  // P4-5：抽出单次调用，外层包重试逻辑（仅对 5xx/超时/连接重置重试 1 次，4xx 不重试）
-  const callOnce = async () => {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.3,
-        max_tokens: 8192,
-        stream: false,
-        response_format: { type: "json_object" }
-      }),
-      signal: AbortSignal.timeout(120000)
-    });
-
-    if (!response.ok) {
-      const errBody = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errBody}`);
-    }
-
-    const data = await response.json();
-    const usage = data.usage || {};
-
-    // 记录费用
-    await recordUsage({
-      type: 'chat',
-      model,
-      provider,
-      promptTokens: usage.prompt_tokens || 0,
-      completionTokens: usage.completion_tokens || 0,
-      totalTokens: usage.total_tokens || usage.totalTokens || 0,
-      taskId
-    }, settings);
-
-    return {
-      model,
-      provider,
-      content: data.choices[0].message.content,
-      usage
-    };
-  };
-
-  // P4-5：重试判断复用公共 isRetryableError（仅对 5xx / 超时 / 连接重置重试，4xx 不重试）
-  try {
-    let lastErr;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await callOnce();
-      } catch (err) {
-        lastErr = err;
-        if (attempt === 0 && isRetryableError(err)) {
-          console.warn(`[aiClient] ${provider}/${model} 解析脚本失败（${err.message}），1 秒后重试...`);
-          await new Promise(r => setTimeout(r, 1000));
-          continue;
-        }
-        throw err;
-      }
-    }
-    throw lastErr;
-  } catch (err) {
-    console.error(`[aiClient] ${provider}/${model} 调用失败: ${err.message}`);
-    throw err;
-  }
+  // 函数内 require 避免与 shotBatcher <-> aiClient 的循环依赖问题
+  const { generateShotsBatched } = require('./shotBatcher');
+  return generateShotsBatched(scriptContent, mode, settings, taskId, options);
 }
 
 /**
@@ -640,9 +557,12 @@ ${autoAssignScene ? `- sceneName: 所属场次名称
  */
 async function callLLMDirect(systemPrompt, userContent, settings, taskId, options = {}) {
   const provider = options.provider || 'geekai';
-  const model = options.model || 'deepseek-chat';
+  const model = options.model || 'deepseek-flash';
   const useJson = options.json === true;
-  const maxTokens = options.max_tokens || 8192;
+  // 推理模型（如 deepseek-flash）的推理 token 与可见输出共享 max_tokens 预算，
+  // 复杂文档下推理可能消耗数千 token，上限过小时正文会在中途被截断
+  const MAX_TOKENS_CAP = 16384;
+  let maxTokens = Math.min(options.max_tokens || 8192, MAX_TOKENS_CAP);
   const temperature = options.temperature ?? 0.3;
 
   const baseUrl = getBaseUrl(provider, settings);
@@ -657,9 +577,10 @@ async function callLLMDirect(systemPrompt, userContent, settings, taskId, option
     { role: 'user', content: userContent }
   ];
 
-  console.log(`[aiClient] 使用模型 ${provider}/${model} 调用 LLM（json=${useJson}）`);
+  console.log(`[aiClient] 使用模型 ${provider}/${model} 调用 LLM（json=${useJson}, max_tokens=${maxTokens}）`);
 
-  const callOnce = async () => {
+  // 单次请求（messages / maxTokens 可变，供"扩权重试"与"续写"复用）
+  const requestOnce = async (reqMessages, reqMaxTokens) => {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -668,9 +589,9 @@ async function callLLMDirect(systemPrompt, userContent, settings, taskId, option
       },
       body: JSON.stringify({
         model,
-        messages,
+        messages: reqMessages,
         temperature,
-        max_tokens: maxTokens,
+        max_tokens: reqMaxTokens,
         stream: false,
         ...(useJson ? { response_format: { type: "json_object" } } : {})
       }),
@@ -695,20 +616,22 @@ async function callLLMDirect(systemPrompt, userContent, settings, taskId, option
       taskId
     }, settings);
 
+    const choice = data.choices[0] || {};
     return {
       model,
       provider,
-      content: data.choices[0].message.content,
+      content: choice.message?.content || '',
+      finishReason: choice.finish_reason,
       usage
     };
   };
 
-  // 重试逻辑（仅对 5xx/超时/连接重置重试 1 次，4xx 不重试）
-  try {
+  // 网络层重试（仅对 5xx/超时/连接重置重试 1 次，4xx 不重试）
+  const withRetry = async (reqMessages, reqMaxTokens) => {
     let lastErr;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return await callOnce();
+        return await requestOnce(reqMessages, reqMaxTokens);
       } catch (err) {
         lastErr = err;
         if (attempt === 0 && isRetryableError(err)) {
@@ -720,10 +643,62 @@ async function callLLMDirect(systemPrompt, userContent, settings, taskId, option
       }
     }
     throw lastErr;
-  } catch (err) {
-    console.error(`[aiClient] ${provider}/${model} 调用失败: ${err.message}`);
-    throw err;
+  };
+
+  let result = await withRetry(messages, maxTokens);
+  let content = result.content;
+
+  // 输出因 max_tokens 被截断时的补救
+  if (result.finishReason === 'length') {
+    if (useJson) {
+      // JSON 无法拼接：提升到最大 token 上限整体重试一次
+      if (maxTokens < MAX_TOKENS_CAP) {
+        maxTokens = MAX_TOKENS_CAP;
+        console.warn(`[aiClient] JSON 输出被 max_tokens 截断，提升至 ${maxTokens} 后整体重试`);
+        result = await withRetry(messages, maxTokens);
+        content = result.content;
+      }
+      if (result.finishReason === 'length') {
+        throw new Error('AI 输出超出长度上限（可能分镜数量过多），请缩短文档、减少分镜数量后重试');
+      }
+    } else {
+      // 极端情况下推理 token 吃光预算、可见正文为空：先扩到最大上限整体重试
+      if (!content.trim() && maxTokens < MAX_TOKENS_CAP) {
+        maxTokens = MAX_TOKENS_CAP;
+        console.warn(`[aiClient] 推理 token 占满预算导致正文为空，提升至 ${maxTokens} 后整体重试`);
+        result = await withRetry(messages, maxTokens);
+        content = result.content;
+      }
+      // 纯文本：在多轮对话中要求模型从截断处续写，最多续写 2 次并拼接
+      const convo = [
+        ...messages,
+        { role: 'assistant', content }
+      ];
+      let rounds = 0;
+      while (result.finishReason === 'length' && rounds < 2) {
+        rounds += 1;
+        console.warn(`[aiClient] 文本输出被 max_tokens 截断，进行第 ${rounds} 次续写`);
+        convo.push({
+          role: 'user',
+          content: '上一条内容在输出中途被截断。请直接从截断处继续输出，不要重复已有内容，不要添加任何说明、开场白或结束语。'
+        });
+        result = await withRetry(convo, maxTokens);
+        content += result.content;
+        convo.push({ role: 'assistant', content: result.content });
+      }
+      if (result.finishReason === 'length') {
+        throw new Error('AI 生成内容过长，多次续写后仍未完成，请缩短文档或缩小视频时长后重试');
+      }
+    }
   }
+
+  return {
+    model,
+    provider,
+    content,
+    finishReason: result.finishReason,
+    usage: result.usage
+  };
 }
 
 /**
@@ -804,7 +779,7 @@ async function generateVideoCopy(intent, settings, taskId, options = {}) {
   const result = await callLLMDirect(systemPrompt, intent, settings, taskId, {
     ...options,
     json: false,
-    max_tokens: 4096,
+    max_tokens: 8192,
     temperature: 0.7
   });
   return { content: result.content };
@@ -840,7 +815,7 @@ async function generateSceneDivision(scriptContent, settings, taskId, options = 
   const result = await callLLMDirect(systemPrompt, scriptContent, settings, taskId, {
     ...options,
     json: false,
-    max_tokens: 4096,
+    max_tokens: 8192,
     temperature: 0.3
   });
   return { content: result.content };
@@ -876,7 +851,7 @@ async function generateStoryboardScript(scriptContent, settings, taskId, options
   const result = await callLLMDirect(systemPrompt, scriptContent, settings, taskId, {
     ...options,
     json: false,
-    max_tokens: 8192,
+    max_tokens: 16384,
     temperature: 0.5
   });
   return { content: result.content };
@@ -908,7 +883,7 @@ async function generateShootingScript(scriptContent, settings, taskId, options =
   const result = await callLLMDirect(systemPrompt, scriptContent, settings, taskId, {
     ...options,
     json: false,
-    max_tokens: 8192,
+    max_tokens: 16384,
     temperature: 0.4
   });
   return { content: result.content };
@@ -935,16 +910,16 @@ async function estimateCost(type, settings) {
   const prices = settings.model_prices || MODEL_PRICES;
   
   if (type === 'chat') {
-    const model = settings.llm_model || 'deepseek-chat';
-    const modelPrices = prices[model] || prices['deepseek-chat'];
+    const model = settings.llm_model || 'deepseek-flash';
+    const modelPrices = prices[model] || prices['deepseek-flash'] || { input: 0.001, output: 0.002 };
     // 假设平均每次调用消耗 1000 input + 500 output tokens
     return (modelPrices.input * 1) + (modelPrices.output * 0.5);
   }
   
   if (type === 'image') {
-    const model = settings.image_model || 'gpt-image-2';
+    const model = settings.image_model || 'gpt-image-2.5-flare';
     const quality = settings.image_quality || 'medium';
-    return prices[model]?.[quality] || 0.08;
+    return prices[model]?.['per_image_' + quality] || prices[model]?.[quality] || 0.08;
   }
   
   return 0;

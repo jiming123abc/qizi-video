@@ -94,6 +94,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   // 标记上传队列是否已启动（防止完成检测在队列启动前误判 allDone）
   const uploadsStartedRef = useRef(false);
 
+  // 文件选择框/上传流程是否进行中（防止并发两次 startUpload 互相覆盖 resolver/options）
+  const uploadInFlightRef = useRef(false);
+
   // 当前上传选项和回调
   const currentOptionsRef = useRef<UploadOptions | null>(null);
   const resolveRef = useRef<((results: UploadItemResult[]) => void) | null>(null);
@@ -375,6 +378,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   function cleanup() {
+    uploadInFlightRef.current = false;
     setIsDialogOpen(false);
     setUploadingFiles([]);
     uploadingFilesRef.current = [];
@@ -423,6 +427,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   const startUpload = useCallback((options: UploadOptions): Promise<UploadItemResult[]> => {
     return new Promise<UploadItemResult[]>((resolve) => {
+      // 并发守卫：上一次文件选择/上传流程尚未结束时直接返回空结果，
+      // 否则 resolver/options 会被第二次调用覆盖，第一次的 Promise 永悬挂
+      if (uploadInFlightRef.current) {
+        resolve([]);
+        return;
+      }
+      uploadInFlightRef.current = true;
+
       // 保存选项和回调
       currentOptionsRef.current = options;
       resolveRef.current = resolve;
@@ -437,12 +449,39 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       input.multiple = options.multiple ?? false;
       input.style.display = 'none';
 
+      // 用户取消文件选择框不会触发 change，Resolver 会永悬挂。
+      // 用浏览器原生 cancel 事件 + 窗口 focus 兜底（延迟以保证 change 先触发）
+      let choiceHandled = false;
+      const settleEmpty = () => {
+        if (choiceHandled) return;
+        choiceHandled = true;
+        window.removeEventListener('focus', handleWindowFocus);
+        if (input.parentNode) input.parentNode.removeChild(input);
+        uploadInFlightRef.current = false;
+        currentOptionsRef.current = null;
+        resolveRef.current = null;
+        resolve([]);
+      };
+      const handleWindowFocus = () => {
+        setTimeout(() => {
+          // 若 change 已带着文件触发，choiceHandled 会被置 true
+          if (!choiceHandled) settleEmpty();
+        }, 300);
+      };
+
+      input.addEventListener('cancel', settleEmpty);
+      window.addEventListener('focus', handleWindowFocus);
+
       input.onchange = async (e) => {
         const target = e.target as HTMLInputElement;
         if (!target.files || target.files.length === 0) {
-          resolve([]);
+          settleEmpty();
           return;
         }
+        // 已选择文件：文件选择阶段结束，关闭取消兜底；
+        // 上传流程继续，uploadInFlightRef 由 cleanup() 在流程结束时复位
+        choiceHandled = true;
+        window.removeEventListener('focus', handleWindowFocus);
 
         let files = Array.from(target.files);
 
@@ -453,7 +492,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (valid.length === 0) {
-          resolve([]);
+          settleEmpty();
           return;
         }
 
@@ -464,13 +503,13 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
         if (remaining <= 0) {
           window.alert(`已达到最大数量限制（${maxAllowed}个），无法继续添加。`);
-          resolve([]);
+          settleEmpty();
           return;
         }
 
         if (valid.length > remaining) {
           window.alert(`已达到数量限制，最多还能添加 ${remaining} 个文件，但您选择了 ${valid.length} 个文件。`);
-          resolve([]);
+          settleEmpty();
           return;
         }
 

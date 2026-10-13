@@ -545,7 +545,7 @@ export default function SettingsDialog({ isOpen, onClose, projectId }: SettingsD
                       <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
                       <div className="text-xs text-blue-300 space-y-1">
                         <div><b>模型添加指引：</b></div>
-                        <div>• <b>模型名</b>：填写平台 API 文档中的完整模型 ID，如 <code className="px-1 bg-blue-500/20 rounded">deepseek-chat</code>、<code className="px-1 bg-blue-500/20 rounded">gpt-4o-mini</code></div>
+                        <div>• <b>模型名</b>：填写平台 API 文档中的完整模型 ID，如 <code className="px-1 bg-blue-500/20 rounded">deepseek-flash</code>、<code className="px-1 bg-blue-500/20 rounded">gpt-6-luna</code></div>
                         <div>• <b>查询渠道</b>：在对应平台的控制台或模型广场查看可用模型列表</div>
                         <div>• <b>技术文档</b>：参见各平台文档（上方"AI 平台管理"中的链接）</div>
                         <div>• <b>费用</b>：参考平台定价页，选择对应费用等级</div>

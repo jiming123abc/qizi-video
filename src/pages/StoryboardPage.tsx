@@ -642,11 +642,15 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       return;
     }
     try {
-      await fetch(`/api/shots/${shot.id}/status`, {
+      const res = await fetch(`/api/shots/${shot.id}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `请求失败(${res.status})`);
+      }
       // 本地立即移除：点击后自动移动到对应的 tab
       setShots(prev => prev.filter(it => it.id !== shot.id));
       // 同步 stats
@@ -655,6 +659,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       showToast(newStatus === 'done' ? '已标记为已拍摄' : '已回到未拍摄');
     } catch (e) {
       console.error('更新状态失败:', e);
+      showToast(e instanceof Error ? e.message : '更新状态失败', 'error');
     }
   };
 
@@ -668,19 +673,24 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
       if (shotNo) {
         updateData.shotNo = shotNo;
       }
-      await fetch(`/api/shots/${shot.id}`, {
+      const res = await fetch(`/api/shots/${shot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updateData)
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `请求失败(${res.status})`);
+      }
       setShots(prev => prev.filter(it => it.id !== shot.id));
       await loadStats();
       showToast('已标记为已拍摄');
-    } catch (e) {
-      console.error('更新状态/镜头号失败:', e);
-    } finally {
+      // 仅在成功后关闭弹窗；失败时保留，用户可重试
       setShowShotNoDialog(null);
       setShotNoInputValue('');
+    } catch (e) {
+      console.error('更新状态/镜头号失败:', e);
+      showToast(e instanceof Error ? e.message : '更新失败，请重试', 'error');
     }
   };
 
@@ -838,14 +848,19 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
   // ============ 设置项目封面（上传后自动调用） ============
   const setProjectCover = async (coverUrl: string) => {
     try {
-      await fetch(`/api/projects/${projectId}/cover`, {
+      const res = await fetch(`/api/projects/${projectId}/cover`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ coverUrl })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `设置封面失败(${res.status})`);
+      }
       setProject(prev => prev ? { ...prev, coverUrl } : prev);
     } catch (e) {
       console.error('设置封面失败:', e);
+      showToast(e instanceof Error ? e.message : '设置封面失败', 'error');
     }
   };
 
@@ -1090,15 +1105,35 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
     const isLast = index >= total - 1;
 
     const handleUpdate = (id: number, fields: Partial<Shot>) => {
-      setShots(prev => prev.map(s => s.id === id ? { ...s, ...fields } : s));
+      // 先保存旧值，服务端保存失败时回滚，避免界面与数据不一致
+      let previousShot: Shot | undefined;
+      setShots(prev => prev.map(s => {
+        if (s.id === id) { previousShot = s; return { ...s, ...fields }; }
+        return s;
+      }));
 
       const { media, ...otherFields } = fields;
       if (Object.keys(otherFields).length > 0) {
-        fetch(`/api/shots/${id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(otherFields)
-        }).catch(console.error);
+        (async () => {
+          try {
+            const res = await fetch(`/api/shots/${id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(otherFields)
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success === false) {
+              throw new Error(data.message || `保存失败(${res.status})`);
+            }
+          } catch (e) {
+            console.error('更新分镜失败:', e);
+            // 回滚到编辑前的值
+            if (previousShot) {
+              setShots(prev => prev.map(s => (s.id === id ? previousShot! : s)));
+            }
+            showToast(e instanceof Error ? e.message : '保存失败，已恢复原内容', 'error');
+          }
+        })();
       }
 
       // 如果编辑了补全相关字段，防抖刷新建议列表
@@ -1120,9 +1155,13 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
 
     const handleDeleteMedia = async (shotId: number, mediaId: number) => {
       try {
-        await fetch(`/api/shots/${shotId}/media/${mediaId}`, {
+        const res = await fetch(`/api/shots/${shotId}/media/${mediaId}`, {
           method: 'DELETE'
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) {
+          throw new Error(data.message || `删除失败(${res.status})`);
+        }
         setShots(prev => prev.map(shot => {
           if (shot.id !== shotId) return shot;
           return {
@@ -1133,7 +1172,7 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         showToast('素材已删除');
       } catch (e) {
         console.error('删除素材失败:', e);
-        showToast('删除失败', 'error');
+        showToast(e instanceof Error ? e.message : '删除失败', 'error');
       }
     };
 

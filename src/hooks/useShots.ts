@@ -417,18 +417,24 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     next.splice(targetIdx, 0, moved);
 
     const orders = next.map((i, idx) => ({ id: i.id, sortOrder: idx }));
+    // 保留排序前快照，服务端保存失败时立即回滚，保持界面与数据一致
+    const previous = sorted.map(i => ({ ...i }));
     setShots(next.map((i, idx) => ({ ...i, sortOrder: idx })));
 
     try {
-      await fetch('/api/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reorder', orders })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `排序保存失败(${res.status})`);
+      }
     } catch (e) {
       console.error('更新排序失败:', e);
-      // P3-9：排序保存失败提示用户（本地已是乐观更新，下次刷新会恢复服务端顺序）
-      showToast('排序保存失败，刷新后将恢复原顺序', 'error');
+      setShots(previous);
+      showToast('排序保存失败，已恢复原顺序', 'error');
     }
   }, [shots, showToast]);
 
@@ -454,17 +460,25 @@ export function useShots({ projectId, showToast }: UseShotsOptions): UseShotsRet
     const next = [...sorted];
     [next[idx], next[targetIdx]] = [next[targetIdx], next[idx]];
     const orders = next.map((i, iidx) => ({ id: i.id, sortOrder: iidx }));
+    // 保留排序前快照，服务端保存失败时回滚，不执行滚动
+    const previous = sorted.map(i => ({ ...i }));
     setShots(next.map((i, iidx) => ({ ...i, sortOrder: iidx })));
 
     try {
-      await fetch('/api/shots/batch-update', {
+      const res = await fetch('/api/shots/batch-update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reorder', orders })
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || `排序保存失败(${res.status})`);
+      }
     } catch (e) {
       console.error('更新排序失败:', e);
-      showToast('排序保存失败，刷新后将恢复原顺序', 'error');
+      setShots(previous);
+      showToast('排序保存失败，已恢复原顺序', 'error');
+      return;
     }
     window.requestAnimationFrame(() => scrollIntoView(itemId));
   }, [shots, showToast]);

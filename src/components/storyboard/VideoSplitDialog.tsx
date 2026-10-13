@@ -134,6 +134,19 @@ export default function VideoSplitDialog({
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // 统一关闭 SSE / 轮询，避免对话框关闭后回调继续 setState 或连接泄漏
+  const stopTaskConnections = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (eventSourceRef.current) {
+      try { eventSourceRef.current.close(); } catch (_) {}
+      eventSourceRef.current = null;
+    }
+  }, []);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -838,11 +851,14 @@ export default function VideoSplitDialog({
     setVideoDuration(0);
     setCurrentTime(0);
     setIsPlaying(false);
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-  }, []);
+    stopTaskConnections();
+  }, [stopTaskConnections]);
+
+  // 对话框关闭（ESC/遮罩/X/取消）或组件卸载时，关闭 SSE 与轮询
+  useEffect(() => {
+    if (!isOpen) stopTaskConnections();
+    return () => stopTaskConnections();
+  }, [isOpen, stopTaskConnections]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1146,11 +1162,85 @@ export default function VideoSplitDialog({
   };
 
   const pollTaskStatus = useCallback((tid: string) => {
-    let sseFailed = false;
+    // 先关闭上一轮遗留的 SSE / 轮询
+    stopTaskConnections();
+
     let sseClosed = false;
+    let switchedToPolling = false;
+    let pollFailures = 0;
+    const MAX_POLL_FAILURES = 5;
+
+    // 任务完成后的统一处理（SSE 与轮询共用，避免两条分支逻辑不一致）
+    const handleTaskDone = (data: AiTaskUpdate) => {
+      setProgress(100);
+      setDetectedShots(data.output?.shots?.length || 0);
+      setEstimatedCost(data.output?.estimatedCost || 0);
+
+      // 阿里云拆条返回空结果时，给出明确提示
+      if (!data.output?.shots || data.output.shots.length === 0) {
+        setError('阿里云分析完成，但未检测到镜头切换点。请尝试手动添加分割点，或调整视频后重试。');
+        setState('initial');
+        setMode('manual');
+        setShowAIMode(false);
+        return;
+      }
+
+      // AI 完成: 提取分割点时间，设置为 splitPoints，回到手动模式
+      const shots = data.output.shots as Array<{ startTime?: number; endTime?: number; media?: Array<{ startTime?: number; duration?: number }> }>;
+      // 不再假设第一个 shot 从 0 开始；将所有 startTime > 0.5 的作为分割点
+      // （阿里云拆条返回的可能是主题段落，第一个 beginTime 不一定是 0）
+      const newSplitPoints: SplitPoint[] = shots
+        .map(shot => ({
+          id: generateId(),
+          time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
+        }))
+        .filter(p => p.time > 0.5);
+      setSplitPoints(newSplitPoints);
+
+      setMode('manual');
+      setShowAIMode(false);
+      setState('initial');  // 回到手动模式，用户可调整后点击“开始分割”
+    };
+
+    // 轮询兜底：SSE 不可用/连接失败时使用
+    const startPolling = () => {
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/ai/task/${tid}`);
+          const json = await res.json();
+          // 注意：轮询接口返回 { success, data } 包裹层；SSE 消息体才是裸 task
+          const data = (json.data || json) as TaskResult;
+          pollFailures = 0;
+
+          if (data.status === 'processing' || data.status === 'pending') {
+            setProgress(data.progress || 0);
+            setCurrentPhase(getPhaseText(data.output));
+            if (data.output?.shots) {
+              setDetectedShots(data.output.shots.length);
+            }
+          } else if (data.status === 'done' || data.status === 'completed') {
+            stopTaskConnections();
+            handleTaskDone(data);
+          } else if (data.status === 'error' || data.status === 'failed') {
+            stopTaskConnections();
+            setAiError(data.error || '分割失败，请重试');
+            setState('initial');
+          }
+        } catch (e) {
+          console.error('轮询任务状态失败:', e);
+          pollFailures += 1;
+          if (pollFailures >= MAX_POLL_FAILURES) {
+            stopTaskConnections();
+            setAiError('任务状态查询失败，请稍后重试');
+            setState('initial');
+          }
+        }
+      }, 2000);
+    };
 
     try {
       const eventSource = new EventSource(`/api/ai/task/${tid}/stream`);
+      eventSourceRef.current = eventSource;
 
       const handleTaskUpdate = (data: AiTaskUpdate) => {
         if (sseClosed) return;
@@ -1163,38 +1253,11 @@ export default function VideoSplitDialog({
           }
         } else if (data.status === 'done' || data.status === 'completed') {
           sseClosed = true;
-          eventSource.close();
-          setProgress(100);
-          setDetectedShots(data.output?.shots?.length || 0);
-          setEstimatedCost(data.output?.estimatedCost || 0);
-
-          // 阿里云拆条返回空结果时，给出明确提示
-          if (!data.output?.shots || data.output.shots.length === 0) {
-            setError('阿里云分析完成，但未检测到镜头切换点。请尝试手动添加分割点，或调整视频后重试。');
-            setState('initial');
-            setMode('manual');
-            setShowAIMode(false);
-            return;
-          }
-
-          // AI 完成: 提取分割点时间，设置为 splitPoints，回到手动模式
-          const shots = data.output.shots as Array<{ startTime?: number; endTime?: number; media?: Array<{ startTime?: number; duration?: number }> }>;
-          // 不再假设第一个 shot 从 0 开始；将所有 startTime > 0.5 的作为分割点
-          // （阿里云拆条返回的可能是主题段落，第一个 beginTime 不一定是 0）
-          const newSplitPoints: SplitPoint[] = shots
-            .map(shot => ({
-              id: generateId(),
-              time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
-            }))
-            .filter(p => p.time > 0.5);
-          setSplitPoints(newSplitPoints);
-
-          setMode('manual');
-          setShowAIMode(false);
-          setState('initial');  // 回到手动模式，用户可调整后点击“开始分割”
+          stopTaskConnections();
+          handleTaskDone(data);
         } else if (data.status === 'error' || data.status === 'failed') {
           sseClosed = true;
-          eventSource.close();
+          stopTaskConnections();
           setAiError(data.error || '分割失败，请重试');
           setState('initial');
         }
@@ -1209,127 +1272,28 @@ export default function VideoSplitDialog({
         }
       });
 
-      eventSource.addEventListener('error', (event: MessageEvent) => {
-        if (sseClosed) return;
-        sseFailed = true;
-        eventSource.close();
+      const fallbackToPolling = () => {
+        // addEventListener('error') 与 onerror 会对同一错误事件各触发一次，只允许回退一次
+        if (sseClosed || switchedToPolling) return;
+        switchedToPolling = true;
+        try { eventSource.close(); } catch (_) {}
+        eventSourceRef.current = null;
         startPolling();
+      };
+
+      eventSource.addEventListener('error', () => {
+        fallbackToPolling();
       });
 
       eventSource.onerror = () => {
-        if (sseClosed) return;
-        if (!sseFailed) {
-          sseFailed = true;
-          eventSource.close();
-          startPolling();
-        }
-      };
-
-      const startPolling = () => {
-        pollIntervalRef.current = setInterval(async () => {
-          try {
-            const res = await fetch(`/api/ai/task/${tid}`);
-            const data: TaskResult = await res.json();
-
-            if (data.status === 'processing' || data.status === 'pending') {
-              setProgress(data.progress || 0);
-              setCurrentPhase(getPhaseText(data.output));
-              if (data.output?.shots) {
-                setDetectedShots(data.output.shots.length);
-              }
-            } else if (data.status === 'done') {
-              if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-              }
-              setProgress(100);
-              setDetectedShots(data.output?.shots?.length || 0);
-              setEstimatedCost(data.output?.estimatedCost || 0);
-
-              if (!data.output?.shots || data.output.shots.length === 0) {
-                setError('阿里云分析完成，但未检测到镜头切换点。请尝试手动添加分割点，或调整视频后重试。');
-                setState('initial');
-                setMode('manual');
-                setShowAIMode(false);
-                return;
-              }
-
-              const shots = data.output.shots as Array<{ startTime?: number; media?: Array<{ startTime?: number }> }>;
-              const newSplitPoints: SplitPoint[] = shots
-                .map(shot => ({
-                  id: generateId(),
-                  time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
-                }))
-                .filter(p => p.time > 0.5);
-              setSplitPoints(newSplitPoints);
-
-              setMode('manual');
-              setShowAIMode(false);
-              setState('initial');
-            } else if (data.status === 'error') {
-              if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-              }
-              setAiError(data.error || '分割失败，请重试');
-              setState('initial');
-            }
-          } catch (e) {
-            console.error('轮询任务状态失败:', e);
-          }
-        }, 2000);
+        fallbackToPolling();
       };
     } catch (e) {
       console.warn('SSE 不可用，使用轮询:', e);
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const res = await fetch(`/api/ai/task/${tid}`);
-          const data: TaskResult = await res.json();
-
-          if (data.status === 'processing' || data.status === 'pending') {
-            setProgress(data.progress || 0);
-            setCurrentPhase(getPhaseText(data.output));
-            if (data.output?.shots) {
-              setDetectedShots(data.output.shots.length);
-            }
-          } else if (data.status === 'done') {
-            if (pollIntervalRef.current) {
-              clearInterval(pollIntervalRef.current);
-              pollIntervalRef.current = null;
-            }
-            setProgress(100);
-            setDetectedShots(data.output?.shots?.length || 0);
-            setEstimatedCost(data.output?.estimatedCost || 0);
-
-            if (data.output?.shots) {
-              const shots = data.output.shots as Array<{ startTime?: number; media?: Array<{ startTime?: number }> }>;
-              const newSplitPoints: SplitPoint[] = shots
-                .slice(1)
-                .map(shot => ({
-                  id: generateId(),
-                  time: shot.startTime ?? shot.media?.[0]?.startTime ?? 0
-                }))
-                .filter(p => p.time > 0);
-              setSplitPoints(newSplitPoints);
-            }
-
-            setMode('manual');
-            setShowAIMode(false);
-            setState('initial');  // 回到手动模式
-          } else if (data.status === 'error') {
-            if (pollIntervalRef.current) {
-              clearInterval(pollIntervalRef.current);
-              pollIntervalRef.current = null;
-            }
-            setAiError(data.error || '分割失败，请重试');
-            setState('initial');
-          }
-        } catch (e) {
-          console.error('轮询任务状态失败:', e);
-        }
-      }, 2000);
+      eventSourceRef.current = null;
+      startPolling();
     }
-  }, []);
+  }, [stopTaskConnections]);
 
   const handleStartSplit = () => {
     if (!currentVideoUrl || splitPoints.length === 0) return;
@@ -1419,10 +1383,7 @@ export default function VideoSplitDialog({
   };
 
   const handleCancel = () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
+    stopTaskConnections();
     setAiError(null);
     setState('initial');
     setProgress(0);

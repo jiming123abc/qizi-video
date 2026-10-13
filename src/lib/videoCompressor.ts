@@ -24,39 +24,8 @@ export type VideoBitrateInfo = {
   resolution?: '1080p' | '720p' | '480p';
 };
 
-// 全局隐藏 video 元素，复用避免重复创建/销毁导致的 ERR_ABORTED
-let _probeVideo: HTMLVideoElement | null = null;
-let _probeBlobUrl: string | null = null;
-
-function getProbeVideo(): HTMLVideoElement {
-  if (!_probeVideo) {
-    _probeVideo = document.createElement('video');
-    _probeVideo.preload = 'metadata';
-    _probeVideo.style.display = 'none';
-    document.body.appendChild(_probeVideo);
-  }
-  return _probeVideo;
-}
-
-function cleanupProbeVideo() {
-  if (_probeBlobUrl) {
-    try { URL.revokeObjectURL(_probeBlobUrl); } catch (_) {}
-    _probeBlobUrl = null;
-  }
-  if (_probeVideo) {
-    try {
-      _probeVideo.pause();
-      _probeVideo.removeAttribute('src');
-      _probeVideo.load();
-    } catch (_) {}
-    try { _probeVideo.remove(); } catch (_) {}
-    _probeVideo = null;
-  }
-}
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('beforeunload', cleanupProbeVideo);
-}
+// 元数据探测超时：避免异常文件导致 Promise 永久挂起
+const PROBE_TIMEOUT_MS = 15000;
 
 // 默认码率配置（作为备用）
 const DEFAULT_BITRATE_CONFIG = {
@@ -174,23 +143,40 @@ export function needsCompression(
 }
 
 export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo> {
-  const video = getProbeVideo();
+  // 每次探测使用独立的 video 元素，支持多文件并发探测，避免共享元素的事件回调互相覆盖
   const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.muted = true;
+  video.style.display = 'none';
+  document.body.appendChild(video);
 
   return new Promise((resolve) => {
-    let resolved = false;
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      try { video.pause(); } catch (_) {}
+      try { video.removeAttribute('src'); video.load(); } catch (_) {}
+      try { video.remove(); } catch (_) {}
+      URL.revokeObjectURL(url);
+    };
 
     const done = (bitrateKbps: number | null, duration: number | null, width?: number, height?: number) => {
-      if (resolved) return;
-      resolved = true;
+      if (settled) return;
+      settled = true;
       const resolution = getResolutionTier(height);
+      cleanup();
       resolve({ bitrateKbps, duration, width, height, resolution });
-      const oldUrl = _probeBlobUrl;
-      _probeBlobUrl = url;
-      if (oldUrl) {
-        setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
-      }
     };
+
+    timeoutId = setTimeout(() => {
+      console.warn('[videoCompressor] 视频元数据探测超时:', file.name);
+      done(null, null);
+    }, PROBE_TIMEOUT_MS);
 
     video.onloadedmetadata = () => {
       const duration = video.duration;
@@ -209,11 +195,6 @@ export async function estimateVideoBitrate(file: File): Promise<VideoBitrateInfo
       done(null, null);
     };
 
-    try {
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
-    } catch (_) {}
     video.src = url;
   });
 }

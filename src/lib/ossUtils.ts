@@ -1,5 +1,3 @@
-import type { UploadTaskResult } from './types';
-
 const FILE_SIZE_LIMITS = {
   image: 20 * 1024 * 1024,
   video: 1024 * 1024 * 1024
@@ -46,6 +44,26 @@ export function getVideoPoster(url: string, startTime?: number): string {
 // ================ 签名 URL 缓存（1小时有效期） ================
 const signUrlCache = new Map<string, { url: string; expires: number }>();
 
+/**
+ * 判断 URL 是否可直接访问、无需 OSS 签名：
+ * data URI、本地静态资源（/uploads/）、后端代理接口（/api/）
+ */
+export function isDirectAccessibleUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  return url.startsWith('data:') || url.startsWith('/uploads/') || url.startsWith('/api/');
+}
+
+/**
+ * 缓存中是否已有该 URL 的新鲜签名结果。
+ * 注意：不能用"签名值是否等于原 URL"判定——签名失败/无需签名的场景下
+ * 缓存里的值可能与原 URL 相同，但那仍是一次已完成的解析结果。
+ */
+export function hasFreshSignedUrl(ossUrl: string): boolean {
+  if (!ossUrl || isDirectAccessibleUrl(ossUrl)) return false;
+  const cached = signUrlCache.get(ossUrl);
+  return !!cached && cached.expires > Date.now();
+}
+
 // 签名 URL 更新订阅（pub-sub，替代轮询）
 const signUrlSubscribers = new Set<(urls: string[]) => void>();
 
@@ -65,9 +83,7 @@ function notifySignUrlUpdate(updatedUrls: string[]): void {
 
 export async function getSignedOssUrl(ossUrl: string): Promise<string> {
   if (!ossUrl) return ossUrl;
-  if (ossUrl.startsWith('data:')) return ossUrl;
-  if (ossUrl.startsWith('/uploads/')) return ossUrl;
-  if (ossUrl.startsWith('/api/')) return ossUrl;
+  if (isDirectAccessibleUrl(ossUrl)) return ossUrl;
 
   // 检查缓存
   const cached = signUrlCache.get(ossUrl);
@@ -95,7 +111,7 @@ export async function getSignedOssUrl(ossUrl: string): Promise<string> {
 export async function batchGetSignedUrls(urls: string[]): Promise<void> {
   // 过滤出需要签名的 URL（排除缓存命中和非 OSS URL）
   const toSign = urls.filter(u => {
-    if (!u || u.startsWith('data:') || u.startsWith('/uploads/') || u.startsWith('/api/')) return false;
+    if (isDirectAccessibleUrl(u)) return false;
     const cached = signUrlCache.get(u);
     return !cached || cached.expires <= Date.now();
   });
@@ -152,9 +168,7 @@ export async function batchGetSignedUrls(urls: string[]): Promise<void> {
 // 从缓存获取签名 URL（同步，立即返回）
 export function getSignedUrlFromCache(ossUrl: string): string {
   if (!ossUrl) return ossUrl;
-  if (ossUrl.startsWith('data:')) return ossUrl;
-  if (ossUrl.startsWith('/uploads/')) return ossUrl;
-  if (ossUrl.startsWith('/api/')) return ossUrl;
+  if (isDirectAccessibleUrl(ossUrl)) return ossUrl;
 
   const cached = signUrlCache.get(ossUrl);
   if (cached && cached.expires > Date.now()) {
@@ -326,112 +340,6 @@ export async function checkVideoBitrate(file: File): Promise<UploadDecision> {
     height: result.height,
     fileSizeMB,
     fileSizeMBNum,
-  };
-}
-
-// 轮询函数
-async function pollTaskStatus(
-  taskId: string,
-  onProgress?: (progress: UploadProgress) => void
-): Promise<UploadTaskResult> {
-  let attempts = 0;
-  const maxAttempts = 360; // 最多10分钟 (360 * 2秒)
-
-  while (attempts < maxAttempts) {
-    const res = await fetch(`${API_BASE_URL}/api/upload/video/status/${taskId}`);
-    if (!res.ok) {
-      throw new Error('获取任务状态失败');
-    }
-    const task = await res.json();
-
-    if (task.status === 'completed') {
-      return task.result;
-    }
-    if (task.status === 'failed') {
-      const err: UploadError = new Error(task.error || '任务失败');
-      err.ossError = task.ossError === true;
-      throw err;
-    }
-
-    // 更新进度
-    const phase: UploadProgress['phase'] = task.progress < 50 ? 'compressing' : (task.progress < 100 ? 'uploading' : 'done');
-    const progress = task.progress;
-    const message = task.message || '处理中...';
-    onProgress?.({ phase, progress, message });
-
-    attempts++;
-    await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒轮询一次
-  }
-
-  throw new Error('任务超时');
-}
-
-// 上传到服务器进行压缩（高码率视频，异步轮询模式）
-export async function uploadVideoToServerWithCompression(
-  file: File,
-  onProgress?: (progress: UploadProgress) => void,
-  forceLocal: boolean = false
-): Promise<UploadResult> {
-  if (!validateFileType(file, 'video')) {
-    throw new Error('不支持的视频格式，请上传 MP4、WebM、OGG 或 MOV 格式');
-  }
-
-  const sizeValidation = validateFileSize(file, 'video');
-  if (!sizeValidation.valid) {
-    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
-    throw new Error(`视频大小不能超过 ${sizeValidation.maxSizeMB}MB，当前文件大小: ${fileSizeMB}MB`);
-  }
-
-  const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
-  onProgress?.({ phase: 'compressing', progress: 0, message: `正在上传视频至服务器进行压缩 (${fileSizeMB}MB)...` });
-
-  // 第一步：上传文件获取 taskId
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const url = new URL(`${API_BASE_URL}/api/upload/video`);
-  url.searchParams.set('compress', 'true');
-  if (forceLocal) {
-    url.searchParams.set('forceLocal', 'true');
-  }
-
-  const uploadRes = await fetch(url.toString(), {
-    method: 'POST',
-    body: formData
-  });
-
-  if (!uploadRes.ok) {
-    const err = await uploadRes.json().catch(() => ({ error: '上传失败' }));
-    const uploadError: UploadError = new Error(err.message || err.error || '上传失败');
-    uploadError.ossError = err.ossError === true;
-    throw uploadError;
-  }
-
-  const { taskId } = await uploadRes.json();
-
-  // 第二步：轮询任务状态
-  onProgress?.({ phase: 'compressing', progress: 5, message: '文件上传完成，等待处理...' });
-  const result = await pollTaskStatus(taskId, onProgress);
-
-  const compressionFailed = result.compressionFailed === true;
-  const compressed = result.compressed === true;
-
-  if (compressionFailed) {
-    onProgress?.({ phase: 'done', progress: 100, message: '压缩未成功，已上传原始视频' });
-  } else if (compressed) {
-    const origMB = (result.originalSizeKB / 1024).toFixed(2);
-    const compMB = (result.compressedSizeKB / 1024).toFixed(2);
-    onProgress?.({ phase: 'done', progress: 100, message: `视频压缩上传完成\n大小: ${origMB}MB -> ${compMB}MB` });
-  } else {
-    onProgress?.({ phase: 'done', progress: 100, message: `视频上传完成\n大小: ${fileSizeMB}MB（无需压缩）` });
-  }
-
-  return {
-    url: result.url,
-    compressed,
-    compressionFailed,
-    originalSizeKB: result.originalSizeKB,
-    compressedSizeKB: result.compressedSizeKB,
   };
 }
 

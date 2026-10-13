@@ -723,21 +723,21 @@ function initStoryboardDatabase() {
 function initDefaultSettings(callback) {
   const defaults = {
     llm_provider: 'geekai',
-    llm_model: 'deepseek-chat',
+    llm_model: 'deepseek-flash',
     llm_fallback_chain: JSON.stringify([
-      { model: 'deepseek-chat', provider: 'geekai', cost: 'low' },
-      { model: 'deepseek-chat', provider: 'siliconflow', cost: 'low' },
-      { model: 'gpt-4o-mini', provider: 'geekai', cost: 'low' },
-      { model: 'glm-4-flash', provider: 'geekai', cost: 'free' }
+      { model: 'deepseek-flash', provider: 'geekai', cost: 'low', supportsVision: true },
+      { model: 'doubao-seed-2.1-lite', provider: 'geekai', cost: 'low', supportsVision: true },
+      { model: 'mimo-v2.6-pro', provider: 'geekai', cost: 'mid' },
+      { model: 'gpt-6-luna', provider: 'geekai', cost: 'high', supportsVision: true },
+      { model: 'claude-sonnet-5-5', provider: 'geekai', cost: 'high', supportsVision: true }
     ]),
     image_provider: 'geekai',
-    image_model: 'gpt-image-2',
+    image_model: 'gpt-image-2.5-flare',
     image_quality: 'medium',
     image_fallback_chain: JSON.stringify([
-      { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
-      { model: 'kling-image-v3-omni', quality: 'standard', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
-      { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
-      { model: 'qwen-image-3.0', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 3 }
+      { model: 'gpt-image-2.5-flare', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+      { model: 'doubao-seedream-5.0-flash', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+      { model: 'nano-banana-2-lite', quality: 'standard', provider: 'geekai', cost: 'low', supportsImageRef: true, maxRefImages: 10 }
     ]),
     default_image_size: '1024x576',
     export_include_images: 'true',
@@ -747,13 +747,14 @@ function initDefaultSettings(callback) {
     video_target_bitrate_480p: '1000',
     image_compress_threshold_kb: '300',
     model_prices: JSON.stringify({
-      'deepseek-chat': { input: 0.001, output: 0.002 },
-      'gpt-4o-mini': { input: 0.01, output: 0.03 },
-      'glm-4-flash': { input: 0, output: 0 },
-      'gpt-image-2': { per_image_medium: 0.08 },
-      'kling-image-v3-omni': { per_image_standard: 0.16 },
-      'nano-banana-2': { per_image_standard: 0.05 },
-      'qwen-image-3.0': { per_image_standard: 0.18 }
+      'deepseek-flash': { input: 0.001, output: 0.002 },
+      'doubao-seed-2.1-lite': { input: 0.0004, output: 0.00135 },
+      'mimo-v2.6-pro': { input: 0.0024, output: 0.0048 },
+      'gpt-6-luna': { input: 0.000075, output: 0.000375 },
+      'claude-sonnet-5-5': { input: 0.0015, output: 0.0075 },
+      'gpt-image-2.5-flare': { per_image_medium: 0.077 },
+      'doubao-seedream-5.0-flash': { per_image_standard: 0.096 },
+      'nano-banana-2-lite': { per_image_standard: 0.125 }
     })
   };
 
@@ -793,19 +794,19 @@ function initDefaultSettings(callback) {
 function migrateOldModelConfigs(callback) {
   const OLD_MODELS = ['z-image-turbo', 'cogview-4'];
   const NEW_IMAGE_CHAIN = JSON.stringify([
-    { model: 'gpt-image-2', quality: 'medium', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
-    { model: 'kling-image-v3-omni', quality: 'standard', provider: 'geekai', cost: 'mid_high', supportsImageRef: true, maxRefImages: 10 },
-    { model: 'nano-banana-2', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
-    { model: 'qwen-image-3.0', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 3 }
+    { model: 'gpt-image-2.5-flare', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+    { model: 'doubao-seedream-5.0-flash', quality: 'standard', provider: 'geekai', cost: 'mid', supportsImageRef: true, maxRefImages: 10 },
+    { model: 'nano-banana-2-lite', quality: 'standard', provider: 'geekai', cost: 'low', supportsImageRef: true, maxRefImages: 10 }
   ]);
   const NEW_MODEL_PRICES = JSON.stringify({
-    'deepseek-chat': { input: 0.001, output: 0.002 },
-    'gpt-4o-mini': { input: 0.01, output: 0.03 },
-    'glm-4-flash': { input: 0, output: 0 },
-    'gpt-image-2': { per_image_medium: 0.08 },
-    'kling-image-v3-omni': { per_image_standard: 0.16 },
-    'nano-banana-2': { per_image_standard: 0.05 },
-    'qwen-image-3.0': { per_image_standard: 0.18 }
+    'deepseek-flash': { input: 0.001, output: 0.002 },
+    'doubao-seed-2.1-lite': { input: 0.0004, output: 0.00135 },
+    'mimo-v2.6-pro': { input: 0.0024, output: 0.0048 },
+    'gpt-6-luna': { input: 0.000075, output: 0.000375 },
+    'claude-sonnet-5-5': { input: 0.0015, output: 0.0075 },
+    'gpt-image-2.5-flare': { per_image_medium: 0.077 },
+    'doubao-seedream-5.0-flash': { per_image_standard: 0.096 },
+    'nano-banana-2-lite': { per_image_standard: 0.125 }
   });
 
   // 检查 image_fallback_chain 是否包含旧模型
@@ -1272,8 +1273,8 @@ const items = {
     );
     const shots = await storyboardAsync.all(
       `SELECT id, title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
-              narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
-              props, costume, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImageTaskId, aiImagePrompt,
+              narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle,
+              props, costume, notes, deleted, deletedAt, createdAt, updatedAt, mergedFrom, aiImagePrompt,
               focalLength, lighting, estimatedDuration, aiStylePrompt
        FROM videos WHERE projectId = ? AND deleted = 0
        ORDER BY sortOrder IS NULL, sortOrder ASC, id ASC`,
@@ -1342,18 +1343,18 @@ const items = {
         const newSceneId = sh.sceneId != null ? (sceneIdMap[sh.sceneId] ?? null) : null;
         const result = await storyboardAsync.run(
           `INSERT INTO videos (title, filename, url, status, size, duration, sortOrder, projectId, sceneId, type, coverUrl, reference,
-            narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle, durationSeconds,
-            props, costume, notes, mergedFrom, aiImageTaskId, aiImagePrompt, focalLength, lighting, estimatedDuration,
+            narration, sceneContent, actors, location, shotNo, shotType, cameraMovement, shotAngle,
+            props, costume, notes, mergedFrom, aiImagePrompt, focalLength, lighting, estimatedDuration,
             aiStylePrompt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sh.title, sh.filename, sh.url, sh.status || 'pending', sh.size || 0, sh.duration || 0,
             sh.sortOrder ?? null, newProjectId, newSceneId, sh.type || 'video',
             sh.coverUrl || null, sh.reference || 0,
             sh.narration || null, sh.sceneContent || null, sh.actors || null, sh.location || null,
             sh.shotNo || null, sh.shotType || null, sh.cameraMovement || null, sh.shotAngle || null,
-            sh.durationSeconds || null, sh.props || null, sh.costume || null, sh.notes || null,
-            sh.mergedFrom || null, sh.aiImageTaskId || null, sh.aiImagePrompt || null,
+            sh.props || null, sh.costume || null, sh.notes || null,
+            sh.mergedFrom || null, sh.aiImagePrompt || null,
             sh.focalLength || null, sh.lighting || null, sh.estimatedDuration || null,
             sh.aiStylePrompt || null
           ]
@@ -1824,13 +1825,6 @@ const settings = {
         'INSERT INTO settings (key, value) VALUES (?, ?)',
         [key, valStr]
       );
-    }
-    return true;
-  },
-
-  bulkSet: async (settings) => {
-    for (const key of Object.keys(settings)) {
-      await settings.set(key, settings[key]);
     }
     return true;
   }

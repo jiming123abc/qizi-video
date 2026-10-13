@@ -328,9 +328,14 @@ const upload = multer({
 const ALLOWED_DOC_MIMES = [
   'text/plain',                                                                                  // .txt
   'text/markdown',                                                                               // .md
+  'text/csv',                                                                                    // .csv
   'application/pdf',                                                                             // .pdf
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'                      // .docx
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',                     // .docx
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',                           // .xlsx
+  'application/vnd.ms-excel'                                                                     // .xls（Windows 下 .csv 也可能上报为该类型）
 ];
+// 扩展名兜底：部分浏览器/系统对 .csv/.xls 等上报的 mimetype 不标准
+const ALLOWED_DOC_EXTS = ['.txt', '.md', '.docx', '.pdf', '.xlsx', '.xlsm', '.xls', '.csv'];
 const scriptStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, path.join(uploadDir, 'docs')),
   filename: (req, file, cb) => {
@@ -341,35 +346,197 @@ const scriptStorage = multer.diskStorage({
 const scriptUpload = multer({
   storage: scriptStorage,
   fileFilter: (req, file, cb) => {
-    if (ALLOWED_DOC_MIMES.includes(file.mimetype)) cb(null, true);
-    else cb(new Error('不支持的文档格式，仅支持 .txt/.md/.docx/.pdf'), false);
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (ALLOWED_DOC_MIMES.includes(file.mimetype) || ALLOWED_DOC_EXTS.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('不支持的文档格式，仅支持 .txt/.md/.docx/.pdf/.xlsx/.xls/.csv'), false);
+    }
   },
   limits: { fileSize: 10 * 1024 * 1024 }  // 文档 10MB 限制
 });
 
 /**
  * P5-1：从上传的文档中提取纯文本
- * 支持 .txt/.md（直接读取）、.docx（mammoth）、.pdf（pdf-parse，仅文本型）
+ * 支持 .txt/.md/.csv（直接读取）、.docx（mammoth）、.pdf（pdf-parse，仅文本型）、
+ * .xlsx/.xlsm（exceljs，逐工作表按行提取为表格文本）
+ * 注意：旧版 .xls（BIFF 二进制）exceljs 不支持，提示用户另存为 .xlsx
  */
-async function extractDocText(filePath, mimetype) {
-  if (mimetype === 'text/plain' || mimetype === 'text/markdown') {
-    return fs.readFileSync(filePath, 'utf-8');
+async function extractDocText(filePath, mimetype, originalname) {
+  // 以扩展名为准（Windows 下 .csv 常被上报为 application/vnd.ms-excel），缺扩展名时回退 mimetype
+  const ext = path.extname(originalname || filePath).toLowerCase();
+  const isPlainText = ext === '.txt' || ext === '.md'
+    || (!ext && (mimetype === 'text/plain' || mimetype === 'text/markdown'));
+  const isCsv = ext === '.csv' || (!ext && (mimetype === 'text/csv' || mimetype === 'application/vnd.ms-excel' && !ext));
+  const isDocx = ext === '.docx'
+    || (!ext && mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  const isPdf = ext === '.pdf' || (!ext && mimetype === 'application/pdf');
+  const isXlsx = ext === '.xlsx' || ext === '.xlsm'
+    || (!ext && mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+  if (isPlainText || (isCsv && ext === '.csv')) {
+    return fs.readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '');
   }
-  if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+  if (isDocx) {
     const mammoth = require('mammoth');
-    const result = await mammoth.extractRawText({ path: filePath });
+    let result;
+    try {
+      result = await mammoth.extractRawText({ path: filePath });
+    } catch (e) {
+      console.warn(`[doc-parse] docx 解析失败 ${originalname}:`, e.message);
+      throw new Error('Word 文档解析失败，文件可能已损坏或受密码保护，请另存为 .docx 或导出为 PDF/文本后重试');
+    }
+    if (!result.value || !result.value.trim()) {
+      throw new Error('Word 文档中未提取到文本，请确认文档包含可复制的文字（非纯图片截图）');
+    }
     return result.value;
   }
-  if (mimetype === 'application/pdf') {
+  if (isPdf) {
     const pdfParse = require('pdf-parse');
     const dataBuffer = fs.readFileSync(filePath);
-    const data = await pdfParse(dataBuffer);
+    let data;
+    try {
+      data = await pdfParse(dataBuffer);
+    } catch (e) {
+      // pdf-parse(pdfjs) 对部分加密/特殊结构 PDF 会抛出底层错误（如 Cannot read properties of null）
+      console.warn(`[doc-parse] pdf 解析失败 ${originalname}:`, e.message);
+      throw new Error('PDF 解析失败：文件可能已加密、损坏或为扫描图片版。请另存为未加密的文本型 PDF，或导出为 Word/.txt 后重试');
+    }
     if (!data.text || !data.text.trim()) {
       throw new Error('PDF 无可提取文本，请上传文本型 PDF（非扫描件）');
     }
     return data.text;
   }
-  throw new Error('不支持的文档格式');
+  if (isXlsx) {
+    try {
+      return await extractExcelText(filePath);
+    } catch (e) {
+      console.warn(`[doc-parse] xlsx 解析失败 ${originalname}:`, e.message);
+      throw new Error('Excel 文件解析失败，文件可能已损坏或受密码保护，请检查文件后重试');
+    }
+  }
+  if (ext === '.xls') {
+    throw new Error('暂不支持旧版 .xls 格式，请在 Excel 中"另存为 .xlsx"后重新上传');
+  }
+  if (isCsv) {
+    // 无扩展名但 mimetype 指向 CSV 的兜底
+    return fs.readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '');
+  }
+  throw new Error('不支持的文档格式，支持 .txt/.md/.docx/.pdf/.xlsx/.xls/.csv');
+}
+
+/**
+ * 安全读取 Excel 单元格文本
+ * 不能直接用 cell.text：exceljs 对错误值单元格（#REF!/#N/A 等）、空共享字符串、
+ * 无缓存结果的公式等"异常单元格"，内部 toString() 会在 null 上崩溃
+ * （Cannot read properties of null (reading 'toString')），分镜表里一个坏格子会导致整份文件解析失败
+ */
+function excelCellToText(cell, depth = 0) {
+  try {
+    const v = cell && cell.value;
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (v instanceof Date) {
+      const p = (n) => String(n).padStart(2, '0');
+      const datePart = `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;
+      const timePart = `${p(v.getHours())}:${p(v.getMinutes())}:${p(v.getSeconds())}`;
+      return v.getHours() === 0 && v.getMinutes() === 0 && v.getSeconds() === 0 ? datePart : `${datePart} ${timePart}`;
+    }
+    if (typeof v === 'object' && depth < 3) {
+      // 富文本：{ richText: [{ text: '...' }, ...] }
+      if (Array.isArray(v.richText)) {
+        return v.richText.map(r => (r && r.text) || '').join('');
+      }
+      // 超链接：{ text, hyperlink }（text 可能为 null，需兜底）
+      if (v.hyperlink !== undefined && (v.text !== undefined || v.text !== null)) {
+        return v.text == null ? '' : String(v.text);
+      }
+      // 公式：{ formula, result }，优先取缓存结果，没有则留空（避免取到公式表达式污染分镜文本）
+      if ('formula' in v || 'sharedFormula' in v || 'result' in v) {
+        if (v.result === null || v.result === undefined) return '';
+        return excelCellToText({ value: v.result }, depth + 1);
+      }
+      // Excel 错误值：{ error: '#REF!' / '#N/A' / '#DIV/0!' ... }
+      if (v.error !== undefined && v.error !== null) return String(v.error);
+      // 文本框/其他对象类型的兜底
+      if (typeof v.text === 'string') return v.text;
+    }
+    return '';
+  } catch (e) {
+    // 任何意料之外的单元格结构都降级为空文本，而不是让整份 Excel 解析失败
+    return '';
+  }
+}
+
+/**
+ * 从 Excel（.xlsx/.xlsm）提取表格文本：每个工作表一段，表头/数据逐行用 " | " 连接，
+ * 保留行列结构，便于后续 AI 识别镜号、景别、画面内容、台词等分镜列
+ */
+async function extractExcelText(filePath) {
+  const ExcelJS = require('exceljs');
+
+  const readWorkbook = async () => {
+    const workbook = new ExcelJS.Workbook();
+    try {
+      // 正常路径：绝大多数文件直接读取即可
+      await workbook.xlsx.readFile(filePath);
+      return workbook;
+    } catch (primaryErr) {
+      // 兜底路径：对空主题部件、越界共享串索引等"小毛病"文件清洗后重读
+      console.warn('[doc-parse] exceljs 直接读取失败，尝试清洗修复后重读:', primaryErr.message);
+      let cleaned;
+      try {
+        const { readSanitizedXlsx } = require('./xlsxSafe');
+        cleaned = await readSanitizedXlsx(filePath);
+      } catch (sanitizeErr) {
+        console.warn('[doc-parse] xlsx 清洗失败:', sanitizeErr.message);
+        throw primaryErr;
+      }
+      const fallbackWorkbook = new ExcelJS.Workbook();
+      await fallbackWorkbook.xlsx.load(cleaned);
+      console.warn('[doc-parse] xlsx 清洗修复后读取成功');
+      return fallbackWorkbook;
+    }
+  };
+
+  const workbook = await readWorkbook();
+
+  const sections = [];
+  workbook.eachSheet((worksheet) => {
+    const rows = [];
+    worksheet.eachRow({ includeEmpty: false }, (row) => {
+      const values = [];
+      let rowHasValue = false;
+      // 用实际单元格数量而非 cellCount（后者会把仅有样式的空单元格也算进来）
+      const cellCount = (row.cellCount || 0);
+      for (let c = 1; c <= cellCount; c++) {
+        let v = '';
+        try {
+          // 单元格内换行拍平为空格，保证"一行镜头数据 = 一行文本"
+          v = excelCellToText(row.getCell(c)).replace(/\r?\n/g, ' ').trim();
+        } catch (e) {
+          v = '';
+        }
+        if (v) rowHasValue = true;
+        values.push(v);
+      }
+      if (rowHasValue) rows.push(values);
+    });
+    if (rows.length === 0) return;
+    // 去掉尾部空列并按最大列数对齐
+    const colCount = rows.reduce((max, r) => Math.max(max, r.length), 0);
+    const lines = rows.map(r => {
+      while (r.length < colCount) r.push('');
+      return r.join(' | ').replace(/\s+\|\s*$/g, '');
+    });
+    sections.push(`【工作表：${worksheet.name}】\n${lines.join('\n')}`);
+  });
+
+  const text = sections.join('\n\n').trim();
+  if (!text) {
+    throw new Error('Excel 文件内容为空，请检查文件后重新上传');
+  }
+  return text;
 }
 
 let ossClient = null;
@@ -1298,7 +1465,22 @@ app.get('/api/ai/task/:taskId/stream', (req, res) => {
 // - 改用 scriptUpload 处理文档（.txt/.md/.docx/.pdf），修复 multer fileFilter 拒绝文档文件的 bug
 // - 移除 mode 参数（改为 AI 自动判断）
 // - 新增 stage 参数：auto / intent / intent_confirmed / scene_confirmed / storyboard / shooting
-app.post('/api/ai/parse-script', scriptUpload.array('file', 1), async (req, res) => {
+// multer 错误（格式被 fileFilter 拒绝 / 超过 10MB 限制）默认会走 Express HTML 错误页，
+// 前端 res.json() 只能得到含糊的"网络错误"；包一层转为 JSON 提示
+const scriptUploadMiddleware = (req, res, next) => {
+  scriptUpload.array('file', 1)(req, res, (err) => {
+    if (err) {
+      try { if (req.files && req.files[0] && req.files[0].path) fs.unlinkSync(req.files[0].path); } catch (e) {}
+      return res.status(400).json({
+        success: false,
+        message: err.message || '文件上传失败，请检查文件格式（支持 Word/PDF/Excel/文本，最大 10MB）'
+      });
+    }
+    next();
+  });
+};
+
+app.post('/api/ai/parse-script', scriptUploadMiddleware, async (req, res) => {
   try {
     const { projectId, sceneId, provider, model, stage = 'auto' } = req.body;
     const file = req.files && req.files[0];
@@ -1306,13 +1488,27 @@ app.post('/api/ai/parse-script', scriptUpload.array('file', 1), async (req, res)
     let scriptContent = '';
 
     if (file) {
-      // 提取文档文本（.txt/.md/.docx/.pdf）
+      // 提取文档文本（.txt/.md/.docx/.pdf/.xlsx/.csv）
+      let docParseFailed = false;
       try {
-        scriptContent = await extractDocText(file.path, file.mimetype);
+        scriptContent = await extractDocText(file.path, file.mimetype, file.originalname);
       } catch (e) {
+        docParseFailed = true;
+        console.warn(`[doc-parse] 文档提取失败 ${file.originalname} (${file.mimetype}, ${file.size} bytes):`, e.message);
         return res.status(400).json({ success: false, message: e.message });
       } finally {
-        try { fs.unlinkSync(file.path); } catch (e) {}
+        // 解析失败的文件保留到 docs-failed 便于排查（文件名做安全清洗）；成功则删除临时文件
+        try {
+          if (docParseFailed) {
+            const failedDir = path.join(uploadDir, 'docs-failed');
+            fs.mkdirSync(failedDir, { recursive: true });
+            const safeName = path.basename(file.originalname || 'unknown').replace(/[\\/:*?"<>|]/g, '_');
+            const keptPath = path.join(failedDir, `${Date.now()}-${safeName}`);
+            fs.copyFileSync(file.path, keptPath);
+            console.warn(`[doc-parse] 失败文件已保留: ${keptPath}`);
+          }
+          fs.unlinkSync(file.path);
+        } catch (e) {}
       }
     } else if (req.body.text) {
       // 制片意图（stage='intent'）或确认后的脚本文本（intent_confirmed/scene_confirmed/storyboard/shooting）
@@ -1335,7 +1531,7 @@ app.post('/api/ai/parse-script', scriptUpload.array('file', 1), async (req, res)
       projectId: projectId ? parseInt(projectId) : null,
       sceneId: sceneId !== undefined && sceneId !== null ? parseInt(sceneId) : null,
       provider: provider || 'geekai',
-      model: model || 'deepseek-chat'
+      model: model || 'deepseek-flash'
     });
 
     res.json({ success: true, taskId: task.id });
@@ -1674,11 +1870,12 @@ app.post('/api/ai/split-video', async (req, res) => {
   try {
     const { videoUrl, projectId, sceneId, mode, splitPoints, videoDuration, provider, model, sensitivity } = req.body;
 
-    console.log(`[AI] 收到视频分割请求: mode=${mode}, videoUrl=${videoUrl.substring(0, 100)}...`);
-
-    if (!videoUrl) {
+    // 参数校验必须在使用 videoUrl 之前，否则缺参时 substring 抛 TypeError 返回 500
+    if (!videoUrl || typeof videoUrl !== 'string') {
       return res.status(400).json({ success: false, message: '缺少 videoUrl' });
     }
+
+    console.log(`[AI] 收到视频分割请求: mode=${mode}, videoUrl=${videoUrl.substring(0, 100)}...`);
     
     // 创建 AI 任务
     const task = await db.aiTasks.create({
@@ -1889,9 +2086,9 @@ app.post('/api/ai/analyze-shot', async (req, res) => {
 
     const settings = await db.settings.getAll();
 
-    // 默认值：从 settings 读取 AI 分析模型配置
+    // 默认值：从 settings 读取 AI 分析模型配置（画面分析需要视觉模型）
     const finalProvider = provider || settings.analyze_llm_provider || 'geekai';
-    const finalModel = model || settings.analyze_llm_model || 'gpt-4o-mini';
+    const finalModel = model || settings.analyze_llm_model || 'doubao-seed-2.1-lite';
 
     // 创建任务
     const task = await db.aiTasks.create({
@@ -2034,8 +2231,11 @@ async function processScriptParse(taskId, scriptContent, stage, params) {
     const autoAssignScene = params.sceneId === undefined || params.sceneId === null;
     const llmOptions = {
       provider: params.provider || 'geekai',
-      model: params.model || 'deepseek-chat'
+      model: params.model || 'deepseek-flash'
     };
+
+    // 标记任务已进入处理（LLM 调用期间避免前端一直停在 0% 看似卡住）
+    await db.aiTasks.update(taskId, { status: 'processing', progress: 10 });
 
     if (stage === 'auto') {
       // 阶段0：AI 判断文档类型
@@ -2138,7 +2338,13 @@ async function processScriptParse(taskId, scriptContent, stage, params) {
 async function processFinalShots(taskId, scriptContent, mode, settings, params, autoAssignScene, llmOptions) {
   const result = await aiClient.generateFinalShots(scriptContent, mode, settings, taskId, {
     autoAssignScene,
-    ...llmOptions
+    ...llmOptions,
+    // 分镜分批生成期间持续推进进度条（大纲 → 资产 → 各批次），避免多分镜时前端看似卡死
+    onProgress: async (p) => {
+      try {
+        await db.aiTasks.update(taskId, { status: 'processing', progress: p.progress });
+      } catch (e) { /* 进度更新失败不影响主流程 */ }
+    }
   });
 
   // 解析返回的 JSON
@@ -3469,7 +3675,7 @@ app.post('/api/aliyun/transcode-cleanup', async (req, res) => {
       try {
         const placeholders = shotIds.map(() => '?').join(',');
         await db.storyboardAsync.run(
-          `DELETE FROM shots WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
+          `DELETE FROM videos WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
           shotIds
         );
       } catch (e) { console.error('[MPS] 清理孤立 shots 失败:', e.message); }
@@ -3940,7 +4146,7 @@ app.get('/api/projects/:id/export', async (req, res) => {
     if (fmt === 'pdf') {
       const PDFDocument = require('pdfkit');
       const doc = new PDFDocument({ size: 'A4', margin: 50 });
-      
+
       const chunks = [];
       doc.on('data', chunk => chunks.push(chunk));
       doc.on('end', () => {
@@ -3950,13 +4156,54 @@ app.get('/api/projects/:id/export', async (req, res) => {
         res.send(buffer);
       });
 
-      doc.fontSize(20).text(project.name, { align: 'center' });
+      // 中文字体解析：优先应用自带字体（可将 OFL 字体放入 server/fonts/），
+      // 其次使用系统已安装字体（不随程序分发，规避字体版权问题）；
+      // 都不可用时退回 Helvetica（中文将无法正常显示，仅导出英文内容）
+      const findCjkFont = () => {
+        // 注意：只列 .ttf/.otf 单字体文件；实测当前 pdfkit 版本不支持 .ttc 字体集
+        // （微软雅黑/PingFang 均为 ttc，注册后在生成子集时会抛
+        // "this.font.createSubset is not a function"，导致整个导出失败）
+        const candidates = [
+          path.join(__dirname, 'fonts', 'NotoSansSC-Regular.ttf'),
+          path.join(__dirname, 'fonts', 'NotoSansSC-Regular.otf'),
+          path.join(__dirname, 'fonts', 'cjk.ttf'),
+          'C:\\Windows\\Fonts\\simhei.ttf',
+          'C:\\Windows\\Fonts\\Noto Sans SC (TrueType).otf',
+          'C:\\Windows\\Fonts\\NotoSansSC-VF.ttf'
+        ];
+        for (const f of candidates) {
+          try { if (fs.existsSync(f)) return f; } catch (e) {}
+        }
+        return null;
+      };
+      let bodyFont = 'Helvetica';
+      let boldFont = 'Helvetica-Bold';
+      const cjkFontPath = findCjkFont();
+      if (cjkFontPath) {
+        try {
+          doc.registerFont('CJK', cjkFontPath);
+          // 触发一次实际加载，注册失败时立刻回退而不是让整个导出崩掉
+          doc.font('CJK');
+          bodyFont = 'CJK';
+          boldFont = 'CJK';
+          console.log('[app] PDF 导出使用中文字体:', cjkFontPath);
+        } catch (fontErr) {
+          console.warn('[app] 中文字体加载失败，PDF 将退回 Helvetica:', fontErr.message);
+          bodyFont = 'Helvetica';
+          boldFont = 'Helvetica-Bold';
+        }
+      } else {
+        console.warn('[app] 未找到中文字体，PDF 中的中文可能无法显示。可将 OFL 中文字体放入 server/fonts/');
+      }
+
+      doc.font(bodyFont).fontSize(20).text(project.name, { align: 'center' });
       doc.moveDown();
       doc.fontSize(10).fillColor('#666').text(`导出日期：${new Date().toLocaleDateString('zh-CN')}`, { align: 'center' });
       doc.text(`共 ${shots.length} 个分镜`, { align: 'center' });
       doc.moveDown(2);
 
-      for (const sceneKey of sceneIds) {
+      for (let sceneIdx = 0; sceneIdx < sceneIds.length; sceneIdx++) {
+        const sceneKey = sceneIds[sceneIdx];
         const sceneShots = shotsByScene[sceneKey];
         const sceneName = sceneKey === 'default' ? '未分类' : (sceneNameMap[sceneKey] || `第 ${sceneKey} 场`);
         
@@ -3987,11 +4234,11 @@ app.get('/api/projects/:id/export', async (req, res) => {
             { label: '备注', value: shot.notes || '' }
           ];
 
-          doc.fontSize(10).fillColor('#333');
+          doc.font(bodyFont).fontSize(10).fillColor('#333');
           for (const detail of details) {
             if (detail.value) {
-              doc.font('Helvetica-Bold').text(`${detail.label}：`, { continued: true });
-              doc.font('Helvetica').text(detail.value);
+              doc.font(boldFont).text(`${detail.label}：`, { continued: true });
+              doc.font(bodyFont).text(detail.value);
             }
           }
 
@@ -4005,7 +4252,10 @@ app.get('/api/projects/:id/export', async (req, res) => {
           doc.moveDown();
         }
 
-        doc.addPage();
+        // 最后一场后不再换页，避免导出的 PDF 尾部多出一页空白页
+        if (sceneIdx < sceneIds.length - 1) {
+          doc.addPage();
+        }
       }
 
       doc.end();
@@ -5219,9 +5469,11 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
         return res.status(500).json({ error: 'OSS 上传失败', ossError: true });
       }
     } else {
+      // 本地存储：multer 已将文件落盘为 req.file.filename（public/uploads/images/），
+      // URL 必须指向真实文件名与子目录，否则静态资源 404
       if (compressed) fs.writeFileSync(filePath, fileBuffer);
-      fileUrl = `/uploads/${fileName}`;
-      console.log(`[app] 图片本地上传: ${fileName}`);
+      fileUrl = `/uploads/images/${req.file.filename}`;
+      console.log(`[app] 图片本地上传: ${req.file.filename}`);
     }
     let item = null;
     try {
@@ -5619,6 +5871,9 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
     res.json({ taskId, status: 'queued' });
 
     (async () => {
+      // 提升到 try 外：catch 失败兜底清理时需要访问本地上传路径
+      let uploadPath = filePath;
+      let isTempFile = false;
       try {
         const task = videoTasks.get(taskId);
         if (!task) return;
@@ -5626,8 +5881,6 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
         const reference = task.usage === 'project-reference' ? 1 : 0;
         let fileUrl = '';
         let compressed = false;
-        let uploadPath = filePath;
-        let isTempFile = false;
 
         if (task.shouldCompress) {
           try {
@@ -5705,7 +5958,29 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
             throw new Error('OSS 上传失败');
           }
         } else {
-          fileUrl = `/uploads/${task.fileName}`;
+          // 本地存储：最终文件必须落在 public/uploads/videos/ 且 URL 使用 multer 落盘名
+          if (compressed && isTempFile) {
+            // 压缩产物在 os.tmpdir()，移入 uploads/videos（跨卷时回退为复制+删除）
+            const localName = `${path.parse(req.file.filename).name}-compressed.mp4`;
+            const finalLocalPath = path.join(uploadDir, 'videos', localName);
+            try {
+              fs.renameSync(uploadPath, finalLocalPath);
+            } catch (renameErr) {
+              if (renameErr.code === 'EXDEV') {
+                fs.copyFileSync(uploadPath, finalLocalPath);
+                fs.unlinkSync(uploadPath);
+              } else {
+                throw renameErr;
+              }
+            }
+            isTempFile = false;
+            uploadPath = finalLocalPath;  // 记录最终落盘位置，供 catch 失败兜底清理
+            try { if (filePath !== uploadPath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (e) {}
+            fileUrl = `/uploads/videos/${localName}`;
+          } else {
+            // 未压缩：multer 原始落盘文件即最终文件
+            fileUrl = `/uploads/videos/${req.file.filename}`;
+          }
           task.ossKey = '';
         }
 
@@ -5817,6 +6092,9 @@ app.post('/api/upload/video', upload.single('file'), async (req, res) => {
           videoTasks.set(taskId, task);
           scheduleTaskCleanup(videoTasks, taskId);  // P4-7：终态后 10 分钟清理
         }
+        // 失败兜底：清理本地残留文件（multer 落盘原件 / 压缩临时文件 / 本地模式最终文件），避免孤儿文件
+        try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (e) {}
+        try { if (uploadPath && uploadPath !== filePath && fs.existsSync(uploadPath)) fs.unlinkSync(uploadPath); } catch (e) {}
         console.error('[app] 视频上传处理失败:', err.message);
       }
     })();
@@ -5871,7 +6149,7 @@ app.post('/api/upload/cancel/:taskId', async (req, res) => {
         if (shotIds.length > 0) {
           const placeholders = shotIds.map(() => '?').join(',');
           await db.storyboardAsync.run(
-            `DELETE FROM shots WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
+            `DELETE FROM videos WHERE id IN (${placeholders}) AND id NOT IN (SELECT DISTINCT shotId FROM shot_media)`,
             shotIds
           );
         }
