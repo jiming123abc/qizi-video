@@ -1889,7 +1889,6 @@ export function StoryboardPage({ projectId, onBack }: StoryboardPageProps) {
         onClose={handleCloseUploadDialog}
         uploadingFiles={uploadingFiles}
         onUploadFiles={handleUploadFiles}
-        onCancelUpload={cancelUpload}
         pendingCompressionVideo={pendingCompressionVideo}
         pendingCompressionDecision={pendingCompressionDecision}
         pendingCompressionFiles={pendingCompressionFiles}

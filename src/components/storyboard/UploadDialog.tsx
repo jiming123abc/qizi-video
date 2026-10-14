@@ -18,7 +18,6 @@ interface UploadDialogProps {
   onClose: () => void;
   uploadingFiles: UploadingFile[];
   onUploadFiles: (files: File[]) => void;
-  onCancelUpload: () => void;
   pendingCompressionVideo: File | null;
   pendingCompressionDecision: UploadDecision | null;
   pendingCompressionFiles?: FileCompressionInfo[];
@@ -34,7 +33,6 @@ export function UploadDialog({
   onClose,
   uploadingFiles,
   onUploadFiles,
-  onCancelUpload,
   pendingCompressionVideo,
   pendingCompressionDecision,
   pendingCompressionFiles = [],
@@ -83,10 +81,6 @@ export function UploadDialog({
       }
       e.target.value = '';
     }
-  };
-
-  const handleClearAndClose = () => {
-    onCancelUpload();
   };
 
   return (
@@ -178,9 +172,9 @@ export function UploadDialog({
               </div>
               <div className="text-center pt-4 shrink-0">
                 <button
-                  onClick={handleClearAndClose}
+                  onClick={handleCloseClick}
                   className="px-4 py-2 rounded-full border border-white/15 text-xs text-slate-300 hover:bg-white/10 transition"
-                >{uploadingFiles.every(f => f.status !== 'uploading') ? '关闭' : '完成后可点击关闭'}</button>
+                >{uploadingFiles.every(f => f.status !== 'uploading') ? '关闭' : '后台继续上传'}</button>
               </div>
             </div>
           )}

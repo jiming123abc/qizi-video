@@ -5325,13 +5325,14 @@ app.post('/api/media/register', async (req, res) => {
 
     const reference = usage === 'project-reference' ? 1 : 0;
     const itemTitle = title || filename || '未命名';
+    // createShot 可能来自 JSON（1/0）或表单（'1'/'0'），统一归一化，避免字符串 '0' 被误判为真
+    const shouldCreateShot = createShot === true || createShot === 1 || createShot === '1' || createShot === 'true';
     let item = null;
 
     try {
-      if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
-        // 这些用途不创建 videos 记录，避免 ghost 记录阻止 OSS 清理
-        // 实际媒体记录由后续 API 调用创建
-      } else if (createShot) {
+      // 批量上传等场景会同时传 usage='shot-reference' 与 createShot=1，表示"上传素材并直接创建分镜"，
+      // 此分支必须优先于下方"shot-reference 仅传文件不建记录"的分支，否则文件上传成功但分镜不会被创建
+      if (shouldCreateShot && projectId && usage !== 'project-cover' && usage !== 'digital-asset') {
         const shot = await db.items.createShot({
           projectId: parseInt(projectId),
           sceneId: sceneId ? parseInt(sceneId) : null,
@@ -5351,6 +5352,9 @@ app.post('/api/media/register', async (req, res) => {
           source: reference ? 'reference' : 'upload'
         });
         item = { id: shot.id, shotId: shot.id, url, filename, isShot: true };
+      } else if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
+        // 这些用途不创建 videos 记录，避免 ghost 记录阻止 OSS 清理
+        // 实际媒体记录由后续 API 调用创建
       } else {
         item = await db.items.create({
           title: itemTitle,
@@ -5476,15 +5480,12 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
       console.log(`[app] 图片本地上传: ${req.file.filename}`);
     }
     let item = null;
+    // 表单字段 createShot 为字符串 '1'，统一归一化，避免字符串 '0' 被误判为真
+    const shouldCreateShot = createShot === true || createShot === 1 || createShot === '1' || createShot === 'true';
     try {
-      if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
-        // 这些用途只上传到 OSS，不创建 videos 记录，避免产生 ghost 记录
-        // ghost 记录会导致 isUrlReferenced 误判，阻止 OSS 文件清理
-        // 实际的媒体记录由后续 API 调用创建：
-        // - project-cover: PUT /api/projects/:id/cover
-        // - shot-reference: POST /api/shots/:id/media (shot_media)
-        // - digital-asset: POST /api/projects/:projectId/assets/:assetId/images (digital_asset_images)
-      } else if (createShot && projectId) {
+      // 批量上传等场景会同时传 usage='shot-reference' 与 createShot='1'，表示"上传素材并直接创建分镜"，
+      // 此分支必须优先于下方"shot-reference 仅传文件不建记录"的分支，否则图片上传成功但分镜不会被创建
+      if (shouldCreateShot && projectId && usage !== 'project-cover' && usage !== 'digital-asset') {
         const shot = await db.items.createShot({
           projectId: parseInt(projectId),
           sceneId: sceneId ? parseInt(sceneId) : null,
@@ -5504,6 +5505,13 @@ app.post('/api/upload/image', upload.single('file'), async (req, res) => {
           source: reference ? 'reference' : 'upload'
         });
         item = { id: shot.id, shotId: shot.id, url: fileUrl, filename: fileName, isShot: true };
+      } else if (usage === 'project-cover' || usage === 'shot-reference' || usage === 'digital-asset') {
+        // 这些用途只上传到 OSS，不创建 videos 记录，避免产生 ghost 记录
+        // ghost 记录会导致 isUrlReferenced 误判，阻止 OSS 文件清理
+        // 实际的媒体记录由后续 API 调用创建：
+        // - project-cover: PUT /api/projects/:id/cover
+        // - shot-reference（未要求 createShot 时）: POST /api/shots/:id/media (shot_media)
+        // - digital-asset: POST /api/projects/:projectId/assets/:assetId/images (digital_asset_images)
       } else {
         item = await db.items.create({
           title, filename: fileName, url: fileUrl,
